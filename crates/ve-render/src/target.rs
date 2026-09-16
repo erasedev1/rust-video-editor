@@ -21,11 +21,7 @@ impl RenderTarget {
         Self::with_format(device, size, FRAME_FORMAT)
     }
 
-    pub fn with_format(
-        device: &wgpu::Device,
-        size: Size,
-        format: wgpu::TextureFormat,
-    ) -> Self {
+    pub fn with_format(device: &wgpu::Device, size: Size, format: wgpu::TextureFormat) -> Self {
         let size = Size::new(size.width.max(1), size.height.max(1));
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("verge-render-target"),
@@ -84,11 +80,7 @@ impl RenderTarget {
     /// Blocking, and deliberately so: the callers are export, which has nothing
     /// else to do, and the tests, which need the pixels to assert on. The
     /// interactive path never reads back — it hands the view straight to the UI.
-    pub fn read_pixels(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> Vec<u8> {
+    pub fn read_pixels(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u8> {
         const ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let tight = self.size.width * 4;
         let padded = tight.div_ceil(ALIGN) * ALIGN;
@@ -100,10 +92,9 @@ impl RenderTarget {
             mapped_at_creation: false,
         });
 
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("verge-readback-encoder"),
-            });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("verge-readback-encoder"),
+        });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,

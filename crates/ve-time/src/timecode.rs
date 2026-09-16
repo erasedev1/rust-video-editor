@@ -95,7 +95,7 @@ impl Timecode {
         };
 
         // The last separator distinguishes drop-frame (`;` or `.`) from non-drop (`:`).
-        let drop_marker = body.rfind(|c| c == ';' || c == '.');
+        let drop_marker = body.rfind([';', '.']);
         let normalised = body.replace([';', '.'], ":");
         let parts: Vec<&str> = normalised.split(':').collect();
         if parts.len() != 4 {
@@ -104,7 +104,8 @@ impl Timecode {
 
         let mut nums = [0u32; 4];
         for (i, p) in parts.iter().enumerate() {
-            nums[i] = p.parse::<u32>().map_err(|_| TimeError::MalformedTimecode(s.to_string()))?;
+            nums[i] =
+                p.parse::<u32>().map_err(|_| TimeError::MalformedTimecode(s.to_string()))?;
         }
         let [hours, minutes, seconds, frames] = nums;
 

@@ -25,11 +25,7 @@ pub const IDENTITY: Matrix4 =
 /// Defaults — anchor `(0.5, 0.5)`, scale `1`, position `(0, 0)` — put the
 /// source at its natural size, centred, which is what dropping a clip onto a
 /// matching sequence should look like.
-pub fn layer_matrix(
-    source: Size,
-    composition: Size,
-    transform: &TransformState,
-) -> Matrix4 {
+pub fn layer_matrix(source: Size, composition: Size, transform: &TransformState) -> Matrix4 {
     let (sw, sh) = (source.width as f32, source.height as f32);
     let (cw, ch) = (composition.width.max(1) as f32, composition.height.max(1) as f32);
 
@@ -74,10 +70,7 @@ pub fn layer_matrix(
 
 /// Applies a matrix to a point on the unit quad, for tests and hit-testing.
 pub fn apply(m: &Matrix4, x: f32, y: f32) -> (f32, f32) {
-    (
-        m[0][0] * x + m[1][0] * y + m[3][0],
-        m[0][1] * x + m[1][1] * y + m[3][1],
-    )
+    (m[0][0] * x + m[1][0] * y + m[3][0], m[0][1] * x + m[1][1] * y + m[3][1])
 }
 
 /// The scale that fits `source` inside `target` without cropping or distorting.

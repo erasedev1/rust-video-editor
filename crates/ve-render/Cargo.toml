@@ -17,3 +17,10 @@ bytemuck = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 pollster = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "compositing"
+harness = false

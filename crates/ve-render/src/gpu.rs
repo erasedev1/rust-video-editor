@@ -79,11 +79,7 @@ impl GpuContext {
             .await
             .map_err(|e| RenderError::NoDevice(e.to_string()))?;
 
-        Ok(GpuContext {
-            device: Arc::new(device),
-            queue: Arc::new(queue),
-            adapter_info,
-        })
+        Ok(GpuContext { device: Arc::new(device), queue: Arc::new(queue), adapter_info })
     }
 
     /// Whether this is a software rasteriser, which the performance overlay

@@ -77,19 +77,14 @@ pub fn probe(path: impl AsRef<Path>) -> Result<MediaInfo, MediaError> {
         return Err(MediaError::NoDecodableStreams(path.to_path_buf()));
     }
 
-    Ok(MediaInfo {
-        duration,
-        video,
-        audio,
-        container: input.format().name().to_string(),
-    })
+    Ok(MediaInfo { duration, video, audio, container: input.format().name().to_string() })
 }
 
 fn probe_video(stream: &ffmpeg::format::stream::Stream) -> Result<VideoStreamInfo, MediaError> {
     let params = stream.parameters();
     let codec_id = params.id();
-    let ctx = ffmpeg::codec::context::Context::from_parameters(params)
-        .map_err(MediaError::Ffmpeg)?;
+    let ctx =
+        ffmpeg::codec::context::Context::from_parameters(params).map_err(MediaError::Ffmpeg)?;
     let decoder = ctx.decoder().video().map_err(MediaError::Ffmpeg)?;
 
     let time_base = stream.time_base();
@@ -131,8 +126,8 @@ fn probe_video(stream: &ffmpeg::format::stream::Stream) -> Result<VideoStreamInf
 fn probe_audio(stream: &ffmpeg::format::stream::Stream) -> Result<AudioStreamInfo, MediaError> {
     let params = stream.parameters();
     let codec_id = params.id();
-    let ctx = ffmpeg::codec::context::Context::from_parameters(params)
-        .map_err(MediaError::Ffmpeg)?;
+    let ctx =
+        ffmpeg::codec::context::Context::from_parameters(params).map_err(MediaError::Ffmpeg)?;
     let decoder = ctx.decoder().audio().map_err(MediaError::Ffmpeg)?;
 
     let duration = match stream.duration() {

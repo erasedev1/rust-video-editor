@@ -47,7 +47,10 @@ impl TimeRange {
 
     /// Whether the two ranges share any tick. Touching ranges do not overlap.
     pub fn intersects(self, other: TimeRange) -> bool {
-        self.start < other.end() && other.start < self.end() && !self.is_empty() && !other.is_empty()
+        self.start < other.end()
+            && other.start < self.end()
+            && !self.is_empty()
+            && !other.is_empty()
     }
 
     pub fn intersection(self, other: TimeRange) -> Option<TimeRange> {
@@ -79,7 +82,8 @@ impl TimeRange {
 
     /// Restricts the range to lie within `bounds`.
     pub fn clamped_to(self, bounds: TimeRange) -> TimeRange {
-        self.intersection(bounds).unwrap_or(TimeRange { start: self.start, duration: Ticks::ZERO })
+        self.intersection(bounds)
+            .unwrap_or(TimeRange { start: self.start, duration: Ticks::ZERO })
     }
 
     /// Range in frames `[first, last_exclusive)` at the given rate.

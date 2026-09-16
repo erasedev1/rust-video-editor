@@ -33,7 +33,11 @@ fn every_supported_video_rate_has_an_exact_frame_duration() {
         let rate = Rate::new(num, den).unwrap();
         let exact = rate.frame_duration_exact();
         assert!(exact.is_some(), "{rate:?} has no exact frame duration");
-        assert_eq!(exact.unwrap(), rate.frame_duration(), "{rate:?} rounded duration disagrees");
+        assert_eq!(
+            exact.unwrap(),
+            rate.frame_duration(),
+            "{rate:?} rounded duration disagrees"
+        );
     }
 }
 
@@ -206,7 +210,10 @@ fn timecode_parses_both_separators() {
     assert!(!tc.drop_frame);
 
     assert!(Timecode::parse("1:2:3", Rate::FPS_25).is_err());
-    assert!(Timecode::parse("00:00:00:25", Rate::FPS_25).is_err(), "frame 25 invalid at 25 fps");
+    assert!(
+        Timecode::parse("00:00:00:25", Rate::FPS_25).is_err(),
+        "frame 25 invalid at 25 fps"
+    );
     assert!(Timecode::parse("00:60:00:00", Rate::FPS_25).is_err());
 }
 

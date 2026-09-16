@@ -90,8 +90,11 @@ impl Command for RemoveTrack {
         let seq = project
             .sequence_mut(self.sequence)
             .ok_or(CommandError::SequenceNotFound(self.sequence))?;
-        let index = seq.track_index(self.track_id).ok_or(CommandError::TrackNotFound(self.track_id))?;
-        let track = seq.remove_track(self.track_id).ok_or(CommandError::TrackNotFound(self.track_id))?;
+        let index =
+            seq.track_index(self.track_id).ok_or(CommandError::TrackNotFound(self.track_id))?;
+        let track = seq
+            .remove_track(self.track_id)
+            .ok_or(CommandError::TrackNotFound(self.track_id))?;
         self.removed = Some((index, track));
         Ok(())
     }
@@ -245,9 +248,8 @@ impl Command for SetClipEnabled {
     }
 
     fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
-        let previous = self
-            .previous
-            .ok_or_else(|| CommandError::Rejected("never applied".into()))?;
+        let previous =
+            self.previous.ok_or_else(|| CommandError::Rejected("never applied".into()))?;
         let clip = project
             .sequence_mut(self.sequence)
             .ok_or(CommandError::SequenceNotFound(self.sequence))?
@@ -255,6 +257,90 @@ impl Command for SetClipEnabled {
             .map(|(_, c)| c)
             .ok_or(CommandError::ClipNotFound(self.clip))?;
         clip.enabled = previous;
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Changes a sequence's resolution, frame rate and audio format.
+///
+/// Used when the first clip lands on an empty sequence: adopting the media's
+/// own format means a 4K clip is not letterboxed into a 1080p frame, and a
+/// small clip is not stranded in the middle of a large one. It is a command
+/// rather than a silent mutation so that undoing the first edit restores the
+/// project exactly, including the format it had.
+#[derive(Debug)]
+pub struct SetSequenceFormat {
+    sequence: SequenceId,
+    resolution: ve_core::Size,
+    rate: ve_time::Rate,
+    sample_rate: Option<ve_time::SampleRate>,
+    previous: Option<(ve_core::Size, ve_time::Rate, ve_time::SampleRate)>,
+}
+
+impl SetSequenceFormat {
+    pub fn new(
+        sequence: SequenceId,
+        resolution: ve_core::Size,
+        rate: ve_time::Rate,
+        sample_rate: Option<ve_time::SampleRate>,
+    ) -> Self {
+        SetSequenceFormat { sequence, resolution, rate, sample_rate, previous: None }
+    }
+
+    /// Whether this would actually change anything, so a no-op never reaches
+    /// the undo stack.
+    pub fn would_change(&self, project: &Project) -> bool {
+        match project.sequence(self.sequence) {
+            Some(seq) => {
+                seq.settings.resolution != self.resolution
+                    || seq.settings.rate != self.rate
+                    || self.sample_rate.is_some_and(|sr| seq.settings.sample_rate != sr)
+            }
+            None => false,
+        }
+    }
+}
+
+impl Command for SetSequenceFormat {
+    fn name(&self) -> &str {
+        "Set Sequence Format"
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let seq = project
+            .sequence_mut(self.sequence)
+            .ok_or(CommandError::SequenceNotFound(self.sequence))?;
+        self.previous.get_or_insert((
+            seq.settings.resolution,
+            seq.settings.rate,
+            seq.settings.sample_rate,
+        ));
+        seq.settings.resolution = self.resolution;
+        seq.settings.rate = self.rate;
+        if let Some(sample_rate) = self.sample_rate {
+            seq.settings.sample_rate = sample_rate;
+        }
+        // The playhead was snapped to the old frame grid and may now sit
+        // between frames.
+        seq.playhead = seq.settings.rate.snap_round(seq.playhead);
+        Ok(())
+    }
+
+    fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let (resolution, rate, sample_rate) = self
+            .previous
+            .ok_or_else(|| CommandError::Rejected("format was never set".into()))?;
+        let seq = project
+            .sequence_mut(self.sequence)
+            .ok_or(CommandError::SequenceNotFound(self.sequence))?;
+        seq.settings.resolution = resolution;
+        seq.settings.rate = rate;
+        seq.settings.sample_rate = sample_rate;
+        seq.playhead = rate.snap_round(seq.playhead);
         Ok(())
     }
 

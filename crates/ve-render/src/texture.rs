@@ -199,19 +199,34 @@ impl TextureCache {
     }
 
     pub fn get(&mut self, key: &CacheKey) -> Option<&GpuTexture> {
+        self.touch(key).then(|| &self.entries.get(key).expect("just touched").0)
+    }
+
+    /// Marks an entry as recently used, reporting whether it was there.
+    ///
+    /// Separate from [`TextureCache::get`] because a render pass needs shared
+    /// references to *several* textures at once, which a single `&mut self`
+    /// lookup cannot hand out. Callers touch every key first, then read them
+    /// all through [`TextureCache::peek`].
+    pub fn touch(&mut self, key: &CacheKey) -> bool {
         self.clock += 1;
         let clock = self.clock;
         match self.entries.get_mut(key) {
-            Some((texture, last_used)) => {
+            Some((_, last_used)) => {
                 *last_used = clock;
                 self.hits += 1;
-                Some(&*texture)
+                true
             }
             None => {
                 self.misses += 1;
-                None
+                false
             }
         }
+    }
+
+    /// Reads an entry without disturbing LRU order.
+    pub fn peek(&self, key: &CacheKey) -> Option<&GpuTexture> {
+        self.entries.get(key).map(|(texture, _)| texture)
     }
 
     pub fn contains(&self, key: &CacheKey) -> bool {

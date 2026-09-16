@@ -231,7 +231,8 @@ impl VideoDecoder {
             // one packet can yield several frames.
             match self.decoder.receive_frame(&mut decoded) {
                 Ok(()) => return Ok(Some(self.convert(&decoded)?)),
-                Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {}
+                Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {
+                }
                 Err(ffmpeg::Error::Eof) => return Ok(None),
                 Err(e) => return Err(MediaError::Ffmpeg(e)),
             }
@@ -472,7 +473,8 @@ impl AudioDecoder {
                     self.position = Some(buffer.end_pts());
                     return Ok(Some(buffer));
                 }
-                Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {}
+                Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {
+                }
                 Err(ffmpeg::Error::Eof) => return Ok(None),
                 Err(e) => return Err(MediaError::Ffmpeg(e)),
             }
@@ -548,10 +550,7 @@ impl AudioDecoder {
     }
 
     /// Builds the resampler from the format of an actually-decoded frame.
-    fn ensure_resampler(
-        &mut self,
-        decoded: &ffmpeg::frame::Audio,
-    ) -> Result<(), MediaError> {
+    fn ensure_resampler(&mut self, decoded: &ffmpeg::frame::Audio) -> Result<(), MediaError> {
         if self.resampler.is_some() {
             return Ok(());
         }
@@ -576,10 +575,7 @@ impl AudioDecoder {
     fn resample(&mut self, decoded: &ffmpeg::frame::Audio) -> Result<AudioBuffer, MediaError> {
         self.ensure_resampler(decoded)?;
         let mut out = ffmpeg::frame::Audio::empty();
-        self.resampler
-            .as_mut()
-            .expect("just ensured")
-            .run(decoded, &mut out)?;
+        self.resampler.as_mut().expect("just ensured").run(decoded, &mut out)?;
 
         let raw_pts = decoded.pts().or_else(|| decoded.timestamp()).unwrap_or(0);
         let pts = ts_to_ticks(raw_pts, self.time_base).clamp_non_negative();
@@ -591,7 +587,7 @@ impl AudioDecoder {
         let usable = sample_count.min(bytes.len() / std::mem::size_of::<f32>());
 
         let mut samples = Vec::with_capacity(usable);
-        for chunk in bytes.chunks_exact(4).take(usable) {
+        for chunk in bytes.as_chunks::<4>().0.iter().take(usable) {
             samples.push(f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
 

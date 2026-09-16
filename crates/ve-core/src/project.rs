@@ -112,7 +112,8 @@ impl Project {
         if uses > 0 {
             return Err(CoreError::AssetInUse { id, clips: uses });
         }
-        let idx = self.assets.iter().position(|a| a.id == id).ok_or(CoreError::AssetNotFound(id))?;
+        let idx =
+            self.assets.iter().position(|a| a.id == id).ok_or(CoreError::AssetNotFound(id))?;
         Ok(self.assets.remove(idx))
     }
 
@@ -127,7 +128,11 @@ impl Project {
 
     // ---- sequences ----------------------------------------------------
 
-    pub fn add_sequence(&mut self, name: impl Into<String>, settings: SequenceSettings) -> SequenceId {
+    pub fn add_sequence(
+        &mut self,
+        name: impl Into<String>,
+        settings: SequenceSettings,
+    ) -> SequenceId {
         let id = self.ids.alloc::<crate::id::SequenceTag>();
         self.sequences.push(Sequence::new(id, name, settings));
         if self.active_sequence.is_none() {
@@ -224,7 +229,8 @@ impl Project {
         for seq in &mut self.sequences {
             let seq_name = seq.name.clone();
             for id in seq.normalise() {
-                warnings.push(format!("sequence '{seq_name}': clip {id} overlaps its neighbour"));
+                warnings
+                    .push(format!("sequence '{seq_name}': clip {id} overlaps its neighbour"));
             }
             for track in &seq.tracks {
                 for clip in track.clips() {
@@ -240,7 +246,8 @@ impl Project {
 
         if let Some(active) = self.active_sequence {
             if self.sequence(active).is_none() {
-                warnings.push("active sequence does not exist; falling back to the first".into());
+                warnings
+                    .push("active sequence does not exist; falling back to the first".into());
                 self.active_sequence = self.sequences.first().map(|s| s.id);
             }
         } else {
@@ -252,10 +259,6 @@ impl Project {
 
     /// Total clip count, used by the benchmark suite and the status bar.
     pub fn clip_count(&self) -> usize {
-        self.sequences
-            .iter()
-            .flat_map(|s| s.tracks.iter())
-            .map(|t| t.len())
-            .sum()
+        self.sequences.iter().flat_map(|s| s.tracks.iter()).map(|t| t.len()).sum()
     }
 }

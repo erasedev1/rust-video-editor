@@ -41,9 +41,9 @@ fn identify_frame(frame: &VideoFrame) -> Option<i64> {
     let [r, g, b] = sample_pixel(frame);
     let distance = |i: i64| {
         let e = expected_colour(i);
-        (r as i32 - e[0] as i32).abs().max(
-            (g as i32 - e[1] as i32).abs().max((b as i32 - e[2] as i32).abs()),
-        )
+        (r as i32 - e[0] as i32)
+            .abs()
+            .max((g as i32 - e[1] as i32).abs().max((b as i32 - e[2] as i32).abs()))
     };
     let best = (0..100).min_by_key(|&i| distance(i))?;
     (distance(best) <= 12).then_some(best)
@@ -130,7 +130,7 @@ fn every_decoded_frame_is_fully_opaque_rgba() {
     let row = frame.row(10);
     // Alpha is the fourth byte of each pixel and must be opaque for source
     // media that has no alpha channel, or compositing would make it vanish.
-    for px in row.chunks_exact(4).take(40) {
+    for px in row.as_chunks::<4>().0.iter().take(40) {
         assert_eq!(px[3], 255, "opaque source decoded with alpha {}", px[3]);
     }
 }
@@ -209,7 +209,8 @@ fn requesting_a_negative_time_returns_the_first_frame() {
 #[test]
 fn decoding_scaled_produces_smaller_frames_with_the_same_content() {
     let mut decoder =
-        VideoDecoder::open_scaled(testdata("counter_30fps.mp4"), Some(Size::new(40, 30))).unwrap();
+        VideoDecoder::open_scaled(testdata("counter_30fps.mp4"), Some(Size::new(40, 30)))
+            .unwrap();
     assert_eq!(decoder.output_size(), Size::new(40, 30));
     assert_eq!(decoder.source_size(), Size::new(160, 120));
 
@@ -242,8 +243,9 @@ fn frames_share_their_buffer_rather_than_copying_it() {
 #[test]
 fn decoding_records_metrics() {
     let metrics = Metrics::new();
-    let mut decoder =
-        VideoDecoder::open(testdata("counter_30fps.mp4")).unwrap().with_metrics(metrics.clone());
+    let mut decoder = VideoDecoder::open(testdata("counter_30fps.mp4"))
+        .unwrap()
+        .with_metrics(metrics.clone());
     decoder.frame_at(Rate::FPS_30.frame_to_ticks(40)).unwrap();
 
     assert!(metrics.span_stats(ve_metrics::spans::DECODE).is_some());
@@ -474,8 +476,14 @@ fn several_assets_decode_concurrently() {
     svc.request(FrameRequest::interactive(a, Rate::FPS_30.frame_to_ticks(40)));
     svc.request(FrameRequest::interactive(b, Rate::FPS_25.frame_to_ticks(20)));
 
-    assert_eq!(identify_frame(&await_frame(&svc, a, Rate::FPS_30.frame_to_ticks(40))), Some(40));
-    assert_eq!(identify_frame(&await_frame(&svc, b, Rate::FPS_25.frame_to_ticks(20))), Some(20));
+    assert_eq!(
+        identify_frame(&await_frame(&svc, a, Rate::FPS_30.frame_to_ticks(40))),
+        Some(40)
+    );
+    assert_eq!(
+        identify_frame(&await_frame(&svc, b, Rate::FPS_25.frame_to_ticks(20))),
+        Some(20)
+    );
 }
 
 #[test]

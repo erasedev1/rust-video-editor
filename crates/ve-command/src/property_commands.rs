@@ -23,7 +23,10 @@ pub enum ClipProperty {
     Volume,
     Pan,
     /// A parameter on one of the clip's effects.
-    EffectParam { effect: EffectId, key: String },
+    EffectParam {
+        effect: EffectId,
+        key: String,
+    },
 }
 
 impl ClipProperty {
@@ -136,11 +139,11 @@ macro_rules! with_property {
     }};
 }
 
-fn clip_mut<'p>(
-    project: &'p mut Project,
+fn clip_mut(
+    project: &mut Project,
     sequence: SequenceId,
     clip: ClipId,
-) -> Result<&'p mut ve_core::Clip, CommandError> {
+) -> Result<&mut ve_core::Clip, CommandError> {
     project
         .sequence_mut(sequence)
         .ok_or(CommandError::SequenceNotFound(sequence))?

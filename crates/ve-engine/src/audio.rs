@@ -40,12 +40,7 @@ impl AudioSource {
     }
 
     /// Makes sure `frames` sample frames from `at` are in the buffer.
-    fn ensure(
-        &mut self,
-        at: Ticks,
-        frames: usize,
-        rate: SampleRate,
-    ) -> Result<(), MediaError> {
+    fn ensure(&mut self, at: Ticks, frames: usize, rate: SampleRate) -> Result<(), MediaError> {
         let needed_end = at + rate.sample_to_ticks(frames as i64);
         if !self.buffer.is_empty()
             && at >= self.buffer_start

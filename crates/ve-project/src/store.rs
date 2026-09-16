@@ -14,7 +14,7 @@
 //! case by falling back to the backup.
 
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -197,9 +197,9 @@ pub fn load(path: &Path) -> Result<LoadOutcome, ProjectError> {
             );
             let mut outcome = read_project(&bak)?;
             outcome.recovered_from_backup = true;
-            outcome
-                .warnings
-                .push(format!("recovered from backup after failing to read the project: {primary_err}"));
+            outcome.warnings.push(format!(
+                "recovered from backup after failing to read the project: {primary_err}"
+            ));
             resolve_asset_paths(&mut outcome, path);
             Ok(outcome)
         }
@@ -207,11 +207,13 @@ pub fn load(path: &Path) -> Result<LoadOutcome, ProjectError> {
 }
 
 fn read_project(path: &Path) -> Result<LoadOutcome, ProjectError> {
-    let file = File::open(path).map_err(|e| ProjectError::io(path, e))?;
-    let reader = BufReader::new(file);
-    let mut doc: Value = serde_json::from_reader(reader)?;
-    // Round-tripping through a string keeps one parsing path rather than two.
-    let text = std::mem::take(&mut doc).to_string();
+    // Read once, parse once. An earlier version parsed to a `Value`, serialised
+    // that back to a string and parsed it again to keep a single code path;
+    // the `load_project` benchmark showed that costing more than everything
+    // else in the load put together.
+    let mut file = File::open(path).map_err(|e| ProjectError::io(path, e))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(|e| ProjectError::io(path, e))?;
     from_json(&text)
 }
 
@@ -227,9 +229,7 @@ fn resolve_asset_paths(outcome: &mut LoadOutcome, project_path: &Path) {
         asset.path = resolved;
         asset.offline = !asset.path.exists();
         if asset.offline {
-            outcome
-                .warnings
-                .push(format!("media offline: {}", asset.path.display()));
+            outcome.warnings.push(format!("media offline: {}", asset.path.display()));
         }
     }
 }

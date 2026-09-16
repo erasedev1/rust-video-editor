@@ -13,21 +13,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dec = ctx.decoder().audio()?;
     println!(
         "decoder before: format={:?} rate={} channels={} layout_empty={} layout_bits={:?}",
-        dec.format(), dec.rate(), dec.channels(),
-        dec.channel_layout().is_empty(), dec.channel_layout().bits()
+        dec.format(),
+        dec.rate(),
+        dec.channels(),
+        dec.channel_layout().is_empty(),
+        dec.channel_layout().bits()
     );
 
+    // Feed packets until the decoder produces its first frame.
     let mut frame = ffmpeg::frame::Audio::empty();
-    'outer: loop {
-        for (s, p) in input.packets() {
-            if s.index() == idx {
-                dec.send_packet(&p)?;
-                if dec.receive_frame(&mut frame).is_ok() {
-                    break 'outer;
-                }
-            }
+    for (stream, packet) in input.packets() {
+        if stream.index() != idx {
+            continue;
         }
-        break;
+        dec.send_packet(&packet)?;
+        if dec.receive_frame(&mut frame).is_ok() {
+            break;
+        }
     }
     println!(
         "frame:          format={:?} rate={} channels={} layout_empty={} layout_bits={:?} samples={}",
@@ -36,14 +38,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "decoder after:  format={:?} rate={} channels={}",
-        dec.format(), dec.rate(), dec.channels()
+        dec.format(),
+        dec.rate(),
+        dec.channels()
     );
 
     // Raw i16 peak straight from the decoded frame, before any resampling.
     // Useful for telling "the decoder is wrong" apart from "the file is quiet".
     let raw = frame.data(0);
     let mut peak_i16 = 0i32;
-    for c in raw.chunks_exact(2).take(frame.samples() * frame.channels() as usize) {
+    for c in raw.as_chunks::<2>().0.iter().take(frame.samples() * frame.channels() as usize) {
         peak_i16 = peak_i16.max((i16::from_ne_bytes([c[0], c[1]]) as i32).abs());
     }
     println!("raw i16 peak:   {peak_i16} (full scale = 32767)");

@@ -34,7 +34,9 @@ pub fn process_memory() -> Option<ProcessMemory> {
 #[cfg(target_os = "linux")]
 fn page_size() -> u64 {
     // SAFETY: sysconf is thread-safe and takes no pointers.
-    let v = unsafe { libc_sysconf(30 /* _SC_PAGESIZE */) };
+    let v = unsafe {
+        libc_sysconf(30 /* _SC_PAGESIZE */)
+    };
     if v > 0 {
         v as u64
     } else {

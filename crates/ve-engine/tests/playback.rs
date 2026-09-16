@@ -154,13 +154,7 @@ fn a_muted_track_contributes_nothing() {
 fn a_disabled_clip_contributes_nothing() {
     let mut f = fixture();
     let id = f.add_clip(f.v1, 0, 5);
-    f.project
-        .sequence_mut(f.sequence)
-        .unwrap()
-        .find_clip_mut(id)
-        .unwrap()
-        .1
-        .enabled = false;
+    f.project.sequence_mut(f.sequence).unwrap().find_clip_mut(id).unwrap().1.enabled = false;
     assert!(evaluate(f.sequence(), Ticks::from_seconds(1)).video.is_empty());
 }
 
@@ -208,9 +202,7 @@ fn animated_properties_resolve_at_clip_local_time() {
     );
     // A fade over the clip's first two seconds, in clip-local time.
     clip.transform.opacity.set_keyframe(Ticks::ZERO, 0.0, Interpolation::Linear);
-    clip.transform
-        .opacity
-        .set_keyframe(Ticks::from_seconds(2), 1.0, Interpolation::Linear);
+    clip.transform.opacity.set_keyframe(Ticks::from_seconds(2), 1.0, Interpolation::Linear);
     clip.transform.position.set_keyframe(Ticks::ZERO, Vec2::ZERO, Interpolation::Linear);
     clip.transform.position.set_keyframe(
         Ticks::from_seconds(2),
@@ -703,15 +695,8 @@ fn the_audio_renderer_mixes_a_clip_into_the_ring() {
     assert_eq!(project.sequence(sequence).unwrap().tracks[2].kind, TrackKind::Audio);
 
     let id = project.new_clip_id();
-    let clip =
-        Clip::new(id, asset, "tone", Ticks::ZERO, Ticks::ZERO, Ticks::from_millis(900));
-    project
-        .sequence_mut(sequence)
-        .unwrap()
-        .track_mut(a1)
-        .unwrap()
-        .insert_clip(clip)
-        .unwrap();
+    let clip = Clip::new(id, asset, "tone", Ticks::ZERO, Ticks::ZERO, Ticks::from_millis(900));
+    project.sequence_mut(sequence).unwrap().track_mut(a1).unwrap().insert_clip(clip).unwrap();
 
     let metrics = Metrics::new();
     let mut renderer = AudioRenderer::new(ve_time::SampleRate::HZ_48000, 2, metrics);

@@ -27,7 +27,9 @@ pub use history::{History, HistoryEntry};
 pub use property_commands::{
     ClipProperty, PropertyValue, RemoveClipKeyframe, SetClipKeyframe, SetClipProperty,
 };
-pub use structure_commands::{AddMarker, AddTrack, RemoveMarker, RemoveTrack, SetClipEnabled};
+pub use structure_commands::{
+    AddMarker, AddTrack, RemoveMarker, RemoveTrack, SetClipEnabled, SetSequenceFormat,
+};
 
 /// An undoable edit.
 ///
@@ -85,11 +87,11 @@ pub enum CommandError {
 
 /// Resolves a `(sequence, track)` pair, turning a missing one into a typed
 /// error rather than a panic. Used by every command, so it lives here.
-pub(crate) fn track_mut<'p>(
-    project: &'p mut Project,
+pub(crate) fn track_mut(
+    project: &mut Project,
     sequence: SequenceId,
     track: TrackId,
-) -> Result<&'p mut ve_core::Track, CommandError> {
+) -> Result<&mut ve_core::Track, CommandError> {
     project
         .sequence_mut(sequence)
         .ok_or(CommandError::SequenceNotFound(sequence))?

@@ -1,9 +1,39 @@
 [package]
 name = "ve-app"
+description = "Verge: a fast, native, open non-linear video editor"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "ve_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "verge"
+path = "src/main.rs"
+
 [dependencies]
+ve-core = { workspace = true }
+ve-time = { workspace = true }
+ve-project = { workspace = true }
+ve-command = { workspace = true }
+ve-media = { workspace = true }
+ve-render = { workspace = true }
+ve-engine = { workspace = true }
+ve-metrics = { workspace = true }
+
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+egui = "0.36"
+egui-wgpu = "0.36"
+wgpu = { workspace = true }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+log = { workspace = true }
+env_logger = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

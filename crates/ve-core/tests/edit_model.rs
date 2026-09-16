@@ -303,8 +303,7 @@ fn splitting_conserves_duration_and_source_coverage() {
     // Every timeline position maps to the same source frame as before the split.
     for s in 0..20 {
         let at = Ticks::from_seconds(s);
-        let via_halves =
-            left.source_time_at(at).or_else(|| right.source_time_at(at)).unwrap();
+        let via_halves = left.source_time_at(at).or_else(|| right.source_time_at(at)).unwrap();
         assert_eq!(via_halves, Ticks::from_seconds(10 + s), "split changed frame at {s}s");
     }
 }
@@ -332,15 +331,10 @@ fn splitting_outside_the_clip_is_refused() {
 fn splitting_rebases_keyframes_onto_the_new_clips_local_time() {
     let (mut p, seq, track, asset) = fixture();
     let id = p.new_clip_id();
-    let mut clip =
-        Clip::new(id, asset, "c", Ticks::ZERO, Ticks::ZERO, Ticks::from_seconds(10));
+    let mut clip = Clip::new(id, asset, "c", Ticks::ZERO, Ticks::ZERO, Ticks::from_seconds(10));
     // Fade from transparent at 0 s to opaque at 8 s, clip-relative.
     clip.transform.opacity.set_keyframe(Ticks::ZERO, 0.0, Interpolation::Linear);
-    clip.transform.opacity.set_keyframe(
-        Ticks::from_seconds(8),
-        1.0,
-        Interpolation::Linear,
-    );
+    clip.transform.opacity.set_keyframe(Ticks::from_seconds(8), 1.0, Interpolation::Linear);
 
     let new_id = p.new_clip_id();
     let t = p.sequence_mut(seq).unwrap().track_mut(track).unwrap();
@@ -366,8 +360,7 @@ fn splitting_rebases_keyframes_onto_the_new_clips_local_time() {
 fn speed_maps_timeline_duration_onto_source_duration_exactly() {
     let (mut p, seq, track, asset) = fixture();
     let id = p.new_clip_id();
-    let mut clip =
-        Clip::new(id, asset, "c", Ticks::ZERO, Ticks::ZERO, Ticks::from_seconds(5));
+    let mut clip = Clip::new(id, asset, "c", Ticks::ZERO, Ticks::ZERO, Ticks::from_seconds(5));
     clip.speed = Speed::new(2, 1).unwrap();
     let t = p.sequence_mut(seq).unwrap().track_mut(track).unwrap();
     t.insert_clip(clip).unwrap();
@@ -442,7 +435,10 @@ fn locked_tracks_refuse_every_mutation() {
         t.split_clip(id, Ticks::from_seconds(5), new_id, || EffectId::from_raw(1)),
         Err(CoreError::TrackLocked)
     );
-    assert_eq!(t.clip(id).unwrap().range(), TimeRange::new(Ticks::ZERO, Ticks::from_seconds(10)));
+    assert_eq!(
+        t.clip(id).unwrap().range(),
+        TimeRange::new(Ticks::ZERO, Ticks::from_seconds(10))
+    );
 }
 
 #[test]
@@ -455,7 +451,10 @@ fn first_free_slot_skips_occupied_space() {
     // A 3 s clip fits in the 10..15 gap.
     assert_eq!(t.first_free_slot(Ticks::ZERO, Ticks::from_seconds(3)), Ticks::from_seconds(10));
     // A 10 s clip does not, so it lands after everything.
-    assert_eq!(t.first_free_slot(Ticks::ZERO, Ticks::from_seconds(10)), Ticks::from_seconds(25));
+    assert_eq!(
+        t.first_free_slot(Ticks::ZERO, Ticks::from_seconds(10)),
+        Ticks::from_seconds(25)
+    );
 }
 
 #[test]
@@ -675,11 +674,10 @@ fn a_default_transform_is_the_identity() {
 
 #[test]
 fn opacity_is_clamped_when_evaluated() {
-    let mut t = Transform::default();
-    t.opacity = Property::constant(5.0);
-    assert_eq!(t.evaluate(Ticks::ZERO).opacity, 1.0);
-    t.opacity = Property::constant(-1.0);
-    assert_eq!(t.evaluate(Ticks::ZERO).opacity, 0.0);
+    let over = Transform { opacity: Property::constant(5.0), ..Default::default() };
+    assert_eq!(over.evaluate(Ticks::ZERO).opacity, 1.0);
+    let under = Transform { opacity: Property::constant(-1.0), ..Default::default() };
+    assert_eq!(under.evaluate(Ticks::ZERO).opacity, 0.0);
 }
 
 #[test]

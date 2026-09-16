@@ -17,7 +17,12 @@ pub struct RollingWindow {
 impl RollingWindow {
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
-        RollingWindow { samples: Vec::with_capacity(capacity), capacity, next: 0, total_count: 0 }
+        RollingWindow {
+            samples: Vec::with_capacity(capacity),
+            capacity,
+            next: 0,
+            total_count: 0,
+        }
     }
 
     pub fn push(&mut self, sample: Duration) {

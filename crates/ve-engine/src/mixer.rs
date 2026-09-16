@@ -164,10 +164,8 @@ mod tests {
     #[test]
     fn a_single_source_at_unity_passes_through_unchanged() {
         let samples = [0.5f32, -0.25, 0.75, -1.0];
-        let (out, _) = mixer().mix(
-            &[MixSource { samples: &samples, channels: 2, gain: 1.0, pan: 0.0 }],
-            2,
-        );
+        let (out, _) = mixer()
+            .mix(&[MixSource { samples: &samples, channels: 2, gain: 1.0, pan: 0.0 }], 2);
         assert_eq!(out, samples.to_vec());
     }
 
@@ -324,9 +322,17 @@ mod tests {
         let samples = [0.5f32, 0.5];
         let mut out = vec![9.0f32; 2];
         let m = mixer();
-        m.mix_into(&mut out, &[MixSource { samples: &samples, channels: 2, gain: 1.0, pan: 0.0 }], 1);
+        m.mix_into(
+            &mut out,
+            &[MixSource { samples: &samples, channels: 2, gain: 1.0, pan: 0.0 }],
+            1,
+        );
         assert_eq!(out, vec![0.5, 0.5]);
-        m.mix_into(&mut out, &[MixSource { samples: &samples, channels: 2, gain: 1.0, pan: 0.0 }], 1);
+        m.mix_into(
+            &mut out,
+            &[MixSource { samples: &samples, channels: 2, gain: 1.0, pan: 0.0 }],
+            1,
+        );
         assert_eq!(out, vec![0.5, 0.5], "a reused buffer must not accumulate");
     }
 }

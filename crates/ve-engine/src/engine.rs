@@ -58,12 +58,7 @@ pub struct PlaybackEngine {
 
 impl PlaybackEngine {
     pub fn new(clock: PlaybackClock, decode: Arc<DecodeService>, metrics: Metrics) -> Self {
-        PlaybackEngine {
-            clock,
-            decode,
-            metrics,
-            prefetch_frames: DEFAULT_PREFETCH_FRAMES,
-        }
+        PlaybackEngine { clock, decode, metrics, prefetch_frames: DEFAULT_PREFETCH_FRAMES }
     }
 
     pub fn clock(&self) -> &PlaybackClock {
@@ -87,7 +82,10 @@ impl PlaybackEngine {
     /// Returns the assets that could not be opened, paired with why. A failure
     /// is not fatal: the rest of the timeline still plays, and the offending
     /// clip renders as offline.
-    pub fn open_project_assets(&self, project: &Project) -> Vec<(ve_core::AssetId, MediaError)> {
+    pub fn open_project_assets(
+        &self,
+        project: &Project,
+    ) -> Vec<(ve_core::AssetId, MediaError)> {
         let mut failures = Vec::new();
         for asset in &project.assets {
             if asset.offline || !asset.info.has_video() || self.decode.is_open(asset.id) {
@@ -141,7 +139,7 @@ impl PlaybackEngine {
     /// pending rather than waited for, so a slow decode drops a frame instead
     /// of stalling the interface.
     pub fn update(&mut self, sequence: &Sequence) -> EngineUpdate {
-        let _span = self.metrics.span(spans::FRAME);
+        let _span = self.metrics.span(spans::ENGINE);
 
         let mut reached_end = false;
         if self.clock.has_reached_limit() {

@@ -83,8 +83,9 @@ impl Command for RemoveClip {
 
     fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
         let track = track_mut(project, self.sequence, self.track)?;
-        self.removed =
-            Some(track.remove_clip(self.clip_id).ok_or(CommandError::ClipNotFound(self.clip_id))?);
+        self.removed = Some(
+            track.remove_clip(self.clip_id).ok_or(CommandError::ClipNotFound(self.clip_id))?,
+        );
         Ok(())
     }
 
@@ -140,9 +141,8 @@ impl Command for MoveClip {
     }
 
     fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
-        let from = self
-            .from
-            .ok_or_else(|| CommandError::Rejected("move was never applied".into()))?;
+        let from =
+            self.from.ok_or_else(|| CommandError::Rejected("move was never applied".into()))?;
         let track = track_mut(project, self.sequence, self.track)?;
         track.move_clip(self.clip_id, from)?;
         Ok(())
@@ -233,7 +233,8 @@ impl Command for TrimClip {
 
         let track = track_mut(project, self.sequence, self.track)?;
         let captured = {
-            let clip = track.clip(self.clip_id).ok_or(CommandError::ClipNotFound(self.clip_id))?;
+            let clip =
+                track.clip(self.clip_id).ok_or(CommandError::ClipNotFound(self.clip_id))?;
             TrimState {
                 source_in: clip.source_in,
                 timeline_start: clip.timeline_start,
@@ -358,10 +359,8 @@ impl Command for SplitClip {
 
         let mut minted = self.right_effect_ids.clone().into_iter();
         let track = track_mut(project, self.sequence, self.track)?;
-        let before = track
-            .clip(self.clip_id)
-            .ok_or(CommandError::ClipNotFound(self.clip_id))?
-            .duration;
+        let before =
+            track.clip(self.clip_id).ok_or(CommandError::ClipNotFound(self.clip_id))?.duration;
 
         track.split_clip(self.clip_id, self.at, right_id, || {
             minted.next().expect("one effect ID was minted per effect")

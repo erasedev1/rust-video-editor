@@ -85,10 +85,7 @@ impl Harness {
 /// Asserts two colours match within the tolerance a rasteriser's rounding needs.
 #[track_caller]
 fn assert_colour(got: [u8; 4], want: [u8; 4], what: &str) {
-    let close = got
-        .iter()
-        .zip(want.iter())
-        .all(|(a, b)| (*a as i32 - *b as i32).abs() <= 2);
+    let close = got.iter().zip(want.iter()).all(|(a, b)| (*a as i32 - *b as i32).abs() <= 2);
     assert!(close, "{what}: got {got:?}, expected {want:?}");
 }
 
@@ -126,8 +123,7 @@ fn opacity_blends_the_layer_towards_the_background() {
     let mut h = Harness::new(size);
     let texture = h.upload(&solid_frame(size, RED));
 
-    let mut transform = TransformState::default();
-    transform.opacity = 0.5;
+    let transform = TransformState { opacity: 0.5, ..Default::default() };
     let pixels = h.render(OPAQUE_BLACK, &[Layer::new(&texture).with_transform(transform)]);
 
     // Half-strength red over black, and still fully opaque because the
@@ -141,8 +137,7 @@ fn zero_opacity_makes_a_layer_disappear_entirely() {
     let mut h = Harness::new(size);
     let texture = h.upload(&solid_frame(size, RED));
 
-    let mut transform = TransformState::default();
-    transform.opacity = 0.0;
+    let transform = TransformState { opacity: 0.0, ..Default::default() };
     let pixels = h.render(
         Rgba::new(0.0, 1.0, 0.0, 1.0),
         &[Layer::new(&texture).with_transform(transform)],
@@ -172,12 +167,9 @@ fn a_half_opaque_top_layer_mixes_with_the_one_below() {
     let bottom = h.upload(&solid_frame(size, RED));
     let top = h.upload(&solid_frame(size, GREEN));
 
-    let mut fade = TransformState::default();
-    fade.opacity = 0.5;
-    let pixels = h.render(
-        OPAQUE_BLACK,
-        &[Layer::new(&bottom), Layer::new(&top).with_transform(fade)],
-    );
+    let fade = TransformState { opacity: 0.5, ..Default::default() };
+    let pixels =
+        h.render(OPAQUE_BLACK, &[Layer::new(&bottom), Layer::new(&top).with_transform(fade)]);
     assert_colour(h.pixel(&pixels, 16, 16), [128, 128, 0, 255], "50% green over red");
 }
 
@@ -187,8 +179,7 @@ fn a_scaled_down_layer_leaves_the_background_visible_around_it() {
     let mut h = Harness::new(size);
     let texture = h.upload(&solid_frame(size, RED));
 
-    let mut transform = TransformState::default();
-    transform.scale = Vec2::splat(0.5);
+    let transform = TransformState { scale: Vec2::splat(0.5), ..Default::default() };
     let pixels = h.render(
         Rgba::new(0.0, 0.0, 1.0, 1.0),
         &[Layer::new(&texture).with_transform(transform)],
@@ -224,9 +215,8 @@ fn position_translates_the_layer() {
     let mut h = Harness::new(size);
     let texture = h.upload(&solid_frame(Size::new(32, 32), RED));
 
-    let mut transform = TransformState::default();
     // Move right and down by a quarter of the composition.
-    transform.position = Vec2::new(16.0, 16.0);
+    let transform = TransformState { position: Vec2::new(16.0, 16.0), ..Default::default() };
     let pixels = h.render(
         Rgba::new(0.0, 0.0, 1.0, 1.0),
         &[Layer::new(&texture).with_transform(transform)],
@@ -253,8 +243,7 @@ fn a_rotated_layer_covers_the_area_a_rotation_should() {
     assert_colour(h.pixel(&upright, 32, 8), BLUE, "above the band");
     assert_colour(h.pixel(&upright, 8, 32), RED, "left of the band centre");
 
-    let mut transform = TransformState::default();
-    transform.rotation = 90.0;
+    let transform = TransformState { rotation: 90.0, ..Default::default() };
     let rotated = h.render(
         Rgba::new(0.0, 0.0, 1.0, 1.0),
         &[Layer::new(&texture).with_transform(transform)],
@@ -271,8 +260,7 @@ fn a_negative_scale_mirrors_rather_than_culling_the_layer() {
     let mut h = Harness::new(size);
     let texture = h.upload(&solid_frame(size, RED));
 
-    let mut transform = TransformState::default();
-    transform.scale = Vec2::new(-1.0, 1.0);
+    let transform = TransformState { scale: Vec2::new(-1.0, 1.0), ..Default::default() };
     let pixels = h.render(OPAQUE_BLACK, &[Layer::new(&texture).with_transform(transform)]);
     // Back-face culling would make a mirrored layer vanish, which is never what
     // a user flipping a clip wants.
@@ -296,8 +284,7 @@ fn source_alpha_and_layer_opacity_multiply() {
     let mut h = Harness::new(size);
     let texture = h.upload(&solid_frame(size, [255, 0, 0, 128]));
 
-    let mut transform = TransformState::default();
-    transform.opacity = 0.5;
+    let transform = TransformState { opacity: 0.5, ..Default::default() };
     let pixels = h.render(OPAQUE_BLACK, &[Layer::new(&texture).with_transform(transform)]);
     // 0.5 source alpha times 0.5 layer opacity is a quarter-strength red.
     assert_colour(h.pixel(&pixels, 16, 16), [64, 0, 0, 255], "25% red over black");
@@ -361,7 +348,11 @@ fn readback_returns_tightly_packed_rows() {
     // padding if the rows had not been repacked.
     for y in 0..size.height {
         for x in 0..size.width {
-            assert_colour(RenderTarget::pixel_at(&pixels, size, x, y), RED, &format!("({x},{y})"));
+            assert_colour(
+                RenderTarget::pixel_at(&pixels, size, x, y),
+                RED,
+                &format!("({x},{y})"),
+            );
         }
     }
 }
@@ -397,8 +388,7 @@ fn the_texture_cache_evicts_under_its_budget() {
 
     let key = |i| CacheKey::new(AssetId::from_raw(1), i, 64);
     for i in 0..3 {
-        let texture =
-            renderer.upload(&gpu.device, &gpu.queue, &solid_frame(size, RED));
+        let texture = renderer.upload(&gpu.device, &gpu.queue, &solid_frame(size, RED));
         cache.insert(key(i), texture);
     }
 

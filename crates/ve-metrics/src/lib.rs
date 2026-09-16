@@ -131,16 +131,12 @@ impl Metrics {
 
     /// A consistent view of everything, for the overlay and for benchmarks.
     pub fn snapshot(&self) -> MetricsSnapshot {
-        let spans = self
-            .inner
-            .spans
-            .lock()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.stats()))
-            .collect();
+        let spans =
+            self.inner.spans.lock().iter().map(|(k, v)| (k.to_string(), v.stats())).collect();
         let counters =
             self.inner.counters.lock().iter().map(|(k, v)| (k.to_string(), *v)).collect();
-        let gauges = self.inner.gauges.lock().iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        let gauges =
+            self.inner.gauges.lock().iter().map(|(k, v)| (k.to_string(), *v)).collect();
         MetricsSnapshot {
             spans,
             counters,
@@ -210,7 +206,12 @@ impl MetricsSnapshot {
 
 /// Standard span names, so producers and the overlay cannot drift apart.
 pub mod spans {
+    /// Wall-clock time between repaints. Measured by the application shell, not
+    /// by any one stage: the point of this number is what the user experiences,
+    /// which includes everything, waiting on vsync included.
     pub const FRAME: &str = "frame";
+    /// Time inside the playback engine's own update.
+    pub const ENGINE: &str = "engine";
     pub const DECODE: &str = "decode";
     pub const SCALE: &str = "scale";
     pub const UPLOAD: &str = "upload";

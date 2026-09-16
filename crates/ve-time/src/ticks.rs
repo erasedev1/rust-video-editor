@@ -25,7 +25,9 @@ pub const TICKS_PER_SECOND: i64 = 282_240_000;
 ///
 /// This is the canonical time type across the whole editor. Frames, seconds and
 /// timecode are *views* onto it, produced on demand.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct Ticks(pub i64);
 

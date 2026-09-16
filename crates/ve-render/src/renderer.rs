@@ -117,12 +117,11 @@ impl Renderer {
                 ],
             });
 
-        let pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("verge-composite-pipeline-layout"),
-                bind_group_layouts: &[Some(&uniform_layout), Some(&texture_layout)],
-                immediate_size: 0,
-            });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("verge-composite-pipeline-layout"),
+            bind_group_layouts: &[Some(&uniform_layout), Some(&texture_layout)],
+            immediate_size: 0,
+        });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("verge-composite-pipeline"),
@@ -188,8 +187,12 @@ impl Renderer {
         });
 
         let uniform_stride = Self::stride_for(device);
-        let (uniform_buffer, uniform_bind_group) =
-            Self::make_uniform_buffer(device, &uniform_layout, uniform_stride, INITIAL_LAYER_CAPACITY);
+        let (uniform_buffer, uniform_bind_group) = Self::make_uniform_buffer(
+            device,
+            &uniform_layout,
+            uniform_stride,
+            INITIAL_LAYER_CAPACITY,
+        );
 
         Renderer {
             pipeline,

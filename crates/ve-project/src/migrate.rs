@@ -37,10 +37,8 @@ pub fn migrate_with(
     doc: &mut Value,
     migrations: &[(u32, MigrationFn)],
 ) -> Result<Vec<String>, ProjectError> {
-    let mut version = doc
-        .get("version")
-        .and_then(Value::as_u64)
-        .ok_or(ProjectError::MissingVersion)? as u32;
+    let mut version =
+        doc.get("version").and_then(Value::as_u64).ok_or(ProjectError::MissingVersion)? as u32;
 
     if version > FORMAT_VERSION {
         return Err(ProjectError::FromTheFuture { file: version, supported: FORMAT_VERSION });
@@ -85,8 +83,7 @@ mod tests {
     #[test]
     fn steps_are_applied_in_order_and_the_version_is_advanced() {
         // Pretend the current version is 3 by supplying a table that reaches it.
-        let table: &[(u32, MigrationFn)] =
-            &[(1, rename_title_to_name), (2, add_marker_list)];
+        let table: &[(u32, MigrationFn)] = &[(1, rename_title_to_name), (2, add_marker_list)];
         let mut doc = json!({"version": 1, "project": {"title": "Old"}});
 
         // Only migrate as far as the table allows; FORMAT_VERSION is 1 today,

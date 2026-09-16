@@ -30,10 +30,7 @@ impl VideoStreamInfo {
         if num == den || num == 0 || den == 0 {
             return self.size;
         }
-        Size::new(
-            ((self.size.width as u64 * num as u64) / den as u64) as u32,
-            self.size.height,
-        )
+        Size::new(((self.size.width as u64 * num as u64) / den as u64) as u32, self.size.height)
     }
 }
 

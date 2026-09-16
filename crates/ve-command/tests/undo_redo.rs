@@ -5,8 +5,8 @@
 
 use ve_command::*;
 use ve_core::{
-    Clip, ClipId, Interpolation, Marker, MediaInfo, Project, SequenceId, Size, TrackId, TrackKind,
-    Vec2, VideoStreamInfo,
+    Clip, ClipId, Interpolation, Marker, MediaInfo, Project, SequenceId, Size, TrackId,
+    TrackKind, Vec2, VideoStreamInfo,
 };
 use ve_time::{Rate, Ticks};
 
@@ -78,7 +78,11 @@ fn deleting_a_clip_restores_every_field_including_animation() {
     let (mut p, seq, track, asset) = fixture();
     let mut c = clip(&mut p, asset, 5, 10);
     c.transform.opacity.set_keyframe(Ticks::ZERO, 0.0, Interpolation::EaseIn);
-    c.transform.position.set_keyframe(Ticks::from_seconds(1), Vec2::new(4.0, 2.0), Interpolation::Linear);
+    c.transform.position.set_keyframe(
+        Ticks::from_seconds(1),
+        Vec2::new(4.0, 2.0),
+        Interpolation::Linear,
+    );
     let clip_id = c.id;
     p.sequence_mut(seq).unwrap().track_mut(track).unwrap().insert_clip(c).unwrap();
 
@@ -100,7 +104,8 @@ fn a_move_returns_to_where_it_started() {
     h.execute(&mut p, Box::new(AddClip::new(seq, track, c))).unwrap();
     let before = p.clone();
 
-    h.execute(&mut p, Box::new(MoveClip::new(seq, track, id, Ticks::from_seconds(30)))).unwrap();
+    h.execute(&mut p, Box::new(MoveClip::new(seq, track, id, Ticks::from_seconds(30))))
+        .unwrap();
     assert_eq!(
         p.active().unwrap().tracks[0].clips()[0].timeline_start,
         Ticks::from_seconds(30)
@@ -147,13 +152,19 @@ fn a_gesture_boundary_starts_a_new_undo_entry() {
     let mut h = History::default();
     h.execute(&mut p, Box::new(AddClip::new(seq, track, c))).unwrap();
 
-    h.execute_coalesced(&mut p, Box::new(MoveClip::new(seq, track, id, Ticks::from_seconds(20))))
-        .unwrap();
+    h.execute_coalesced(
+        &mut p,
+        Box::new(MoveClip::new(seq, track, id, Ticks::from_seconds(20))),
+    )
+    .unwrap();
     let after_first_drag = p.clone();
     h.break_merge(); // mouse up
 
-    h.execute_coalesced(&mut p, Box::new(MoveClip::new(seq, track, id, Ticks::from_seconds(40))))
-        .unwrap();
+    h.execute_coalesced(
+        &mut p,
+        Box::new(MoveClip::new(seq, track, id, Ticks::from_seconds(40))),
+    )
+    .unwrap();
 
     h.undo(&mut p).unwrap();
     assert_eq!(p, after_first_drag, "the second drag must be its own undo step");
@@ -170,10 +181,16 @@ fn moves_of_different_clips_never_merge() {
     h.execute(&mut p, Box::new(AddClip::new(seq, track, b))).unwrap();
     let depth = h.undo_depth();
 
-    h.execute_coalesced(&mut p, Box::new(MoveClip::new(seq, track, a_id, Ticks::from_seconds(30))))
-        .unwrap();
-    h.execute_coalesced(&mut p, Box::new(MoveClip::new(seq, track, b_id, Ticks::from_seconds(50))))
-        .unwrap();
+    h.execute_coalesced(
+        &mut p,
+        Box::new(MoveClip::new(seq, track, a_id, Ticks::from_seconds(30))),
+    )
+    .unwrap();
+    h.execute_coalesced(
+        &mut p,
+        Box::new(MoveClip::new(seq, track, b_id, Ticks::from_seconds(50))),
+    )
+    .unwrap();
     assert_eq!(h.undo_depth(), depth + 2, "different clips must not share an entry");
 }
 
@@ -287,10 +304,13 @@ fn splitting_undoes_and_redoes_with_stable_ids() {
     let before = p.clone();
 
     let mut split = SplitClip::new(seq, track, id, Ticks::from_seconds(8));
-    h.execute(&mut p, Box::new(std::mem::replace(
-        &mut split,
-        SplitClip::new(seq, track, id, Ticks::from_seconds(8)),
-    )))
+    h.execute(
+        &mut p,
+        Box::new(std::mem::replace(
+            &mut split,
+            SplitClip::new(seq, track, id, Ticks::from_seconds(8)),
+        )),
+    )
     .unwrap();
     assert_eq!(p.clip_count(), 2);
     let after_split = p.clone();
@@ -310,7 +330,10 @@ fn splitting_undoes_and_redoes_with_stable_ids() {
 
     // And undoing back out returns to the pre-split state.
     h.undo(&mut p).unwrap();
-    assert_eq!(p.active().unwrap().tracks[0].clips()[0].duration, before.active().unwrap().tracks[0].clips()[0].duration);
+    assert_eq!(
+        p.active().unwrap().tracks[0].clips()[0].duration,
+        before.active().unwrap().tracks[0].clips()[0].duration
+    );
 }
 
 #[test]
@@ -364,7 +387,8 @@ fn undo_and_redo_labels_track_the_stacks() {
     h.execute(&mut p, Box::new(AddClip::new(seq, track, c))).unwrap();
     assert_eq!(h.undo_name(), Some("Add Clip"));
 
-    h.execute(&mut p, Box::new(MoveClip::new(seq, track, id, Ticks::from_seconds(10)))).unwrap();
+    h.execute(&mut p, Box::new(MoveClip::new(seq, track, id, Ticks::from_seconds(10))))
+        .unwrap();
     assert_eq!(h.undo_name(), Some("Move Clip"));
 
     assert_eq!(h.undo(&mut p).unwrap(), "Move Clip");
@@ -400,8 +424,11 @@ fn a_long_edit_session_undoes_all_the_way_back_to_the_start() {
         .unwrap();
         snapshots.push(p.clone());
 
-        h.execute(&mut p, Box::new(SplitClip::new(seq, track, id, Ticks::from_seconds(i * 10 + 2))))
-            .unwrap();
+        h.execute(
+            &mut p,
+            Box::new(SplitClip::new(seq, track, id, Ticks::from_seconds(i * 10 + 2))),
+        )
+        .unwrap();
         snapshots.push(p.clone());
     }
     assert_eq!(p.clip_count(), 24);
@@ -428,8 +455,16 @@ fn a_long_edit_session_undoes_all_the_way_back_to_the_start() {
             edits_equal(&p, &expected),
             "mismatch at undo depth {}:\n  got      {:#?}\n  expected {:#?}",
             h.undo_depth(),
-            p.active().unwrap().tracks[0].clips().iter().map(|c| (c.id, c.timeline_start, c.duration)).collect::<Vec<_>>(),
-            expected.active().unwrap().tracks[0].clips().iter().map(|c| (c.id, c.timeline_start, c.duration)).collect::<Vec<_>>(),
+            p.active().unwrap().tracks[0]
+                .clips()
+                .iter()
+                .map(|c| (c.id, c.timeline_start, c.duration))
+                .collect::<Vec<_>>(),
+            expected.active().unwrap().tracks[0]
+                .clips()
+                .iter()
+                .map(|c| (c.id, c.timeline_start, c.duration))
+                .collect::<Vec<_>>(),
         );
     }
     assert!(!h.can_undo());
@@ -658,12 +693,22 @@ fn different_properties_never_merge_with_each_other() {
 
     h.execute_coalesced(
         &mut p,
-        Box::new(SetClipProperty::new(seq, id, ClipProperty::Opacity, PropertyValue::Scalar(0.5))),
+        Box::new(SetClipProperty::new(
+            seq,
+            id,
+            ClipProperty::Opacity,
+            PropertyValue::Scalar(0.5),
+        )),
     )
     .unwrap();
     h.execute_coalesced(
         &mut p,
-        Box::new(SetClipProperty::new(seq, id, ClipProperty::Rotation, PropertyValue::Scalar(90.0))),
+        Box::new(SetClipProperty::new(
+            seq,
+            id,
+            ClipProperty::Rotation,
+            PropertyValue::Scalar(90.0),
+        )),
     )
     .unwrap();
     assert_eq!(h.undo_depth(), depth + 2);
@@ -764,11 +809,8 @@ fn removing_a_keyframe_undoes_to_the_exact_keyframe() {
     .unwrap();
     let before = p.clone();
 
-    h.execute(
-        &mut p,
-        Box::new(RemoveClipKeyframe::new(seq, id, ClipProperty::Position, at)),
-    )
-    .unwrap();
+    h.execute(&mut p, Box::new(RemoveClipKeyframe::new(seq, id, ClipProperty::Position, at)))
+        .unwrap();
     assert!(!p.active().unwrap().tracks[0].clips()[0].transform.position.is_animated());
 
     h.undo(&mut p).unwrap();

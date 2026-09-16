@@ -76,14 +76,10 @@ pub fn evaluate(sequence: &Sequence, at: Ticks) -> Composition {
     // Solo is exclusive: the moment anything is soloed, everything else on that
     // side goes quiet. Video and audio solo independently, because soloing a
     // video track to inspect it should not silence the mix.
-    let video_solo = sequence
-        .tracks
-        .iter()
-        .any(|t| t.kind == TrackKind::Video && t.solo && !t.muted);
-    let audio_solo = sequence
-        .tracks
-        .iter()
-        .any(|t| t.kind == TrackKind::Audio && t.solo && !t.muted);
+    let video_solo =
+        sequence.tracks.iter().any(|t| t.kind == TrackKind::Video && t.solo && !t.muted);
+    let audio_solo =
+        sequence.tracks.iter().any(|t| t.kind == TrackKind::Audio && t.solo && !t.muted);
 
     let mut video = Vec::new();
     let mut audio = Vec::new();

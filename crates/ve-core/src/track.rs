@@ -127,11 +127,13 @@ impl Track {
     ///
     /// The exclusion is what makes moving a clip within its own footprint work:
     /// a clip never collides with itself.
+    ///
+    /// Binary-searches to the first clip that could overlap rather than
+    /// scanning the track. Every insert and every move calls this, so a linear
+    /// scan here makes building a timeline quadratic in the number of clips —
+    /// which is exactly what the `build_timeline` benchmark caught.
     pub fn is_range_free(&self, range: TimeRange, ignore: Option<ClipId>) -> bool {
-        !self
-            .clips
-            .iter()
-            .any(|c| Some(c.id) != ignore && c.range().intersects(range))
+        !self.clips_in_range(range).any(|c| Some(c.id) != ignore)
     }
 
     /// Inserts a clip, refusing the edit if it would overlap another.

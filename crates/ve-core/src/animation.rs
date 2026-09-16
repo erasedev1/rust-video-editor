@@ -50,22 +50,23 @@ impl Animatable for Rgba {
 /// change of representation.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Interpolation {
     /// Holds this keyframe's value until the next one. Used for stepped,
     /// non-interpolated parameters (a blend mode, an enum choice).
     Hold,
+    #[default]
     Linear,
     EaseIn,
     EaseOut,
     EaseInOut,
     /// CSS-style `cubic-bezier(x1, y1, x2, y2)`.
-    Bezier { x1: f64, y1: f64, x2: f64, y2: f64 },
-}
-
-impl Default for Interpolation {
-    fn default() -> Self {
-        Interpolation::Linear
-    }
+    Bezier {
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+    },
 }
 
 impl Interpolation {

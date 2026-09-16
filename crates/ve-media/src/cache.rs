@@ -171,11 +171,7 @@ impl FrameCache {
             // entries, not millions, and eviction happens once per insert, so
             // a heap's bookkeeping would cost more than it saves. Revisit if
             // profiling ever says otherwise.
-            let victim = self
-                .entries
-                .iter()
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(k, _)| *k);
+            let victim = self.entries.iter().min_by_key(|(_, e)| e.last_used).map(|(k, _)| *k);
             match victim {
                 Some(k) => {
                     if let Some(e) = self.entries.remove(&k) {

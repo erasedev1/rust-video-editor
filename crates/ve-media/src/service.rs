@@ -104,12 +104,19 @@ pub struct DecodeService {
 
 impl DecodeService {
     pub fn new(cache_budget_mb: usize, metrics: Metrics) -> Self {
-        let cache =
-            Arc::new(Mutex::new(FrameCache::with_budget_mb(cache_budget_mb).with_metrics(metrics.clone())));
+        let cache = Arc::new(Mutex::new(
+            FrameCache::with_budget_mb(cache_budget_mb).with_metrics(metrics.clone()),
+        ));
         // Unbounded so a worker can never block on delivery; a stalled consumer
         // costs memory rather than wedging decoding.
         let (events_tx, events_rx) = crossbeam_channel::unbounded();
-        DecodeService { cache, workers: Mutex::new(HashMap::new()), events_tx, events_rx, metrics }
+        DecodeService {
+            cache,
+            workers: Mutex::new(HashMap::new()),
+            events_tx,
+            events_rx,
+            metrics,
+        }
     }
 
     /// Opens a file and starts its worker thread.
@@ -291,7 +298,9 @@ impl Worker {
                     let job = {
                         let mut queue = thread_shared.queue.lock();
                         queue.busy = false;
-                        while !queue.has_work() && !thread_shared.shutdown.load(Ordering::Acquire) {
+                        while !queue.has_work()
+                            && !thread_shared.shutdown.load(Ordering::Acquire)
+                        {
                             thread_shared.wake.wait(&mut queue);
                         }
                         if thread_shared.shutdown.load(Ordering::Acquire) {
@@ -407,4 +416,3 @@ pub mod budget {
     /// Frames cached by default. Roughly 40 frames of 4K RGBA, or 500 of 1080p.
     pub const DEFAULT_FRAME_CACHE_MB: usize = 512;
 }
-

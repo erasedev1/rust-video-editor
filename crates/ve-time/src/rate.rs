@@ -82,7 +82,7 @@ impl Rate {
     /// multiple of 30 (29.97, 59.94, 119.88). 23.976 is *not* drop-frame: it has
     /// no standard drop-frame notation.
     pub fn is_drop_frame(self) -> bool {
-        self.den == 1001 && self.num % 30000 == 0
+        self.den == 1001 && self.num.is_multiple_of(30000)
     }
 
     /// Exact tick duration of one frame, if the rate divides the timebase.
