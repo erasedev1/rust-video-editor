@@ -9,10 +9,10 @@
 use std::path::PathBuf;
 
 use ve_command::{
-    AddClip, ClipProperty, MoveClip, PropertyValue, RemoveClip, SetClipEnabled,
-    SetClipProperty, SetSequenceFormat, SplitClip, TrimClip, TrimEdge,
+    AddClip, ClipProperty, Compound, MoveClip, PropertyValue, RemoveClip, SetClipEnabled,
+    SetClipProperty, SetSequenceFormat, ShiftClips, SplitClip, TrimClip, TrimEdge,
 };
-use ve_core::{AssetId, Clip, ClipId, Project, TrackId, TrackKind};
+use ve_core::{AssetId, Clip, ClipId, Project, SequenceId, TrackId, TrackKind};
 use ve_engine::PlaybackEngine;
 use ve_project::{autosave, store};
 use ve_time::Ticks;
@@ -32,17 +32,51 @@ pub enum Action {
     // Edit
     Undo,
     Redo,
+    /// Lifts the selected clips, leaving the gap they occupied.
     DeleteSelected,
+    /// Deletes the selected clips and closes the holes behind them.
+    RippleDeleteSelected,
+    /// Pulls the rest of each track back over the gap under the playhead.
+    CloseGapAtPlayhead,
+    Copy,
+    /// Copy, then lift — the clipboard keeps the clips, the timeline does not.
+    Cut,
+    /// Places the clipboard at the playhead, on the selected track.
+    Paste,
     SplitAtPlayhead,
-    SelectClip { clip: ClipId, track: TrackId, additive: bool },
+    SelectClip {
+        clip: ClipId,
+        track: TrackId,
+        additive: bool,
+    },
+    SelectAll,
     ClearSelection,
     ToggleSelectedEnabled,
-    SetClipProperty { clip: ClipId, property: ClipProperty, value: PropertyValue },
+    SetClipProperty {
+        clip: ClipId,
+        property: ClipProperty,
+        value: PropertyValue,
+    },
 
     // Timeline
-    AddAssetToTimeline { asset: AssetId, track: TrackId, at: Ticks },
-    MoveClipTo { clip: ClipId, track: TrackId, to: Ticks, coalesce: bool },
-    TrimClipTo { clip: ClipId, track: TrackId, edge: TrimEdge, to: Ticks, coalesce: bool },
+    AddAssetToTimeline {
+        asset: AssetId,
+        track: TrackId,
+        at: Ticks,
+    },
+    MoveClipTo {
+        clip: ClipId,
+        track: TrackId,
+        to: Ticks,
+        coalesce: bool,
+    },
+    TrimClipTo {
+        clip: ClipId,
+        track: TrackId,
+        edge: TrimEdge,
+        to: Ticks,
+        coalesce: bool,
+    },
     EndGesture,
 
     // Transport
@@ -159,34 +193,57 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
             Err(e) => state.set_status(Status::warning(e.to_string())),
         },
 
-        Action::DeleteSelected => {
-            let targets: Vec<(ClipId, TrackId)> = state
-                .selection
-                .clips
-                .iter()
-                .filter_map(|c| {
-                    state.project.sequence(sequence_id)?.find_clip(*c).map(|(t, _)| (*c, t))
-                })
-                .collect();
-            if targets.is_empty() {
+        Action::DeleteSelected => delete_selected(state, sequence_id, false),
+
+        Action::RippleDeleteSelected => delete_selected(state, sequence_id, true),
+
+        Action::CloseGapAtPlayhead => {
+            let at = engine.clock().position();
+            let Some(seq) = state.project.sequence(sequence_id) else { return };
+            // Every unlocked track with a hole under the playhead closes it, so
+            // one keystroke tidies a straight cut across the whole sequence.
+            let mut command = Compound::new("Close Gap");
+            for track in seq.tracks.iter().filter(|t| !t.locked) {
+                if let Some(gap) = track.gap_at(at) {
+                    command.push(Box::new(ShiftClips::new(
+                        sequence_id,
+                        track.id,
+                        gap.end(),
+                        -gap.duration,
+                    )));
+                }
+            }
+            if command.is_empty() {
+                state.set_status(Status::warning("no gap under the playhead"));
+                return;
+            }
+            let count = command.len();
+            match state.history.execute(&mut state.project, Box::new(command)) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.set_status(Status::info(format!(
+                        "closed {count} gap{}",
+                        plural(count)
+                    )));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::Copy => match copy_selection(state, sequence_id) {
+            0 => state.set_status(Status::warning("nothing selected")),
+            n => state.set_status(Status::info(format!("copied {n} clip{}", plural(n)))),
+        },
+
+        Action::Cut => {
+            if copy_selection(state, sequence_id) == 0 {
                 state.set_status(Status::warning("nothing selected"));
                 return;
             }
-            let count = targets.len();
-            for (clip, track) in targets {
-                let command = Box::new(RemoveClip::new(sequence_id, track, clip));
-                if let Err(e) = state.history.execute(&mut state.project, command) {
-                    state.set_status(Status::error(e.to_string()));
-                    return;
-                }
-            }
-            state.selection.clear();
-            state.mark_edited();
-            state.set_status(Status::info(format!(
-                "deleted {count} clip{}",
-                if count == 1 { "" } else { "s" }
-            )));
+            delete_selected(state, sequence_id, false);
         }
+
+        Action::Paste => paste(state, engine, sequence_id),
 
         Action::SplitAtPlayhead => {
             let at = engine.clock().position();
@@ -206,15 +263,18 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
                 return;
             }
             let count = targets.len();
+            // One razor stroke is one undo step, however many tracks it crossed.
+            let mut command = Compound::new("Split Clip");
             for (clip, track) in targets {
-                let command = Box::new(SplitClip::new(sequence_id, track, clip, at));
-                if let Err(e) = state.history.execute(&mut state.project, command) {
-                    state.set_status(Status::warning(e.to_string()));
-                    return;
-                }
+                command.push(Box::new(SplitClip::new(sequence_id, track, clip, at)));
             }
-            state.mark_edited();
-            state.set_status(Status::info(format!("split {count}")));
+            match state.history.execute(&mut state.project, Box::new(command)) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.set_status(Status::info(format!("split {count}")));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
         }
 
         Action::SelectClip { clip, track, additive } => {
@@ -223,6 +283,14 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
             } else {
                 state.selection.select_only(clip, track);
             }
+        }
+
+        Action::SelectAll => {
+            let Some(seq) = state.project.sequence(sequence_id) else { return };
+            state.selection.clips =
+                seq.tracks.iter().flat_map(|t| t.clips()).map(|c| c.id).collect();
+            let n = state.selection.clips.len();
+            state.set_status(Status::info(format!("selected {n} clip{}", plural(n))));
         }
 
         Action::ClearSelection => state.selection.clear(),
@@ -342,6 +410,214 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
             state.show_performance_overlay = !state.show_performance_overlay;
         }
     }
+}
+
+/// The "s" in "3 clips".
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// The selected clips as `(clip, track, range)`, latest first.
+///
+/// Reverse timeline order is what makes a ripple delete of several clips work:
+/// each removal shifts everything after it, so taking them from the back means
+/// the positions captured for the earlier ones are still true when their turn
+/// comes.
+fn selected_spans(
+    state: &EditorState,
+    sequence: SequenceId,
+) -> Vec<(ClipId, TrackId, ve_time::TimeRange)> {
+    let Some(seq) = state.project.sequence(sequence) else { return Vec::new() };
+    let mut spans: Vec<_> = state
+        .selection
+        .clips
+        .iter()
+        .filter_map(|id| seq.find_clip(*id).map(|(track, clip)| (*id, track, clip.range())))
+        .collect();
+    spans.sort_by_key(|(_, _, range)| std::cmp::Reverse(range.start));
+    spans
+}
+
+/// Deletes the selection, optionally closing the holes behind it.
+///
+/// One compound either way, so however many clips went, undo brings them all
+/// back in one step.
+fn delete_selected(state: &mut EditorState, sequence: SequenceId, ripple: bool) {
+    let targets = selected_spans(state, sequence);
+    if targets.is_empty() {
+        state.set_status(Status::warning("nothing selected"));
+        return;
+    }
+
+    let count = targets.len();
+    let mut command = Compound::new(if ripple { "Ripple Delete" } else { "Delete Clip" });
+    for (clip, track, range) in targets {
+        command.push(Box::new(RemoveClip::new(sequence, track, clip)));
+        if ripple {
+            command.push(Box::new(ShiftClips::new(
+                sequence,
+                track,
+                range.end(),
+                -range.duration,
+            )));
+        }
+    }
+
+    match state.history.execute(&mut state.project, Box::new(command)) {
+        Ok(()) => {
+            state.selection.clear();
+            state.mark_edited();
+            state.set_status(Status::info(format!("deleted {count} clip{}", plural(count))));
+        }
+        Err(e) => state.set_status(Status::error(e.to_string())),
+    }
+}
+
+/// Puts the selected clips on the clipboard. Returns how many were captured.
+///
+/// A copy with nothing selected leaves the clipboard as it was: pressing the
+/// key with no selection is a slip, and losing what was already there over it
+/// would be the worst possible answer.
+fn copy_selection(state: &mut EditorState, sequence: SequenceId) -> usize {
+    let Some(seq) = state.project.sequence(sequence) else { return 0 };
+    let clips: Vec<(usize, Clip)> = seq
+        .tracks
+        .iter()
+        .enumerate()
+        .flat_map(|(index, track)| {
+            track
+                .clips()
+                .iter()
+                .filter(|c| state.selection.is_selected(c.id))
+                .map(move |c| (index, c.clone()))
+        })
+        .collect();
+    if clips.is_empty() {
+        return 0;
+    }
+    let count = clips.len();
+    state.clipboard.fill(clips);
+    count
+}
+
+/// Places the clipboard at the playhead, starting on the selected track.
+///
+/// All or nothing: a paste that would land on top of an existing clip is
+/// refused outright rather than dropping the clips that did not fit, because a
+/// partial paste is the kind of thing a user only notices much later.
+fn paste(state: &mut EditorState, engine: &PlaybackEngine, sequence: SequenceId) {
+    if state.clipboard.is_empty() {
+        state.set_status(Status::warning("the clipboard is empty"));
+        return;
+    }
+    let at = engine.clock().position();
+
+    let placements = match plan_paste(state, sequence, at) {
+        Ok(placements) => placements,
+        Err(why) => {
+            state.set_status(Status::warning(why));
+            return;
+        }
+    };
+
+    let mut command = Compound::new("Paste");
+    let mut pasted = Vec::with_capacity(placements.len());
+    for (track, start, mut clip) in placements {
+        // Fresh IDs, so the same copy can be pasted any number of times and
+        // each result is its own clip.
+        clip.id = state.project.new_clip_id();
+        for effect in &mut clip.effects {
+            effect.id = state.project.new_effect_id();
+        }
+        clip.timeline_start = start;
+        pasted.push((clip.id, track));
+        command.push(Box::new(AddClip::new(sequence, track, clip)));
+    }
+
+    match state.history.execute(&mut state.project, Box::new(command)) {
+        Ok(()) => {
+            let count = pasted.len();
+            state.selection.clips = pasted.iter().map(|(clip, _)| *clip).collect();
+            state.selection.track = pasted.first().map(|(_, track)| *track);
+            state.mark_edited();
+            state.set_status(Status::info(format!("pasted {count} clip{}", plural(count))));
+        }
+        Err(e) => state.set_status(Status::warning(format!("could not paste: {e}"))),
+    }
+}
+
+/// Works out where every clipboard clip would land, or why it cannot.
+///
+/// Separate from [`paste`] so the whole plan is checked before a single ID is
+/// minted: a refused paste must leave the allocator exactly as it found it.
+fn plan_paste(
+    state: &EditorState,
+    sequence: SequenceId,
+    at: Ticks,
+) -> Result<Vec<(TrackId, Ticks, Clip)>, String> {
+    let seq = state
+        .project
+        .sequence(sequence)
+        .ok_or_else(|| "this project has no sequence".to_string())?;
+    let base = state
+        .selection
+        .track
+        .and_then(|t| seq.track_index(t))
+        .or_else(|| (!seq.tracks.is_empty()).then_some(0))
+        .ok_or_else(|| "this sequence has no tracks".to_string())?;
+
+    // Whether the stack of tracks is deep enough is a property of the paste
+    // point rather than of any one clip, so it is answered first and as a
+    // whole.
+    let depth = state.clipboard.entries().iter().map(|e| e.track_offset).max().unwrap_or(0);
+    if base + depth >= seq.tracks.len() {
+        return Err(
+            "the clipboard needs more tracks than there are below the paste point".to_string()
+        );
+    }
+
+    state
+        .clipboard
+        .entries()
+        .iter()
+        .map(|entry| {
+            let track = &seq.tracks[base + entry.track_offset];
+            // A clip does not record whether it was video or audio — that was
+            // its track's business — so what it can be pasted onto is decided
+            // by its media, exactly as a fresh import is.
+            let usable = match state.project.asset(entry.clip.asset) {
+                Some(asset) => match track.kind {
+                    TrackKind::Video => asset.info.has_video(),
+                    TrackKind::Audio => asset.info.has_audio(),
+                },
+                // Media missing from the project cannot be judged here; the
+                // loader's missing-asset warning already covers that case.
+                None => true,
+            };
+            if !usable {
+                return Err(format!(
+                    "{} cannot be pasted onto {}",
+                    entry.clip.name, track.name
+                ));
+            }
+            // Space is checked here rather than being left to `AddClip` so that
+            // a paste that cannot land is refused before a single ID has been
+            // minted for it. Clips from one track keep their spacing, so they
+            // can only collide with what is already on the timeline.
+            let landing = ve_time::TimeRange::new(at + entry.offset, entry.clip.duration);
+            if !track.is_range_free(landing, None) {
+                return Err(format!(
+                    "{} would land on top of a clip on {}",
+                    entry.clip.name, track.name
+                ));
+            }
+            Ok((track.id, landing.start, entry.clip.clone()))
+        })
+        .collect()
 }
 
 /// Stores the playhead on the sequence, so reopening the project restores it.

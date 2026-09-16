@@ -60,8 +60,27 @@ pub fn collect(ctx: &egui::Context, timeline_width: f32) -> Vec<Action> {
             actions.push(Action::Redo);
         }
 
-        if i.consume_key(plain, Key::Delete) || i.consume_key(plain, Key::Backspace) {
+        // Delete lifts, leaving the gap; shift-delete ripples it closed. The
+        // same pairing as every other NLE.
+        if i.consume_key(shift, Key::Delete) || i.consume_key(shift, Key::Backspace) {
+            actions.push(Action::RippleDeleteSelected);
+        } else if i.consume_key(plain, Key::Delete) || i.consume_key(plain, Key::Backspace) {
             actions.push(Action::DeleteSelected);
+        }
+        if i.consume_key(ctrl, Key::Backspace) {
+            actions.push(Action::CloseGapAtPlayhead);
+        }
+        if i.consume_key(ctrl, Key::C) {
+            actions.push(Action::Copy);
+        }
+        if i.consume_key(ctrl, Key::X) {
+            actions.push(Action::Cut);
+        }
+        if i.consume_key(ctrl, Key::V) {
+            actions.push(Action::Paste);
+        }
+        if i.consume_key(ctrl, Key::A) {
+            actions.push(Action::SelectAll);
         }
         if i.consume_key(ctrl, Key::K) {
             actions.push(Action::SplitAtPlayhead);
@@ -110,6 +129,10 @@ pub const BINDINGS: &[Binding] = &[
     Binding { label: "Redo", keys: "Ctrl + Shift + Z" },
     Binding { label: "Split at playhead", keys: "Ctrl + K" },
     Binding { label: "Delete selected", keys: "Delete" },
+    Binding { label: "Ripple delete", keys: "Shift + Delete" },
+    Binding { label: "Close gap at playhead", keys: "Ctrl + Backspace" },
+    Binding { label: "Copy / cut / paste", keys: "Ctrl + C / X / V" },
+    Binding { label: "Select all", keys: "Ctrl + A" },
     Binding { label: "Toggle clip enabled", keys: "E" },
     Binding { label: "Clear selection", keys: "Esc" },
     Binding { label: "Toggle snapping", keys: "S" },

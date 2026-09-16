@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ve_command::History;
-use ve_core::{AssetId, ClipId, Project, SequenceId, TrackId};
+use ve_core::{AssetId, Clip, ClipId, Project, SequenceId, TrackId};
 use ve_project::Autosave;
 use ve_time::Ticks;
 
@@ -48,6 +48,63 @@ impl Selection {
             [one] => Some(*one),
             _ => None,
         }
+    }
+}
+
+/// Clips lifted from the timeline, waiting to be pasted.
+///
+/// Positions are stored *relative* — each clip's offset from the earliest one
+/// copied, and its track's offset from the topmost track involved — rather than
+/// absolutely. That is what makes a paste reconstruct the shape of the copy
+/// wherever the playhead and the target track happen to be, instead of only
+/// working where the clips came from.
+///
+/// The clips keep their original IDs here and are given fresh ones on paste, so
+/// the same copy can be pasted any number of times.
+#[derive(Debug, Default, Clone)]
+pub struct Clipboard {
+    entries: Vec<ClipboardEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClipboardEntry {
+    /// How many tracks below the paste target this clip belongs.
+    pub track_offset: usize,
+    /// How far after the paste point this clip starts.
+    pub offset: Ticks,
+    pub clip: Clip,
+}
+
+impl Clipboard {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn entries(&self) -> &[ClipboardEntry] {
+        &self.entries
+    }
+
+    /// Replaces the contents with `(track index, clip)` pairs, in any order.
+    pub fn fill(&mut self, clips: Vec<(usize, Clip)>) {
+        self.entries.clear();
+        let Some(origin) = clips.iter().map(|(_, c)| c.timeline_start).min() else { return };
+        let top = clips.iter().map(|(i, _)| *i).min().unwrap_or(0);
+        self.entries = clips
+            .into_iter()
+            .map(|(index, clip)| ClipboardEntry {
+                track_offset: index - top,
+                offset: clip.timeline_start - origin,
+                clip,
+            })
+            .collect();
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
     }
 }
 
@@ -199,6 +256,7 @@ pub struct EditorState {
     pub path: Option<PathBuf>,
     pub autosave: Autosave,
     pub selection: Selection,
+    pub clipboard: Clipboard,
     pub timeline: TimelineView,
     pub status: Option<Status>,
     /// The drag gesture in progress, if any.
@@ -218,6 +276,7 @@ impl EditorState {
             path: None,
             autosave: Autosave::new(scratch_dir, interval),
             selection: Selection::default(),
+            clipboard: Clipboard::default(),
             timeline: TimelineView::default(),
             status: None,
             drag: TimelineDrag::None,

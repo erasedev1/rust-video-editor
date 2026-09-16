@@ -181,12 +181,48 @@ impl VergeApp {
                         ui.close();
                     }
                     ui.separator();
+
+                    let has_selection = !self.state.selection.clips.is_empty();
+                    let has_clipboard = !self.state.clipboard.is_empty();
+                    for (label, action, enabled) in [
+                        ("Cut    Ctrl+X", Action::Cut, has_selection),
+                        ("Copy    Ctrl+C", Action::Copy, has_selection),
+                        ("Paste    Ctrl+V", Action::Paste, has_clipboard),
+                    ] {
+                        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                            actions_out.push(action);
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+
+                    if ui.button("Select All    Ctrl+A").clicked() {
+                        actions_out.push(Action::SelectAll);
+                        ui.close();
+                    }
                     if ui.button("Split at Playhead    Ctrl+K").clicked() {
                         actions_out.push(Action::SplitAtPlayhead);
                         ui.close();
                     }
-                    if ui.button("Delete Selected    Del").clicked() {
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("Delete    Del"))
+                        .clicked()
+                    {
                         actions_out.push(Action::DeleteSelected);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            has_selection,
+                            egui::Button::new("Ripple Delete    Shift+Del"),
+                        )
+                        .clicked()
+                    {
+                        actions_out.push(Action::RippleDeleteSelected);
+                        ui.close();
+                    }
+                    if ui.button("Close Gap    Ctrl+Backspace").clicked() {
+                        actions_out.push(Action::CloseGapAtPlayhead);
                         ui.close();
                     }
                 });
