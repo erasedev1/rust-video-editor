@@ -227,6 +227,102 @@ impl VergeApp {
                     }
                 });
 
+                ui.menu_button("Track", |ui| {
+                    if ui.button("Add Video Track").clicked() {
+                        actions_out.push(Action::AddTrack(ve_core::TrackKind::Video));
+                        ui.close();
+                    }
+                    if ui.button("Add Audio Track").clicked() {
+                        actions_out.push(Action::AddTrack(ve_core::TrackKind::Audio));
+                        ui.close();
+                    }
+                    ui.separator();
+
+                    // Everything below acts on the track last touched in the
+                    // timeline, which is also where a paste lands.
+                    let target = self.state.selection.track;
+                    let name = target
+                        .and_then(|t| self.state.active_sequence()?.track(t))
+                        .map(|t| t.name.clone());
+                    match &name {
+                        Some(name) => ui.label(
+                            egui::RichText::new(format!("Selected: {name}"))
+                                .small()
+                                .color(theme::TEXT_DIM),
+                        ),
+                        None => ui.label(
+                            egui::RichText::new("No track selected")
+                                .small()
+                                .color(theme::TEXT_FAINT),
+                        ),
+                    };
+
+                    for (label, action) in [
+                        (
+                            "Move Up",
+                            target.map(|t| Action::MoveTrack { track: t, toward_top: true }),
+                        ),
+                        (
+                            "Move Down",
+                            target.map(|t| Action::MoveTrack { track: t, toward_top: false }),
+                        ),
+                        ("Delete Track", target.map(Action::RemoveTrack)),
+                    ] {
+                        if ui.add_enabled(action.is_some(), egui::Button::new(label)).clicked()
+                        {
+                            actions_out.extend(action);
+                            ui.close();
+                        }
+                    }
+                });
+
+                ui.menu_button("Marker", |ui| {
+                    if ui.button("Add Marker    M").clicked() {
+                        actions_out.push(Action::AddMarkerAtPlayhead);
+                        ui.close();
+                    }
+                    if ui.button("Previous Marker    Ctrl+←").clicked() {
+                        actions_out.push(Action::GoToMarker(-1));
+                        ui.close();
+                    }
+                    if ui.button("Next Marker    Ctrl+→").clicked() {
+                        actions_out.push(Action::GoToMarker(1));
+                        ui.close();
+                    }
+                    ui.separator();
+
+                    let markers: Vec<(ve_core::MarkerId, String, String)> = self
+                        .state
+                        .active_sequence()
+                        .map(|seq| {
+                            seq.markers
+                                .iter()
+                                .map(|m| {
+                                    (m.id, m.name.clone(), seq.timecode_at(m.time).to_string())
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if markers.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No markers").small().color(theme::TEXT_FAINT),
+                        );
+                    }
+                    for (id, name, timecode) in markers {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(timecode)
+                                    .monospace()
+                                    .color(theme::TEXT_DIM),
+                            );
+                            ui.label(name);
+                            if ui.small_button("✕").on_hover_text("Delete marker").clicked() {
+                                actions_out.push(Action::RemoveMarker(id));
+                            }
+                        });
+                    }
+                });
+
                 ui.menu_button("View", |ui| {
                     if ui.button("Zoom In    +").clicked() {
                         actions_out.push(Action::ZoomIn);

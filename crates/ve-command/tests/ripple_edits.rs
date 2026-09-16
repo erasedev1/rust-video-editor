@@ -7,7 +7,7 @@
 
 use ve_command::*;
 use ve_core::{
-    AssetId, Clip, ClipId, MediaInfo, Project, SequenceId, Size, TrackId, TrackKind,
+    AssetId, Clip, ClipId, MediaInfo, Project, SequenceId, Size, Speed, TrackId, TrackKind,
 };
 use ve_time::{Rate, Ticks};
 
@@ -429,4 +429,96 @@ fn every_new_edit_survives_an_undo_redo_round_trip() {
     assert!(seq_ref.tracks.iter().all(|t| t.invariants_hold()));
     assert_eq!(seq_ref.track(track).unwrap().len(), 3);
     assert_eq!(TrackKind::Video, seq_ref.track(track).unwrap().kind);
+}
+
+// ---- speed ------------------------------------------------------------
+
+#[test]
+fn halving_the_speed_doubles_the_length_and_keeps_the_frames() {
+    let (mut p, seq, track, asset) = fixture();
+    let ids = lay_out(&mut p, seq, track, asset, &[(5, 0, 10)]);
+    let before = p.clone();
+    let mut h = History::default();
+
+    let half = Speed::new(1, 2).unwrap();
+    h.execute(&mut p, Box::new(SetClipSpeed::new(seq, track, ids[0], half))).unwrap();
+
+    let (_, clip) = p.sequence(seq).unwrap().find_clip(ids[0]).unwrap();
+    assert_eq!(clip.speed, half);
+    assert_eq!(clip.duration, secs(20), "half speed should take twice as long");
+    assert_eq!(clip.source_in, secs(5), "the source window must not move");
+    assert_eq!(clip.source_out(), secs(15), "the same frames must still be shown");
+
+    h.undo(&mut p).unwrap();
+    assert_eq!(p, before);
+}
+
+#[test]
+fn doubling_the_speed_halves_the_length() {
+    let (mut p, seq, track, asset) = fixture();
+    let ids = lay_out(&mut p, seq, track, asset, &[(0, 0, 10)]);
+    let mut h = History::default();
+
+    let double = Speed::new(2, 1).unwrap();
+    h.execute(&mut p, Box::new(SetClipSpeed::new(seq, track, ids[0], double))).unwrap();
+    assert_eq!(window(&p, seq, ids[0]), (0, 0, 5));
+    assert_eq!(
+        p.sequence(seq).unwrap().find_clip(ids[0]).unwrap().1.source_out(),
+        secs(10),
+        "speeding up must not change which frames are covered"
+    );
+}
+
+#[test]
+fn a_speed_change_that_would_overlap_a_neighbour_is_refused() {
+    let (mut p, seq, track, asset) = fixture();
+    let ids = lay_out(&mut p, seq, track, asset, &[(0, 0, 10), (10, 10, 10)]);
+    let before = p.clone();
+    let mut h = History::default();
+
+    // Half speed needs twenty seconds, and the next clip starts at ten.
+    let err = h
+        .execute(
+            &mut p,
+            Box::new(SetClipSpeed::new(seq, track, ids[0], Speed::new(1, 2).unwrap())),
+        )
+        .unwrap_err();
+    assert!(matches!(err, CommandError::Core(ve_core::CoreError::ClipOverlap)));
+    assert_eq!(p, before);
+}
+
+#[test]
+fn a_speed_change_is_clamped_to_the_media_that_is_there() {
+    let (mut p, seq, track, asset) = fixture();
+    // Ten seconds starting at 55s of a 60-second asset would need forty more
+    // seconds of source at quarter speed, and there are only five.
+    let ids = lay_out(&mut p, seq, track, asset, &[(55, 0, 5)]);
+    let mut h = History::default();
+
+    let quarter = Speed::new(1, 4).unwrap();
+    h.execute(&mut p, Box::new(SetClipSpeed::new(seq, track, ids[0], quarter))).unwrap();
+
+    let (_, clip) = p.sequence(seq).unwrap().find_clip(ids[0]).unwrap();
+    assert_eq!(clip.duration, secs(20), "the clip should stretch the five seconds it has");
+    assert_eq!(clip.source_out(), secs(60), "the window ran past the end of the media");
+}
+
+#[test]
+fn redoing_a_speed_change_lands_on_exactly_the_same_length() {
+    let (mut p, seq, track, asset) = fixture();
+    // An awkward ratio, so the new length has to be rounded onto the frame
+    // grid: a redo that recomputed from the clip's current state rather than
+    // from the captured original would round a second time and drift.
+    let ids = lay_out(&mut p, seq, track, asset, &[(0, 0, 7)]);
+    let mut h = History::default();
+
+    let speed = Speed::from_f64(1.37).unwrap();
+    h.execute(&mut p, Box::new(SetClipSpeed::new(seq, track, ids[0], speed))).unwrap();
+    let after = p.clone();
+
+    for _ in 0..3 {
+        h.undo(&mut p).unwrap();
+        h.redo(&mut p).unwrap();
+        assert_eq!(p, after, "a redone speed change drifted");
+    }
 }

@@ -119,6 +119,131 @@ impl Command for RemoveTrack {
     }
 }
 
+/// Moves a track to a different position in the stack.
+///
+/// Order is layer order for video — index 0 is the bottom layer — so this is a
+/// compositing change, not a cosmetic one.
+#[derive(Debug)]
+pub struct MoveTrack {
+    sequence: SequenceId,
+    track_id: TrackId,
+    to: usize,
+    from: Option<usize>,
+}
+
+impl MoveTrack {
+    pub fn new(sequence: SequenceId, track_id: TrackId, to: usize) -> Self {
+        MoveTrack { sequence, track_id, to, from: None }
+    }
+}
+
+impl Command for MoveTrack {
+    fn name(&self) -> &str {
+        "Move Track"
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let seq = project
+            .sequence_mut(self.sequence)
+            .ok_or(CommandError::SequenceNotFound(self.sequence))?;
+        let from =
+            seq.track_index(self.track_id).ok_or(CommandError::TrackNotFound(self.track_id))?;
+        if self.to >= seq.tracks.len() {
+            return Err(CommandError::Rejected("no such position in the track stack".into()));
+        }
+        let track = seq.tracks.remove(from);
+        seq.tracks.insert(self.to, track);
+        self.from.get_or_insert(from);
+        Ok(())
+    }
+
+    fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let from =
+            self.from.ok_or_else(|| CommandError::Rejected("track was never moved".into()))?;
+        let seq = project
+            .sequence_mut(self.sequence)
+            .ok_or(CommandError::SequenceNotFound(self.sequence))?;
+        let now =
+            seq.track_index(self.track_id).ok_or(CommandError::TrackNotFound(self.track_id))?;
+        let track = seq.tracks.remove(now);
+        seq.tracks.insert(from.min(seq.tracks.len()), track);
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Which of a track's three switches a [`SetTrackFlag`] sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackFlag {
+    Muted,
+    Solo,
+    Locked,
+}
+
+/// Mutes, solos or locks a track.
+///
+/// These are project data — they are saved with the file and they change what
+/// is rendered and what can be edited — so they go through the history like
+/// every other edit rather than being poked into the model from the interface.
+#[derive(Debug)]
+pub struct SetTrackFlag {
+    sequence: SequenceId,
+    track_id: TrackId,
+    flag: TrackFlag,
+    value: bool,
+    previous: Option<bool>,
+}
+
+impl SetTrackFlag {
+    pub fn new(sequence: SequenceId, track_id: TrackId, flag: TrackFlag, value: bool) -> Self {
+        SetTrackFlag { sequence, track_id, flag, value, previous: None }
+    }
+}
+
+impl Command for SetTrackFlag {
+    fn name(&self) -> &str {
+        match (self.flag, self.value) {
+            (TrackFlag::Muted, true) => "Mute Track",
+            (TrackFlag::Muted, false) => "Unmute Track",
+            (TrackFlag::Solo, true) => "Solo Track",
+            (TrackFlag::Solo, false) => "Unsolo Track",
+            (TrackFlag::Locked, true) => "Lock Track",
+            (TrackFlag::Locked, false) => "Unlock Track",
+        }
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let track = crate::track_mut(project, self.sequence, self.track_id)?;
+        let slot = match self.flag {
+            TrackFlag::Muted => &mut track.muted,
+            TrackFlag::Solo => &mut track.solo,
+            TrackFlag::Locked => &mut track.locked,
+        };
+        self.previous.get_or_insert(*slot);
+        *slot = self.value;
+        Ok(())
+    }
+
+    fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let previous =
+            self.previous.ok_or_else(|| CommandError::Rejected("never applied".into()))?;
+        let track = crate::track_mut(project, self.sequence, self.track_id)?;
+        match self.flag {
+            TrackFlag::Muted => track.muted = previous,
+            TrackFlag::Solo => track.solo = previous,
+            TrackFlag::Locked => track.locked = previous,
+        }
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 /// Adds a marker to a sequence.
 #[derive(Debug)]
 pub struct AddMarker {

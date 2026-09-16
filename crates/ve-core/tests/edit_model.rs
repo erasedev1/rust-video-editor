@@ -76,7 +76,7 @@ fn ids_are_unique_and_never_reused() {
     let a = add_clip(&mut p, seq, track, asset, 0, 5);
     let b = add_clip(&mut p, seq, track, asset, 5, 5);
     assert_ne!(a, b);
-    p.sequence_mut(seq).unwrap().track_mut(track).unwrap().remove_clip(a);
+    p.sequence_mut(seq).unwrap().track_mut(track).unwrap().remove_clip(a).unwrap();
     let c = add_clip(&mut p, seq, track, asset, 0, 5);
     assert_ne!(c, a, "a deleted ID must never be handed out again");
     assert_ne!(c, b);
@@ -435,6 +435,10 @@ fn locked_tracks_refuse_every_mutation() {
         t.split_clip(id, Ticks::from_seconds(5), new_id, || EffectId::from_raw(1)),
         Err(CoreError::TrackLocked)
     );
+    // Removal too: `insert_clip` refuses on a locked track, so a removal that
+    // went through here could never be undone.
+    assert_eq!(t.remove_clip(id).unwrap_err(), CoreError::TrackLocked);
+    assert_eq!(t.shift_clips_from(Ticks::ZERO, Ticks::SECOND), Err(CoreError::TrackLocked));
     assert_eq!(
         t.clip(id).unwrap().range(),
         TimeRange::new(Ticks::ZERO, Ticks::from_seconds(10))
@@ -576,7 +580,7 @@ fn assets_in_use_cannot_be_removed() {
     assert_eq!(p.remove_asset(asset), Err(CoreError::AssetInUse { id: asset, clips: 1 }));
 
     let clip_id = p.sequence(seq).unwrap().track(track).unwrap().clips()[0].id;
-    p.sequence_mut(seq).unwrap().track_mut(track).unwrap().remove_clip(clip_id);
+    p.sequence_mut(seq).unwrap().track_mut(track).unwrap().remove_clip(clip_id).unwrap();
     assert!(p.remove_asset(asset).is_ok());
 }
 

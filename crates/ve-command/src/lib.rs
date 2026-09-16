@@ -25,13 +25,14 @@ mod property_commands;
 mod structure_commands;
 
 pub use clip_commands::{AddClip, MoveClip, RemoveClip, SplitClip, TrimClip, TrimEdge};
-pub use edit_commands::{Compound, RollEdit, ShiftClips, SlideClip, SlipClip};
+pub use edit_commands::{Compound, RollEdit, SetClipSpeed, ShiftClips, SlideClip, SlipClip};
 pub use history::{History, HistoryEntry};
 pub use property_commands::{
     ClipProperty, PropertyValue, RemoveClipKeyframe, SetClipKeyframe, SetClipProperty,
 };
 pub use structure_commands::{
-    AddMarker, AddTrack, RemoveMarker, RemoveTrack, SetClipEnabled, SetSequenceFormat,
+    AddMarker, AddTrack, MoveTrack, RemoveMarker, RemoveTrack, SetClipEnabled,
+    SetSequenceFormat, SetTrackFlag, TrackFlag,
 };
 
 /// An undoable edit.
@@ -73,7 +74,7 @@ pub trait Command: std::fmt::Debug + Send {
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
     #[error(transparent)]
-    Core(#[from] CoreError),
+    Core(CoreError),
     #[error("sequence {0} not found")]
     SequenceNotFound(SequenceId),
     #[error("track {0} not found")]
@@ -116,6 +117,23 @@ impl ClipWindow {
         clip.source_in = self.source_in;
         clip.timeline_start = self.timeline_start;
         clip.duration = self.duration;
+    }
+}
+
+/// Model refusals arrive as [`CoreError`] and are lifted here rather than by a
+/// derived `From`, so that "no such clip" has *one* spelling in this crate
+/// whether the check happened in a command or inside `ve-core`. Without this,
+/// the same failure would reach callers as `ClipNotFound` down one path and
+/// `Core(ClipNotFound)` down another, and matching on either would be wrong
+/// half the time.
+impl From<CoreError> for CommandError {
+    fn from(e: CoreError) -> Self {
+        match e {
+            CoreError::ClipNotFound(id) => CommandError::ClipNotFound(id),
+            CoreError::TrackNotFound(id) => CommandError::TrackNotFound(id),
+            CoreError::SequenceNotFound(id) => CommandError::SequenceNotFound(id),
+            other => CommandError::Core(other),
+        }
     }
 }
 

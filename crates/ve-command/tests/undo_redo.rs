@@ -924,13 +924,15 @@ fn commands_against_a_missing_object_report_a_typed_error() {
     let mut h = History::default();
     let ghost = ClipId::from_raw(999_999);
 
+    // One spelling of "no such clip", whether the command noticed or `ve-core`
+    // did: `RemoveClip` is refused by the model, `MoveClip` by its own lookup.
     assert!(matches!(
         h.execute(&mut p, Box::new(RemoveClip::new(seq, track, ghost))),
         Err(CommandError::ClipNotFound(_))
     ));
     assert!(matches!(
         h.execute(&mut p, Box::new(MoveClip::new(seq, track, ghost, Ticks::ZERO))),
-        Err(CommandError::Core(ve_core::CoreError::ClipNotFound(_)))
+        Err(CommandError::ClipNotFound(_))
     ));
     assert!(matches!(
         h.execute(

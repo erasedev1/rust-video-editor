@@ -94,6 +94,15 @@ pub fn collect(ctx: &egui::Context, timeline_width: f32) -> Vec<Action> {
         if i.consume_key(plain, Key::E) {
             actions.push(Action::ToggleSelectedEnabled);
         }
+        if i.consume_key(plain, Key::M) {
+            actions.push(Action::AddMarkerAtPlayhead);
+        }
+        if i.consume_key(ctrl, Key::ArrowLeft) {
+            actions.push(Action::GoToMarker(-1));
+        }
+        if i.consume_key(ctrl, Key::ArrowRight) {
+            actions.push(Action::GoToMarker(1));
+        }
 
         if i.consume_key(ctrl, Key::S) {
             actions.push(Action::SaveProject);
@@ -136,6 +145,8 @@ pub const BINDINGS: &[Binding] = &[
     Binding { label: "Toggle clip enabled", keys: "E" },
     Binding { label: "Clear selection", keys: "Esc" },
     Binding { label: "Toggle snapping", keys: "S" },
+    Binding { label: "Add marker", keys: "M" },
+    Binding { label: "Previous / next marker", keys: "Ctrl + ← / →" },
     Binding { label: "Zoom in / out", keys: "+ / −" },
     Binding { label: "Zoom to fit", keys: "Shift + Z" },
     Binding { label: "New project", keys: "Ctrl + N" },

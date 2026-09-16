@@ -15,7 +15,7 @@
 
 use std::any::Any;
 
-use ve_core::{ClipId, Project, SequenceId, TrackId};
+use ve_core::{ClipId, Project, SequenceId, Speed, TrackId};
 use ve_time::Ticks;
 
 use crate::{clip_of, track_mut, ClipWindow, Command, CommandError};
@@ -482,6 +482,113 @@ impl Command for SlideClip {
         match next.as_any().downcast_ref::<SlideClip>() {
             Some(other) if other.clip == self.clip && other.track == self.track => {
                 self.to = other.to;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Changes a clip's playback speed.
+///
+/// The source window is what stays fixed: the clip keeps showing the same
+/// frames, and its *timeline* length changes to hold them at the new rate — a
+/// clip at half speed occupies twice the timeline. The alternative, keeping the
+/// timeline length and changing which frames are shown, is a trim wearing a
+/// disguise, and is not what anyone means by "make this half speed".
+///
+/// The new length is snapped to the sequence's frame grid, because a clip
+/// boundary between two frames is not something the rest of the editor should
+/// have to reason about. That rounding can push the source window a hair past
+/// the end of the media, so the result is also clamped to what the asset
+/// actually has.
+#[derive(Debug)]
+pub struct SetClipSpeed {
+    sequence: SequenceId,
+    track: TrackId,
+    clip: ClipId,
+    speed: Speed,
+    /// The speed and window before the first apply. Every apply recomputes from
+    /// this rather than from the clip's current state, so a redo lands on
+    /// exactly the same length as the original edit instead of compounding the
+    /// frame snapping a second time.
+    before: Option<(Speed, ClipWindow)>,
+}
+
+impl SetClipSpeed {
+    pub fn new(sequence: SequenceId, track: TrackId, clip: ClipId, speed: Speed) -> Self {
+        SetClipSpeed { sequence, track, clip, speed, before: None }
+    }
+}
+
+impl Command for SetClipSpeed {
+    fn name(&self) -> &str {
+        "Set Clip Speed"
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let min = project.min_clip_duration(self.sequence);
+        let rate = project
+            .sequence(self.sequence)
+            .ok_or(CommandError::SequenceNotFound(self.sequence))?
+            .rate();
+        let clip = clip_of(project, self.sequence, self.track, self.clip)?;
+        let available = project.asset_duration(clip.asset);
+
+        let (was_speed, window) =
+            self.before.unwrap_or((clip.speed, ClipWindow::capture(clip)));
+        let source_duration = was_speed.timeline_to_source(window.duration);
+
+        let mut duration = rate.snap_round(self.speed.source_to_timeline(source_duration));
+        // The longest the clip may be before its source window runs off the end
+        // of the media, on the frame grid.
+        let headroom =
+            rate.snap_floor(self.speed.source_to_timeline(available - window.source_in));
+        duration = duration.min(headroom);
+        if duration < min {
+            return Err(ve_core::CoreError::TrimTooShort.into());
+        }
+
+        let (clip_id, speed) = (self.clip, self.speed);
+        let track = track_mut(project, self.sequence, self.track)?;
+        if track.locked {
+            return Err(ve_core::CoreError::TrackLocked.into());
+        }
+        if !track.is_range_free(
+            ve_time::TimeRange::new(window.timeline_start, duration),
+            Some(clip_id),
+        ) {
+            return Err(ve_core::CoreError::ClipOverlap.into());
+        }
+        let clip = track.clip_mut(clip_id).ok_or(CommandError::ClipNotFound(clip_id))?;
+        clip.speed = speed;
+        clip.duration = duration;
+        debug_assert!(track.invariants_hold());
+
+        self.before.get_or_insert((was_speed, window));
+        Ok(())
+    }
+
+    fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let (speed, window) =
+            self.before.ok_or_else(|| CommandError::Rejected("speed was never set".into()))?;
+        let clip_id = self.clip;
+        let track = track_mut(project, self.sequence, self.track)?;
+        let clip = track.clip_mut(clip_id).ok_or(CommandError::ClipNotFound(clip_id))?;
+        clip.speed = speed;
+        window.restore(clip);
+        debug_assert!(track.invariants_hold());
+        Ok(())
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        match next.as_any().downcast_ref::<SetClipSpeed>() {
+            Some(other) if other.clip == self.clip && other.track == self.track => {
+                self.speed = other.speed;
                 true
             }
             _ => false,

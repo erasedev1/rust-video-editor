@@ -153,9 +153,18 @@ impl Track {
         Ok(())
     }
 
-    pub fn remove_clip(&mut self, id: ClipId) -> Option<Clip> {
-        let idx = self.index_of(id)?;
-        Some(self.clips.remove(idx))
+    /// Takes a clip off the track.
+    ///
+    /// Refuses on a locked track, like every other mutation here. That matters
+    /// more than it looks: [`Track::insert_clip`] already refuses, so a removal
+    /// that went through on a locked track could not be undone, and the history
+    /// would be describing a project it no longer matched.
+    pub fn remove_clip(&mut self, id: ClipId) -> Result<Clip, CoreError> {
+        if self.locked {
+            return Err(CoreError::TrackLocked);
+        }
+        let idx = self.index_of(id).ok_or(CoreError::ClipNotFound(id))?;
+        Ok(self.clips.remove(idx))
     }
 
     /// Moves a clip to a new start position.

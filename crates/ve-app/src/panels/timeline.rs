@@ -20,6 +20,8 @@ use crate::theme;
 const TRIM_HANDLE_PX: f32 = 6.0;
 /// How near a snap target has to be, in pixels, for snapping to take hold.
 const SNAP_RADIUS_PX: f32 = 8.0;
+/// Side of a mute/solo/lock button in a track header.
+const SWITCH_PX: f32 = 15.0;
 
 pub fn show(ui: &mut Ui, state: &mut EditorState, playhead: Ticks, actions: &mut Vec<Action>) {
     let Some(sequence) = state.active_sequence().cloned() else { return };
@@ -48,11 +50,12 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, playhead: Ticks, actions: &mut
     handle_scroll_and_zoom(ui, state, &response, lanes_left, lane_area);
 
     draw_ruler(&painter, ruler_rect, state, &sequence, lanes_left);
+    let hover = response.hover_pos();
     let (lanes, content_height) =
-        draw_tracks(&painter, lane_area, state, &sequence, header_width, full.left());
+        draw_tracks(&painter, lane_area, state, &sequence, header_width, full.left(), hover);
     state.timeline.clamp_scroll_y(content_height, lane_area.height());
     draw_vertical_scrollbar(&painter, lane_area, state, content_height);
-    draw_markers(&painter, lane_area, state, &sequence, lanes_left);
+    draw_markers(&painter, lane_area, ruler_rect, state, &sequence, lanes_left);
     draw_playhead(&painter, full, ruler_rect, state, playhead, lanes_left);
 
     handle_pointer(ui, state, &sequence, &response, &lanes, ruler_rect, lanes_left, actions);
@@ -90,6 +93,24 @@ fn toolbar(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
         if ui.small_button("Delete").on_hover_text("Delete selected (Del)").clicked() {
             actions.push(Action::DeleteSelected);
         }
+        if ui
+            .small_button("Ripple")
+            .on_hover_text("Delete selected and close the gap (Shift+Del)")
+            .clicked()
+        {
+            actions.push(Action::RippleDeleteSelected);
+        }
+
+        ui.add_space(8.0);
+        if ui.small_button("◆").on_hover_text("Add a marker at the playhead (M)").clicked() {
+            actions.push(Action::AddMarkerAtPlayhead);
+        }
+        if ui.small_button("+V").on_hover_text("Add a video track").clicked() {
+            actions.push(Action::AddTrack(TrackKind::Video));
+        }
+        if ui.small_button("+A").on_hover_text("Add an audio track").clicked() {
+            actions.push(Action::AddTrack(TrackKind::Audio));
+        }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
@@ -105,8 +126,22 @@ fn toolbar(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
 struct Lane {
     track: ve_core::TrackId,
     rect: Rect,
+    /// The mute, solo and lock buttons, in that order.
+    ///
+    /// The header is painted rather than built from widgets, like the rest of
+    /// the timeline, so the rectangles the buttons occupy are handed back here
+    /// for the pointer pass to hit-test. Only visible rows produce a lane, so
+    /// this costs nothing for a track stack that is scrolled off screen.
+    switches: [Rect; 3],
     locked: bool,
 }
+
+/// The three header switches, in the order [`Lane::switches`] holds them.
+const SWITCHES: [(&str, ve_command::TrackFlag); 3] = [
+    ("M", ve_command::TrackFlag::Muted),
+    ("S", ve_command::TrackFlag::Solo),
+    ("L", ve_command::TrackFlag::Locked),
+];
 
 fn draw_ruler(
     painter: &egui::Painter,
@@ -196,6 +231,7 @@ fn draw_tracks(
     sequence: &Sequence,
     header_width: f32,
     left: f32,
+    hover: Option<Pos2>,
 ) -> (Vec<Lane>, f32) {
     let view = &state.timeline;
     let lanes_left = left + header_width;
@@ -245,7 +281,7 @@ fn draw_tracks(
             Stroke::new(1.0, theme::SEPARATOR),
         );
 
-        draw_track_header(painter, header_rect, track);
+        let switches = draw_track_header(painter, header_rect, track, hover);
         draw_grid(painter, lane_rect, state, sequence, lanes_left);
 
         // The culling that makes a big timeline cheap: only clips actually
@@ -254,7 +290,7 @@ fn draw_tracks(
             draw_clip(painter, lane_rect, state, sequence, clip, track.kind, lanes_left);
         }
 
-        lanes.push(Lane { track: track.id, rect: lane_rect, locked: track.locked });
+        lanes.push(Lane { track: track.id, rect: lane_rect, switches, locked: track.locked });
         y += height;
     }
     (lanes, content_height)
@@ -287,7 +323,13 @@ fn draw_vertical_scrollbar(
     painter.rect_filled(thumb, CornerRadius::same(2), theme::SEPARATOR);
 }
 
-fn draw_track_header(painter: &egui::Painter, rect: Rect, track: &ve_core::Track) {
+/// Paints a track header, returning where its three switches ended up.
+fn draw_track_header(
+    painter: &egui::Painter,
+    rect: Rect,
+    track: &ve_core::Track,
+    hover: Option<Pos2>,
+) -> [Rect; 3] {
     let accent = match track.kind {
         TrackKind::Video => theme::CLIP_VIDEO_TOP,
         TrackKind::Audio => theme::CLIP_AUDIO_TOP,
@@ -304,26 +346,6 @@ fn draw_track_header(painter: &egui::Painter, rect: Rect, track: &ve_core::Track
         FontId::proportional(11.5),
         if track.muted { theme::TEXT_FAINT } else { theme::TEXT },
     );
-
-    let mut flags = Vec::new();
-    if track.muted {
-        flags.push("M");
-    }
-    if track.solo {
-        flags.push("S");
-    }
-    if track.locked {
-        flags.push("L");
-    }
-    if !flags.is_empty() {
-        painter.text(
-            Pos2::new(rect.right() - 8.0, rect.top() + 5.0),
-            Align2::RIGHT_TOP,
-            flags.join(" "),
-            FontId::monospace(10.0),
-            theme::WARNING,
-        );
-    }
     painter.text(
         Pos2::new(rect.left() + 10.0, rect.bottom() - 5.0),
         Align2::LEFT_BOTTOM,
@@ -331,6 +353,40 @@ fn draw_track_header(painter: &egui::Painter, rect: Rect, track: &ve_core::Track
         FontId::proportional(9.5),
         theme::TEXT_FAINT,
     );
+
+    let on = [track.muted, track.solo, track.locked];
+    let mut switches = [Rect::NOTHING; 3];
+    for (i, ((label, _), lit)) in SWITCHES.iter().zip(on).enumerate() {
+        // Laid out from the right so the row reads M S L, and clamped inside
+        // the header so a short track still gets usable targets.
+        let right = rect.right() - 6.0 - (2 - i) as f32 * (SWITCH_PX + 3.0);
+        let size = SWITCH_PX.min(rect.height() - 4.0);
+        let centre = Pos2::new(right - size / 2.0, rect.center().y);
+        let button = Rect::from_center_size(centre, egui::Vec2::splat(size));
+        switches[i] = button;
+
+        let hovered = hover.is_some_and(|p| button.contains(p));
+        let fill = match (lit, hovered) {
+            (true, _) => theme::WARNING.gamma_multiply(0.85),
+            (false, true) => theme::TRACK_LANE_ALT,
+            (false, false) => Color32::TRANSPARENT,
+        };
+        painter.rect_filled(button, CornerRadius::same(2), fill);
+        painter.rect_stroke(
+            button,
+            CornerRadius::same(2),
+            Stroke::new(1.0, theme::SEPARATOR),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            button.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::monospace(9.5),
+            if lit { theme::TRACK_HEADER } else { theme::TEXT_DIM },
+        );
+    }
+    switches
 }
 
 fn draw_grid(
@@ -458,6 +514,7 @@ fn elide(text: &str, width: f32) -> String {
 fn draw_markers(
     painter: &egui::Painter,
     area: Rect,
+    ruler: Rect,
     state: &EditorState,
     sequence: &Sequence,
     lanes_left: f32,
@@ -476,6 +533,13 @@ fn draw_markers(
             [Pos2::new(x, area.top()), Pos2::new(x, area.bottom())],
             Stroke::new(1.0, colour.gamma_multiply(0.6)),
         );
+        // A tab in the ruler, so a marker can be found and aimed at rather
+        // than only noticed as a line behind the clips.
+        let tab = Rect::from_min_max(
+            Pos2::new(x, ruler.bottom() - 6.0),
+            Pos2::new(x + 7.0, ruler.bottom()),
+        );
+        painter.rect_filled(tab, CornerRadius::same(1), colour);
     }
 }
 
@@ -567,6 +631,21 @@ fn handle_pointer(
     };
     let time_at_pointer = state.timeline.time_at(pointer.x - lanes_left);
 
+    // A click on a track header switch is not a gesture: it toggles and stops
+    // there, so it is answered before any drag can be started.
+    if response.clicked() && pointer.x < lanes_left && pointer.y > ruler.bottom() {
+        if let Some((track, flag, value)) = hit_test_switch(sequence, lanes, pointer) {
+            actions.push(Action::SetTrackFlag { track, flag, value });
+        }
+        state.selection.track = lanes
+            .iter()
+            .find(|l| l.rect.y_range().contains(pointer.y))
+            .map(|l| l.track)
+            .or(state.selection.track);
+        state.drag = TimelineDrag::None;
+        return;
+    }
+
     // Starting a gesture.
     if response.drag_started() || response.clicked() {
         if pointer.y <= ruler.bottom() {
@@ -642,6 +721,14 @@ fn handle_pointer(
         finish_drag(state, actions);
     }
 
+    if !response.dragged()
+        && pointer.x < lanes_left
+        && pointer.y > ruler.bottom()
+        && hit_test_switch(sequence, lanes, pointer).is_some()
+    {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
     // A cursor that tells the user which gesture a press would begin.
     if !response.dragged() && pointer.y > ruler.bottom() {
         if let Some(lane) = lanes.iter().find(|l| l.rect.contains(pointer)) {
@@ -662,6 +749,24 @@ fn finish_drag(state: &mut EditorState, actions: &mut Vec<Action>) {
         actions.push(Action::EndGesture);
     }
     state.drag = TimelineDrag::None;
+}
+
+/// The track header switch under the pointer, and the value clicking it sets.
+fn hit_test_switch(
+    sequence: &Sequence,
+    lanes: &[Lane],
+    pointer: Pos2,
+) -> Option<(ve_core::TrackId, ve_command::TrackFlag, bool)> {
+    let lane = lanes.iter().find(|l| l.rect.y_range().contains(pointer.y))?;
+    let index = lane.switches.iter().position(|r| r.contains(pointer))?;
+    let track = sequence.track(lane.track)?;
+    let flag = SWITCHES[index].1;
+    let current = match flag {
+        ve_command::TrackFlag::Muted => track.muted,
+        ve_command::TrackFlag::Solo => track.solo,
+        ve_command::TrackFlag::Locked => track.locked,
+    };
+    Some((lane.track, flag, !current))
 }
 
 /// What is under the pointer: a clip, and whether the pointer is on an edge.

@@ -20,6 +20,9 @@ The first vertical slice is complete and tested end to end:
 - Browse imported media with real probed metadata
 - Place clips on a timeline across multiple video and audio tracks
 - Move, trim and split clips, with snapping and frame-accurate editing
+- Ripple delete, close gap, and copy, cut and paste across tracks
+- Add, delete, reorder, mute, solo and lock tracks; set clip speed
+- Create markers and jump between them
 - Play the sequence, scrub, step by frame, stop and resume
 - GPU compositing with transforms, opacity and alpha blending
 - Undo and redo on every edit, with drags collapsed into single steps
@@ -165,7 +168,7 @@ Linux only and reports "unavailable" elsewhere, and audio output goes through
 ## Testing
 
 ```sh
-cargo test --workspace     # 308 tests
+cargo test --workspace     # 362 tests
 cargo bench                # measured, not estimated
 ```
 

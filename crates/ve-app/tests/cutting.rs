@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use ve_app::actions::{dispatch, Action};
 use ve_app::state::EditorState;
+use ve_command::TrackFlag;
 use ve_core::{AssetId, ClipId, Project, TrackId, TrackKind};
 use ve_engine::{ManualTime, PlaybackClock, PlaybackEngine};
 use ve_media::DecodeService;
@@ -420,4 +421,123 @@ fn splitting_across_tracks_is_a_single_undo_step() {
 
     editor.act(Action::Undo);
     assert_eq!(editor.state.project.clip_count(), 2, "one undo should rejoin both tracks");
+}
+
+// ---- tracks -----------------------------------------------------------
+
+#[test]
+fn adding_and_deleting_a_track_undoes_with_its_clips_intact() {
+    let mut editor = Editor::with_clips(2);
+    let v1 = editor.track(TrackKind::Video, 0);
+    let before = editor.sequence().tracks.len();
+
+    editor.act(Action::AddTrack(TrackKind::Video));
+    assert_eq!(editor.sequence().tracks.len(), before + 1, "{}", editor.status());
+    assert!(editor.status().contains("V3"), "{}", editor.status());
+
+    // Deleting a track takes its clips with it, and undo brings both back.
+    editor.act(Action::RemoveTrack(v1));
+    assert_eq!(editor.state.project.clip_count(), 0, "{}", editor.status());
+    editor.act(Action::Undo);
+    assert_eq!(editor.state.project.clip_count(), 2);
+    assert_eq!(editor.starts(v1), vec![0, CLIP]);
+}
+
+#[test]
+fn deleting_a_track_drops_its_clips_from_the_selection() {
+    let mut editor = Editor::with_clips(2);
+    let v1 = editor.track(TrackKind::Video, 0);
+    editor.act(Action::SelectAll);
+    assert_eq!(editor.state.selection.clips.len(), 2);
+
+    editor.act(Action::RemoveTrack(v1));
+    assert!(editor.state.selection.clips.is_empty(), "a deleted clip stayed selected");
+    assert_eq!(editor.state.selection.track, None);
+}
+
+#[test]
+fn track_switches_are_undoable_and_lock_really_locks() {
+    let mut editor = Editor::with_clips(1);
+    let v1 = editor.track(TrackKind::Video, 0);
+
+    editor.act(Action::SetTrackFlag { track: v1, flag: TrackFlag::Muted, value: true });
+    assert!(editor.sequence().track(v1).unwrap().muted);
+    editor.act(Action::Undo);
+    assert!(!editor.sequence().track(v1).unwrap().muted);
+
+    editor.act(Action::SetTrackFlag { track: v1, flag: TrackFlag::Locked, value: true });
+    let clip = editor.clip_ids(v1)[0];
+    editor.select(&[clip], v1);
+    editor.act(Action::DeleteSelected);
+    assert_eq!(editor.state.project.clip_count(), 1, "a locked track was edited");
+    assert!(editor.status().contains("locked"), "{}", editor.status());
+}
+
+#[test]
+fn moving_a_track_swaps_it_with_its_neighbour_of_the_same_kind() {
+    let mut editor = Editor::with_clips(1);
+    let v1 = editor.track(TrackKind::Video, 0);
+    let v2 = editor.track(TrackKind::Video, 1);
+    let order = |e: &Editor| -> Vec<String> {
+        e.sequence().tracks.iter().map(|t| t.name.clone()).collect()
+    };
+    assert_eq!(order(&editor), vec!["V1", "V2", "A1", "A2"]);
+
+    // Video is drawn in reverse, so "toward the top" is a later index.
+    editor.act(Action::MoveTrack { track: v1, toward_top: true });
+    assert_eq!(order(&editor), vec!["V2", "V1", "A1", "A2"], "{}", editor.status());
+    editor.act(Action::Undo);
+    assert_eq!(order(&editor), vec!["V1", "V2", "A1", "A2"]);
+
+    // Audio is drawn in order, so for it the directions are the other way
+    // round — and neither kind is ever moved into the other's half.
+    let a1 = editor.track(TrackKind::Audio, 0);
+    editor.act(Action::MoveTrack { track: a1, toward_top: false });
+    assert_eq!(order(&editor), vec!["V1", "V2", "A2", "A1"], "{}", editor.status());
+
+    editor.act(Action::MoveTrack { track: v2, toward_top: true });
+    assert!(editor.status().contains("already at the end"), "{}", editor.status());
+}
+
+// ---- markers ----------------------------------------------------------
+
+#[test]
+fn markers_are_added_at_the_playhead_and_navigated_between() {
+    let mut editor = Editor::with_clips(2);
+    for at in [1, 4] {
+        editor.act(Action::ScrubTo(secs(at)));
+        editor.act(Action::AddMarkerAtPlayhead);
+    }
+    assert_eq!(editor.sequence().markers.len(), 2, "{}", editor.status());
+
+    // A second marker on the same frame is refused rather than stacked.
+    editor.act(Action::AddMarkerAtPlayhead);
+    assert!(editor.status().contains("already a marker"), "{}", editor.status());
+    assert_eq!(editor.sequence().markers.len(), 2);
+
+    editor.act(Action::ScrubTo(Ticks::ZERO));
+    editor.act(Action::GoToMarker(1));
+    assert_eq!(editor.sequence().playhead, secs(1));
+    editor.act(Action::GoToMarker(1));
+    assert_eq!(editor.sequence().playhead, secs(4));
+    editor.act(Action::GoToMarker(1));
+    assert!(editor.status().contains("no marker"), "{}", editor.status());
+    assert_eq!(editor.sequence().playhead, secs(4), "a failed jump moved the playhead");
+
+    editor.act(Action::GoToMarker(-1));
+    assert_eq!(editor.sequence().playhead, secs(1));
+}
+
+#[test]
+fn deleting_a_marker_undoes() {
+    let mut editor = Editor::with_clips(1);
+    editor.act(Action::ScrubTo(secs(1)));
+    editor.act(Action::AddMarkerAtPlayhead);
+    let marker = editor.sequence().markers[0].id;
+
+    editor.act(Action::RemoveMarker(marker));
+    assert!(editor.sequence().markers.is_empty(), "{}", editor.status());
+    editor.act(Action::Undo);
+    assert_eq!(editor.sequence().markers.len(), 1);
+    assert_eq!(editor.sequence().markers[0].time, secs(1));
 }

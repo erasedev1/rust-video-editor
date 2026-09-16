@@ -50,9 +50,7 @@ impl Command for AddClip {
 
     fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
         let track = track_mut(project, self.sequence, self.track)?;
-        self.clip = Some(
-            track.remove_clip(self.clip_id).ok_or(CommandError::ClipNotFound(self.clip_id))?,
-        );
+        self.clip = Some(track.remove_clip(self.clip_id)?);
         Ok(())
     }
 
@@ -83,9 +81,7 @@ impl Command for RemoveClip {
 
     fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
         let track = track_mut(project, self.sequence, self.track)?;
-        self.removed = Some(
-            track.remove_clip(self.clip_id).ok_or(CommandError::ClipNotFound(self.clip_id))?,
-        );
+        self.removed = Some(track.remove_clip(self.clip_id)?);
         Ok(())
     }
 
@@ -360,7 +356,7 @@ impl Command for SplitClip {
             .ok_or_else(|| CommandError::Rejected("split was never applied".into()))?;
 
         let track = track_mut(project, self.sequence, self.track)?;
-        track.remove_clip(right_id).ok_or(CommandError::ClipNotFound(right_id))?;
+        track.remove_clip(right_id)?;
         let left =
             track.clip_mut(self.clip_id).ok_or(CommandError::ClipNotFound(self.clip_id))?;
         left.duration = restore;

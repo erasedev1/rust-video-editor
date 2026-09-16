@@ -8,20 +8,24 @@ interesting. The rule is that each phase leaves the editor runnable.
 Application shell, project model, media import, sequences, timeline, playback,
 save and load. **Complete**; see the README for what that means concretely.
 
-## Phase 2 — Editing (next)
+## Phase 2 — Editing (in progress)
 
-The parts of ordinary cutting that are missing:
+The parts of ordinary cutting that were missing. Done:
 
-- Ripple, roll, slip and slide edits
+- Ripple, roll, slip and slide edits, as commands
 - Ripple delete and close gap
 - Copy, cut and paste
-- Multiple selection and marquee selection in the timeline
-- Track add, delete, reorder, lock, mute, solo from the interface
-- Marker creation and navigation
+- Multiple selection, and one undo step per operation rather than per clip
+- Track add, delete, reorder, lock, mute and solo from the interface
+- Marker creation, navigation and deletion
 - Clip speed from the inspector
 
-The command layer and the track invariants already support all of this; what is
-missing is the operations themselves and their interface.
+Still to do:
+
+- Marquee selection in the timeline
+- Direct manipulation for roll, slip and slide: the commands are written and
+  tested, and they merge during a drag the way moving and trimming already do,
+  but no timeline gesture reaches them yet
 
 ## Phase 3 — Rendering
 

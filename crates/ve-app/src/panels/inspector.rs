@@ -52,17 +52,19 @@ pub fn show(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
             .color(theme::TEXT_FAINT),
         );
         ui.label(
-            RichText::new(format!(
-                "source in {}   speed {:.2}×",
-                clip.source_in,
-                clip.speed.as_f64()
-            ))
-            .small()
-            .monospace()
-            .color(theme::TEXT_FAINT),
+            RichText::new(format!("source in {}", clip.source_in))
+                .small()
+                .monospace()
+                .color(theme::TEXT_FAINT),
         );
 
         ui.add_space(8.0);
+        section(ui, "Speed", |ui| {
+            speed_row(ui, clip.speed, |speed| {
+                actions.push(Action::SetClipSpeed { clip: clip_id, speed });
+            });
+        });
+
         section(ui, "Transform", |ui| {
             let t = &clip.transform;
             point_row(ui, "Position", t.position.value, t.position.is_animated(), |v| {
@@ -164,6 +166,39 @@ pub fn show(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
                     });
                 }
             });
+        }
+    });
+}
+
+/// Playback speed, as a multiplier and as a row of the usual presets.
+///
+/// Changing this keeps the frames the clip shows and changes how long it takes
+/// to play them, so the clip's length on the timeline moves with it — which the
+/// duration in the header above updates to show.
+fn speed_row(ui: &mut Ui, speed: ve_core::Speed, mut on_change: impl FnMut(ve_core::Speed)) {
+    ui.horizontal(|ui| {
+        property_label(ui, "Speed", false);
+        let mut v = speed.as_f64();
+        let response = ui.add(
+            DragValue::new(&mut v).speed(0.01).range(0.01..=100.0).suffix("×").max_decimals(3),
+        );
+        if response.changed() {
+            // A speed the user cannot dial in is not worth refusing over: the
+            // rational is built to the nearest thousandth and applied.
+            if let Ok(speed) = ve_core::Speed::from_f64(v) {
+                on_change(speed);
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        property_label(ui, "", false);
+        for (label, num, den) in
+            [("¼×", 1, 4), ("½×", 1, 2), ("1×", 1, 1), ("2×", 2, 1), ("4×", 4, 1)]
+        {
+            let preset = ve_core::Speed::new(num, den).expect("a literal preset is valid");
+            if ui.selectable_label(speed == preset, label).clicked() {
+                on_change(preset);
+            }
         }
     });
 }

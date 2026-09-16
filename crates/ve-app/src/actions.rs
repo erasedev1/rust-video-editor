@@ -9,10 +9,14 @@
 use std::path::PathBuf;
 
 use ve_command::{
-    AddClip, ClipProperty, Compound, MoveClip, PropertyValue, RemoveClip, SetClipEnabled,
-    SetClipProperty, SetSequenceFormat, ShiftClips, SplitClip, TrimClip, TrimEdge,
+    AddClip, AddMarker, AddTrack, ClipProperty, Command, Compound, MoveClip, MoveTrack,
+    PropertyValue, RemoveClip, RemoveMarker, RemoveTrack, SetClipEnabled, SetClipProperty,
+    SetClipSpeed, SetSequenceFormat, SetTrackFlag, ShiftClips, SplitClip, TrackFlag, TrimClip,
+    TrimEdge,
 };
-use ve_core::{AssetId, Clip, ClipId, Project, SequenceId, TrackId, TrackKind};
+use ve_core::{
+    AssetId, Clip, ClipId, MarkerId, Project, SequenceId, Speed, TrackId, TrackKind,
+};
 use ve_engine::PlaybackEngine;
 use ve_project::{autosave, store};
 use ve_time::Ticks;
@@ -32,51 +36,45 @@ pub enum Action {
     // Edit
     Undo,
     Redo,
-    /// Lifts the selected clips, leaving the gap they occupied.
+    // `DeleteSelected` lifts the clips and leaves the gap they occupied;
+    // `RippleDeleteSelected` closes the holes behind them, and
+    // `CloseGapAtPlayhead` closes one that is already there.
     DeleteSelected,
-    /// Deletes the selected clips and closes the holes behind them.
     RippleDeleteSelected,
-    /// Pulls the rest of each track back over the gap under the playhead.
     CloseGapAtPlayhead,
     Copy,
-    /// Copy, then lift — the clipboard keeps the clips, the timeline does not.
+    // Copy, then lift: the clipboard keeps the clips, the timeline does not.
     Cut,
-    /// Places the clipboard at the playhead, on the selected track.
+    // Places the clipboard at the playhead, on the selected track.
     Paste,
     SplitAtPlayhead,
-    SelectClip {
-        clip: ClipId,
-        track: TrackId,
-        additive: bool,
-    },
+    SelectClip { clip: ClipId, track: TrackId, additive: bool },
     SelectAll,
     ClearSelection,
     ToggleSelectedEnabled,
-    SetClipProperty {
-        clip: ClipId,
-        property: ClipProperty,
-        value: PropertyValue,
-    },
+    SetClipProperty { clip: ClipId, property: ClipProperty, value: PropertyValue },
+    // Keeps the clip's frames and changes how long it takes to play them, so
+    // the clip's length on the timeline changes with it.
+    SetClipSpeed { clip: ClipId, speed: Speed },
+
+    // Tracks
+    AddTrack(TrackKind),
+    RemoveTrack(TrackId),
+    // Swaps a track with its neighbour of the same kind. `toward_top` is the
+    // direction the timeline draws, not the order tracks are stored in.
+    MoveTrack { track: TrackId, toward_top: bool },
+    SetTrackFlag { track: TrackId, flag: TrackFlag, value: bool },
+
+    // Markers
+    AddMarkerAtPlayhead,
+    RemoveMarker(MarkerId),
+    // Jumps to the nearest marker in a direction; `1` is forwards.
+    GoToMarker(i32),
 
     // Timeline
-    AddAssetToTimeline {
-        asset: AssetId,
-        track: TrackId,
-        at: Ticks,
-    },
-    MoveClipTo {
-        clip: ClipId,
-        track: TrackId,
-        to: Ticks,
-        coalesce: bool,
-    },
-    TrimClipTo {
-        clip: ClipId,
-        track: TrackId,
-        edge: TrimEdge,
-        to: Ticks,
-        coalesce: bool,
-    },
+    AddAssetToTimeline { asset: AssetId, track: TrackId, at: Ticks },
+    MoveClipTo { clip: ClipId, track: TrackId, to: Ticks, coalesce: bool },
+    TrimClipTo { clip: ClipId, track: TrackId, edge: TrimEdge, to: Ticks, coalesce: bool },
     EndGesture,
 
     // Transport
@@ -318,6 +316,149 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
             }
         }
 
+        Action::AddTrack(kind) => {
+            let command = Box::new(AddTrack::new(sequence_id, kind));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    let name = state
+                        .project
+                        .sequence(sequence_id)
+                        .and_then(|s| s.tracks.last())
+                        .map(|t| t.name.clone())
+                        .unwrap_or_default();
+                    state.set_status(Status::info(format!("added {name}")));
+                }
+                Err(e) => state.set_status(Status::error(e.to_string())),
+            }
+        }
+
+        Action::RemoveTrack(track) => {
+            let Some(seq) = state.project.sequence(sequence_id) else { return };
+            let Some(doomed) = seq.track(track) else {
+                state.set_status(Status::error("no such track"));
+                return;
+            };
+            let (name, clips) = (doomed.name.clone(), doomed.len());
+            // Anything selected on the track is about to stop existing.
+            let going: Vec<ClipId> = doomed.clips().iter().map(|c| c.id).collect();
+
+            let command = Box::new(RemoveTrack::new(sequence_id, track));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.selection.clips.retain(|c| !going.contains(c));
+                    if state.selection.track == Some(track) {
+                        state.selection.track = None;
+                    }
+                    state.mark_edited();
+                    state.set_status(Status::info(format!(
+                        "deleted {name} and {clips} clip{}",
+                        plural(clips)
+                    )));
+                }
+                Err(e) => state.set_status(Status::error(e.to_string())),
+            }
+        }
+
+        Action::MoveTrack { track, toward_top } => {
+            let Some(to) = neighbour_of_same_kind(state, sequence_id, track, toward_top) else {
+                state.set_status(Status::warning("the track is already at the end"));
+                return;
+            };
+            let command = Box::new(MoveTrack::new(sequence_id, track, to));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.set_status(Status::info("moved track"));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetTrackFlag { track, flag, value } => {
+            let command = Box::new(SetTrackFlag::new(sequence_id, track, flag, value));
+            let label = command.name().to_string();
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.set_status(Status::info(label.to_lowercase()));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::AddMarkerAtPlayhead => {
+            let at = engine.clock().position();
+            let Some(seq) = state.project.sequence(sequence_id) else { return };
+            if seq.markers.iter().any(|m| m.time == at) {
+                state.set_status(Status::warning("there is already a marker here"));
+                return;
+            }
+            let number = seq.markers.len() + 1;
+            let id = state.project.new_marker_id();
+            let marker = ve_core::Marker::new(id, format!("Marker {number}"), at);
+            let command = Box::new(AddMarker::new(sequence_id, marker));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.set_status(Status::info("marker added"));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::RemoveMarker(marker) => {
+            let command = Box::new(RemoveMarker::new(sequence_id, marker));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.set_status(Status::info("marker deleted"));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::GoToMarker(direction) => {
+            let at = engine.clock().position();
+            let Some(seq) = state.project.sequence(sequence_id) else { return };
+            // Markers are kept sorted by time, so the next one in a direction
+            // is the first past the playhead from that side.
+            let target = if direction >= 0 {
+                seq.markers.iter().find(|m| m.time > at).map(|m| m.time)
+            } else {
+                seq.markers.iter().rev().find(|m| m.time < at).map(|m| m.time)
+            };
+            match target {
+                Some(to) => {
+                    if let Some(seq) = state.project.sequence(sequence_id) {
+                        engine.scrub_to(seq, to);
+                    }
+                    sync_playhead(state, engine);
+                }
+                None => state.set_status(Status::warning("no marker that way")),
+            }
+        }
+
+        Action::SetClipSpeed { clip, speed } => {
+            let Some(track) = state
+                .project
+                .sequence(sequence_id)
+                .and_then(|s| s.find_clip(clip))
+                .map(|(t, _)| t)
+            else {
+                state.set_status(Status::warning("no such clip"));
+                return;
+            };
+            let command = Box::new(SetClipSpeed::new(sequence_id, track, clip, speed));
+            match state.history.execute_coalesced(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.set_status(Status::info(format!("speed {:.2}×", speed.as_f64())));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
         Action::AddAssetToTimeline { asset, track, at } => {
             add_asset_to_timeline(state, asset, track, at);
         }
@@ -475,6 +616,34 @@ fn delete_selected(state: &mut EditorState, sequence: SequenceId, ripple: bool) 
         }
         Err(e) => state.set_status(Status::error(e.to_string())),
     }
+}
+
+/// Where a track lands when it swaps with its neighbour of the same kind.
+///
+/// Video and audio stay grouped, so reordering V2 never sends it into the audio
+/// half of the stack. "Toward the top" is the direction the timeline draws
+/// rather than the order tracks are stored in: video is drawn in reverse, so
+/// that V2 sits above V1 and the picture reads the way it composites, while
+/// audio is drawn in order.
+fn neighbour_of_same_kind(
+    state: &EditorState,
+    sequence: SequenceId,
+    track: TrackId,
+    toward_top: bool,
+) -> Option<usize> {
+    let seq = state.project.sequence(sequence)?;
+    let index = seq.track_index(track)?;
+    let kind = seq.tracks[index].kind;
+    let later = match kind {
+        TrackKind::Video => toward_top,
+        TrackKind::Audio => !toward_top,
+    };
+    if later {
+        seq.tracks.iter().enumerate().skip(index + 1).find(|(_, t)| t.kind == kind)
+    } else {
+        seq.tracks.iter().enumerate().take(index).rev().find(|(_, t)| t.kind == kind)
+    }
+    .map(|(i, _)| i)
 }
 
 /// Puts the selected clips on the clipboard. Returns how many were captured.
