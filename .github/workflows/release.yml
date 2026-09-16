@@ -1,0 +1,229 @@
+name: Release
+
+on:
+  push:
+    # Cutting a release is pushing a tag: `git tag v0.1.0 && git push --tags`.
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without a leading v). Defaults to the workspace version."
+        required: false
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  # Required to create the release and upload the archives to it.
+  contents: write
+
+jobs:
+  prepare:
+    name: Work out the version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            # A tag containing a hyphen — v0.2.0-rc1 — is a pre-release.
+            case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          else
+            version="${{ inputs.version }}"
+            if [ -z "$version" ]; then
+              version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+            fi
+            prerelease=true
+          fi
+          echo "version=$version"       >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "Building version $version (prerelease=$prerelease)"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every platform is attempted, so one failure reports the others too
+      # rather than masking them.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: linux-x86_64
+          - os: windows-2022
+            name: windows-x86_64
+          - os: macos-14
+            name: macos-aarch64
+          - os: macos-13
+            name: macos-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-ffmpeg
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.name }}
+
+      - name: Build
+        run: cargo build --release --locked -p ve-app
+
+      - name: Package (Linux and macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          stage="verge-${version}-${{ matrix.name }}"
+          mkdir -p "$stage"
+
+          cp target/release/verge "$stage/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
+          strip "$stage/verge" || true
+
+          # The binary links FFmpeg dynamically, so say plainly what is needed.
+          cat > "$stage/INSTALL.txt" <<'TXT'
+          Verge requires the FFmpeg 6 runtime libraries.
+
+            Debian / Ubuntu :  sudo apt install libavcodec60 libavformat60 \
+                                 libavutil58 libswscale7 libswresample4
+            macOS           :  brew install ffmpeg@6
+
+          Then run ./verge — or ./verge path/to/project.verge to open a project.
+
+          Why not a self-contained binary? FFmpeg is linked dynamically for now.
+          Bundling or statically linking it is tracked as future work; see
+          docs/ROADMAP.md.
+          TXT
+
+          tar -czf "${stage}.tar.gz" "$stage"
+          shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256"
+          ls -la "${stage}.tar.gz"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ needs.prepare.outputs.version }}'
+          $stage   = "verge-$version-${{ matrix.name }}"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+
+          Copy-Item target\release\verge.exe $stage\
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE $stage\
+
+          # Ship the FFmpeg DLLs next to the executable so the Windows archive
+          # needs nothing installed to run. Windows resolves DLLs from the
+          # executable's own directory first.
+          Copy-Item "$env:FFMPEG_BIN\*.dll" $stage\
+          # NOTE: the pinned build is a GPL FFmpeg build. Verge itself is
+          # MIT/Apache-2.0 and only links it dynamically, but redistributing
+          # these DLLs carries FFmpeg's own licence with it, so it travels with
+          # them. See docs/RELEASING.md before making a public release.
+          Copy-Item "$env:FFMPEG_DIR\LICENSE" "$stage\LICENSE-FFmpeg.txt"
+
+          @"
+          Verge for Windows.
+
+          Everything needed is in this folder: the FFmpeg DLLs sit beside
+          verge.exe, so there is nothing to install. Keep them together.
+
+          Run verge.exe, or drop a .verge project onto it to open that project.
+
+          Verge is MIT/Apache-2.0. The bundled FFmpeg DLLs are a GPL build of
+          FFmpeg and are licensed separately; see LICENSE-FFmpeg.txt.
+          "@ | Out-File -FilePath "$stage\INSTALL.txt" -Encoding utf8
+
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+          (Get-FileHash "$stage.zip" -Algorithm SHA256).Hash.ToLower() + "  $stage.zip" |
+            Out-File -FilePath "$stage.zip.sha256" -Encoding ascii
+          Get-ChildItem "$stage.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verge-${{ matrix.name }}
+          path: |
+            verge-*.tar.gz
+            verge-*.tar.gz.sha256
+            verge-*.zip
+            verge-*.zip.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    # Only runs when every platform built, so a release is never missing an
+    # architecture without anyone noticing.
+    needs: [prepare, build]
+    # A manual run stops at the build: the archives land on the workflow run as
+    # artifacts to download and try, and the Releases page is left alone. That
+    # makes rehearsing the pipeline free of consequences.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Collect checksums
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd artifacts
+          cat *.sha256 > SHA256SUMS
+          rm -f *.sha256
+          ls -la
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Verge ${{ needs.prepare.outputs.version }}
+          prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: artifacts/*
+          body: |
+            ## Installing
+
+            **Windows** — download the `windows-x86_64` zip, extract it, run
+            `verge.exe`. The FFmpeg DLLs are bundled; nothing else is needed.
+
+            **macOS** — download the archive for your chip (`macos-aarch64` for
+            Apple silicon, `macos-x86_64` for Intel), then:
+
+            ```sh
+            brew install ffmpeg@6
+            tar xzf verge-*.tar.gz && cd verge-* && ./verge
+            ```
+
+            **Linux** — download `linux-x86_64`, then:
+
+            ```sh
+            sudo apt install libavcodec60 libavformat60 libavutil58 \
+                             libswscale7 libswresample4
+            tar xzf verge-*.tar.gz && cd verge-* && ./verge
+            ```
+
+            Built on Ubuntu 24.04; other distributions need FFmpeg 6 runtime
+            libraries under whatever names they use.
+
+            Verify a download against `SHA256SUMS`.
+
+            ## Licensing
+
+            Verge is MIT or Apache-2.0. The Windows archive bundles a **GPL
+            build** of FFmpeg, which is licensed separately — `LICENSE-FFmpeg.txt`
+            travels with it. The macOS and Linux archives bundle nothing and use
+            whatever FFmpeg you install.
+
+            ## Note
+
+            Only the Linux build is regularly exercised by the maintainers. If a
+            platform does not start, that is a bug worth reporting.

@@ -1,0 +1,91 @@
+name: Set up FFmpeg
+description: >
+  Installs the FFmpeg 6 development libraries and libclang, and exports the
+  environment the Rust bindings need. Shared by CI and by the release build so
+  the two cannot drift apart.
+
+# The version is pinned deliberately. `ffmpeg-next` tracks FFmpeg's major
+# version: the 6.x crate needs FFmpeg 6 headers and will not build against 7 or
+# later. Whatever each platform calls "latest" is well past that now, so every
+# platform below names a 6.x release explicitly.
+#
+# To move to a newer FFmpeg: bump `ffmpeg-next` in crates/ve-media/Cargo.toml to
+# the matching major version, then update the three pins here together.
+
+runs:
+  using: composite
+  steps:
+    - name: Linux — FFmpeg 6 from apt
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euxo pipefail
+        sudo apt-get update
+        # Ubuntu 24.04 ships FFmpeg 6.1, which is why the runner is pinned to
+        # that image rather than ubuntu-latest.
+        sudo apt-get install -y --no-install-recommends \
+          pkg-config clang libclang-dev \
+          libavcodec-dev libavformat-dev libavutil-dev \
+          libavfilter-dev libavdevice-dev \
+          libswscale-dev libswresample-dev \
+          libasound2-dev libxkbcommon-x11-0
+        pkg-config --modversion libavcodec
+
+    - name: macOS — FFmpeg 6 from Homebrew
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euxo pipefail
+        # `ffmpeg` in Homebrew is long past 6 now, so the versioned formula is
+        # required. It is keg-only, so pkg-config has to be pointed at it.
+        brew install ffmpeg@6 pkg-config
+        prefix="$(brew --prefix ffmpeg@6)"
+        echo "PKG_CONFIG_PATH=${prefix}/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+        echo "FFMPEG_PREFIX=${prefix}" >> "$GITHUB_ENV"
+        # The dynamic linker needs to find the dylibs when the binary runs.
+        echo "DYLD_FALLBACK_LIBRARY_PATH=${prefix}/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+        PKG_CONFIG_PATH="${prefix}/lib/pkgconfig" pkg-config --modversion libavcodec
+
+    - name: Windows — pinned FFmpeg 6 shared build
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        # GitHub release assets are immutable, unlike the vendor's rotating
+        # "latest" download, so this URL cannot change under us.
+        $version = '6.1.1'
+        $name    = "ffmpeg-$version-full_build-shared"
+        $url     = "https://github.com/GyanD/codexffmpeg/releases/download/$version/$name.7z"
+        $archive = "$env:RUNNER_TEMP\ffmpeg.7z"
+
+        Write-Host "Downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile $archive
+        & 7z x $archive "-o$env:RUNNER_TEMP" -y | Out-Null
+
+        $ffmpegDir = "$env:RUNNER_TEMP\$name"
+        if (-not (Test-Path "$ffmpegDir\include\libavcodec\avcodec.h")) {
+          throw "FFmpeg headers not found under $ffmpegDir"
+        }
+
+        # The bindings read FFMPEG_DIR and expect include\ and lib\ beneath it.
+        "FFMPEG_DIR=$ffmpegDir"       | Out-File -FilePath $env:GITHUB_ENV -Append
+        "FFMPEG_BIN=$ffmpegDir\bin"   | Out-File -FilePath $env:GITHUB_ENV -Append
+        # A shared build loads its DLLs at run time, not just at link time.
+        "$ffmpegDir\bin"              | Out-File -FilePath $env:GITHUB_PATH -Append
+
+    - name: Windows — point bindgen at libclang
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        # The windows runner images ship LLVM; fall back to installing it so a
+        # future image change is a slow build rather than a broken one.
+        $llvm = 'C:\Program Files\LLVM\bin'
+        if (-not (Test-Path "$llvm\libclang.dll")) {
+          Write-Host 'LLVM not preinstalled; installing via Chocolatey'
+          choco install llvm --no-progress -y
+        }
+        if (-not (Test-Path "$llvm\libclang.dll")) {
+          throw "libclang.dll not found at $llvm"
+        }
+        "LIBCLANG_PATH=$llvm" | Out-File -FilePath $env:GITHUB_ENV -Append
