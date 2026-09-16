@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ve-time",
+    "crates/ve-core",
+    "crates/ve-project",
+    "crates/ve-command",
+    "crates/ve-media",
+    "crates/ve-render",
+    "crates/ve-engine",
+    "crates/ve-metrics",
+    "crates/ve-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/erasedev1/rust-video-editor"
+authors = ["Verge contributors"]
+
+[workspace.dependencies]
+ve-time = { path = "crates/ve-time" }
+ve-core = { path = "crates/ve-core" }
+ve-project = { path = "crates/ve-project" }
+ve-command = { path = "crates/ve-command" }
+ve-media = { path = "crates/ve-media" }
+ve-render = { path = "crates/ve-render" }
+ve-engine = { path = "crates/ve-engine" }
+ve-metrics = { path = "crates/ve-metrics" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+rayon = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+wgpu = "30.0"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+criterion = "0.5"
+tempfile = "3"
+
+[profile.dev]
+opt-level = 1
+
+# Media decoding and GPU work is unusably slow in a fully unoptimised debug
+# build, so dependencies are always optimised even in dev profiles.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# Benchmarks need debug symbols to be profilable.
+[profile.bench]
+debug = true
