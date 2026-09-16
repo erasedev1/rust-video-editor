@@ -10,9 +10,9 @@ use std::path::PathBuf;
 
 use ve_command::{
     AddClip, AddMarker, AddTrack, ClipProperty, Command, Compound, MoveClip, MoveTrack,
-    PropertyValue, RemoveClip, RemoveMarker, RemoveTrack, SetClipEnabled, SetClipProperty,
-    SetClipSpeed, SetSequenceFormat, SetTrackFlag, ShiftClips, SplitClip, TrackFlag, TrimClip,
-    TrimEdge,
+    PropertyValue, RemoveClip, RemoveMarker, RemoveTrack, RollEdit, SetClipEnabled,
+    SetClipProperty, SetClipSpeed, SetSequenceFormat, SetTrackFlag, ShiftClips, SlideClip,
+    SlipClip, SplitClip, TrackFlag, TrimClip, TrimEdge,
 };
 use ve_core::{
     AssetId, Clip, ClipId, MarkerId, Project, SequenceId, Speed, TrackId, TrackKind,
@@ -21,7 +21,7 @@ use ve_engine::PlaybackEngine;
 use ve_project::{autosave, store};
 use ve_time::Ticks;
 
-use crate::state::{EditorState, Status};
+use crate::state::{EditorState, Status, TimelineTool};
 
 /// Something the user asked for.
 #[derive(Debug, Clone)]
@@ -50,6 +50,8 @@ pub enum Action {
     SplitAtPlayhead,
     SelectClip { clip: ClipId, track: TrackId, additive: bool },
     SelectAll,
+    // Takes every clip inside a rectangle swept across the timeline.
+    SelectClipsIn { range: ve_time::TimeRange, tracks: Vec<TrackId>, additive: bool },
     ClearSelection,
     ToggleSelectedEnabled,
     SetClipProperty { clip: ClipId, property: ClipProperty, value: PropertyValue },
@@ -75,7 +77,11 @@ pub enum Action {
     AddAssetToTimeline { asset: AssetId, track: TrackId, at: Ticks },
     MoveClipTo { clip: ClipId, track: TrackId, to: Ticks, coalesce: bool },
     TrimClipTo { clip: ClipId, track: TrackId, edge: TrimEdge, to: Ticks, coalesce: bool },
+    RollEditTo { left: ClipId, right: ClipId, track: TrackId, to: Ticks, coalesce: bool },
+    SlipClipTo { clip: ClipId, track: TrackId, to_source_in: Ticks, coalesce: bool },
+    SlideClipTo { clip: ClipId, track: TrackId, to: Ticks, coalesce: bool },
     EndGesture,
+    SetTool(TimelineTool),
 
     // Transport
     TogglePlayback,
@@ -291,6 +297,24 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
             state.set_status(Status::info(format!("selected {n} clip{}", plural(n))));
         }
 
+        Action::SelectClipsIn { range, tracks, additive } => {
+            let Some(seq) = state.project.sequence(sequence_id) else { return };
+            let caught: Vec<ClipId> = tracks
+                .iter()
+                .filter_map(|t| seq.track(*t))
+                .flat_map(|t| t.clips_in_range(range))
+                .map(|c| c.id)
+                .collect();
+            if !additive {
+                state.selection.clips.clear();
+            }
+            for clip in caught {
+                if !state.selection.is_selected(clip) {
+                    state.selection.clips.push(clip);
+                }
+            }
+        }
+
         Action::ClearSelection => state.selection.clear(),
 
         Action::ToggleSelectedEnabled => {
@@ -489,7 +513,28 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
             }
         }
 
+        Action::RollEditTo { left, right, track, to, coalesce } => {
+            let command = Box::new(RollEdit::new(sequence_id, track, left, right, to));
+            gesture(state, command, coalesce);
+        }
+
+        Action::SlipClipTo { clip, track, to_source_in, coalesce } => {
+            let command = Box::new(SlipClip::new(sequence_id, track, clip, to_source_in));
+            gesture(state, command, coalesce);
+        }
+
+        Action::SlideClipTo { clip, track, to, coalesce } => {
+            let command = Box::new(SlideClip::new(sequence_id, track, clip, to));
+            gesture(state, command, coalesce);
+        }
+
         Action::EndGesture => state.history.break_merge(),
+
+        Action::SetTool(tool) => {
+            state.tool = tool;
+            let (key, what) = tool.hint();
+            state.set_status(Status::info(format!("{} tool ({key}) — {what}", tool.label())));
+        }
 
         Action::TogglePlayback => {
             if let Some(seq) = state.project.sequence(sequence_id) {
@@ -615,6 +660,23 @@ fn delete_selected(state: &mut EditorState, sequence: SequenceId, ripple: bool) 
             state.set_status(Status::info(format!("deleted {count} clip{}", plural(count))));
         }
         Err(e) => state.set_status(Status::error(e.to_string())),
+    }
+}
+
+/// Runs one step of a drag gesture.
+///
+/// A refused step is ordinary during a drag — the pointer is over a neighbour,
+/// or past the end of the media — so it is not worth a status message. The
+/// command layer guarantees a failed command touched nothing, so the edit
+/// simply does not move until the pointer comes back into range.
+fn gesture(state: &mut EditorState, command: Box<dyn Command>, coalesce: bool) {
+    let result = if coalesce {
+        state.history.execute_coalesced(&mut state.project, command)
+    } else {
+        state.history.execute(&mut state.project, command)
+    };
+    if result.is_ok() {
+        state.mark_edited();
     }
 }
 

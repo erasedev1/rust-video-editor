@@ -21,6 +21,8 @@ The first vertical slice is complete and tested end to end:
 - Place clips on a timeline across multiple video and audio tracks
 - Move, trim and split clips, with snapping and frame-accurate editing
 - Ripple delete, close gap, and copy, cut and paste across tracks
+- Roll, slip and slide edits, each with its own timeline tool
+- Marquee selection, and one undo step per operation however many clips it moved
 - Add, delete, reorder, mute, solo and lock tracks; set clip speed
 - Create markers and jump between them
 - Play the sequence, scrub, step by frame, stop and resume
@@ -168,7 +170,7 @@ Linux only and reports "unavailable" elsewhere, and audio output goes through
 ## Testing
 
 ```sh
-cargo test --workspace     # 362 tests
+cargo test --workspace     # 369 tests
 cargo bench                # measured, not estimated
 ```
 

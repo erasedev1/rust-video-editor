@@ -195,6 +195,51 @@ impl TimelineView {
     }
 }
 
+/// Which gesture a drag in the timeline performs.
+///
+/// A mode rather than a pile of modifier keys. Roll, slip and slide all start
+/// from a press on a clip, so telling them apart by modifier would mean three
+/// chords nobody can discover; a tool that is visible in the toolbar, named in
+/// the status line and switchable with one key is how every editor does this,
+/// and for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimelineTool {
+    #[default]
+    Select,
+    Roll,
+    Slip,
+    Slide,
+}
+
+impl TimelineTool {
+    pub const ALL: [TimelineTool; 4] =
+        [TimelineTool::Select, TimelineTool::Roll, TimelineTool::Slip, TimelineTool::Slide];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TimelineTool::Select => "Select",
+            TimelineTool::Roll => "Roll",
+            TimelineTool::Slip => "Slip",
+            TimelineTool::Slide => "Slide",
+        }
+    }
+
+    /// The key that selects it, and what it does, for tooltips and the
+    /// shortcuts table.
+    pub fn hint(self) -> (&'static str, &'static str) {
+        match self {
+            TimelineTool::Select => ("V", "Select, move and trim clips"),
+            TimelineTool::Roll => ("N", "Drag a cut to move it, keeping the sequence length"),
+            TimelineTool::Slip => {
+                ("Y", "Drag a clip to change which frames it shows, in place")
+            }
+            TimelineTool::Slide => {
+                ("U", "Drag a clip to move it, taking the time from its neighbours")
+            }
+        }
+    }
+}
+
 /// What a drag in the timeline is doing.
 ///
 /// Held across frames because a drag is a gesture, not an event: the clip being
@@ -210,6 +255,18 @@ pub enum TimelineDrag {
     MoveClip { clip: ClipId, track: TrackId, grab_offset: Ticks },
     /// Dragging a clip edge.
     TrimClip { clip: ClipId, track: TrackId, edge: TrimEdgeKind },
+    /// Sweeping out a selection rectangle. The origin is kept as a timeline
+    /// position and a screen Y rather than a point, so the rectangle survives a
+    /// horizontal scroll mid-drag.
+    Marquee { origin_time: Ticks, origin_y: f32 },
+    /// Dragging the cut between two clips that meet.
+    RollEdge { left: ClipId, right: ClipId, track: TrackId },
+    /// Dragging a clip's contents within its own window. `source_in_at_grab`
+    /// is captured so every pointer move states an absolute destination, which
+    /// is what lets the gesture merge into one undo step.
+    SlipClip { clip: ClipId, track: TrackId, grab_time: Ticks, source_in_at_grab: Ticks },
+    /// Dragging a clip into its neighbours.
+    SlideClip { clip: ClipId, track: TrackId, grab_offset: Ticks },
 }
 
 /// Which edge a trim drag has hold of. Mirrors `ve_command::TrimEdge` without
@@ -258,6 +315,7 @@ pub struct EditorState {
     pub selection: Selection,
     pub clipboard: Clipboard,
     pub timeline: TimelineView,
+    pub tool: TimelineTool,
     pub status: Option<Status>,
     /// The drag gesture in progress, if any.
     pub drag: TimelineDrag,
@@ -278,6 +336,7 @@ impl EditorState {
             selection: Selection::default(),
             clipboard: Clipboard::default(),
             timeline: TimelineView::default(),
+            tool: TimelineTool::default(),
             status: None,
             drag: TimelineDrag::None,
             warnings: Vec::new(),

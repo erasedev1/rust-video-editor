@@ -61,6 +61,26 @@ impl Editor {
         editor
     }
 
+    /// `n` one-second clips end to end, each showing the middle second of the
+    /// three-second fixture.
+    ///
+    /// Roll, slip and slide all spend *unused source*: a clip already showing
+    /// every frame its media has cannot give a neighbour any more, so an editor
+    /// built from whole fixture clips has nothing for them to move.
+    fn with_spare_source(n: usize) -> Self {
+        let mut editor = Editor::new();
+        editor.act(Action::ImportMedia(vec![testdata("counter_30fps.mp4")]));
+        let asset = editor.video_asset();
+        let v1 = editor.track(TrackKind::Video, 0);
+        for i in 0..n {
+            let id = editor.state.project.new_clip_id();
+            let clip = ve_core::Clip::new(id, asset, "clip", secs(1), secs(i as i64), secs(1));
+            let track = editor.state.project.active_mut().unwrap().track_mut(v1).unwrap();
+            track.insert_clip(clip).unwrap();
+        }
+        editor
+    }
+
     fn act(&mut self, action: Action) {
         dispatch(&mut self.state, &mut self.engine, action);
     }
@@ -540,4 +560,188 @@ fn deleting_a_marker_undoes() {
     editor.act(Action::Undo);
     assert_eq!(editor.sequence().markers.len(), 1);
     assert_eq!(editor.sequence().markers[0].time, secs(1));
+}
+
+// ---- gestures ---------------------------------------------------------
+
+#[test]
+fn a_roll_gesture_moves_the_cut_and_is_one_undo_step() {
+    let mut editor = Editor::with_spare_source(2);
+    let v1 = editor.track(TrackKind::Video, 0);
+    let ids = editor.clip_ids(v1);
+    let length = editor.sequence().duration();
+    let half = Ticks::from_millis(500);
+
+    // Three pointer moves, as a drag would produce.
+    for at in [secs(1) + half, secs(1) - half, secs(1) + half] {
+        editor.act(Action::RollEditTo {
+            left: ids[0],
+            right: ids[1],
+            track: v1,
+            to: at,
+            coalesce: true,
+        });
+    }
+    editor.act(Action::EndGesture);
+
+    let clips = editor.sequence().track(v1).unwrap().clips();
+    assert_eq!(clips[0].duration, secs(1) + half, "{}", editor.status());
+    assert_eq!(clips[1].timeline_start, secs(1) + half);
+    assert_eq!(clips[1].source_in, secs(1) + half, "the right clip did not roll its source");
+    assert_eq!(editor.sequence().duration(), length, "a roll changed the sequence length");
+
+    editor.act(Action::Undo);
+    let clips = editor.sequence().track(v1).unwrap().clips();
+    assert_eq!(clips[0].duration, secs(1), "undo went to a mid-drag position");
+    assert_eq!(clips[1].timeline_start, secs(1));
+}
+
+#[test]
+fn a_roll_stops_where_the_source_runs_out() {
+    let mut editor = Editor::with_clips(2);
+    let v1 = editor.track(TrackKind::Video, 0);
+    let ids = editor.clip_ids(v1);
+    let before = editor.state.project.clone();
+
+    // Both clips use every frame their media has, so the cut cannot move in
+    // either direction.
+    for at in [secs(CLIP + 1), secs(CLIP - 1)] {
+        editor.act(Action::RollEditTo {
+            left: ids[0],
+            right: ids[1],
+            track: v1,
+            to: at,
+            coalesce: true,
+        });
+    }
+    assert_eq!(editor.state.project, before);
+}
+
+#[test]
+fn a_slip_gesture_changes_the_frames_and_leaves_the_clip_where_it_is() {
+    let mut editor = Editor::with_clips(1);
+    let v1 = editor.track(TrackKind::Video, 0);
+    let clip = editor.clip_ids(v1)[0];
+    // Trim the head first, so the clip has source on both sides to slip into.
+    editor.act(Action::TrimClipTo {
+        clip,
+        track: v1,
+        edge: ve_command::TrimEdge::Start,
+        to: secs(1),
+        coalesce: false,
+    });
+    let before = editor.sequence().find_clip(clip).unwrap().1.clone();
+    assert_eq!(before.source_in, secs(1));
+
+    editor.act(Action::SlipClipTo {
+        clip,
+        track: v1,
+        to_source_in: Ticks::ZERO,
+        coalesce: true,
+    });
+    editor.act(Action::EndGesture);
+
+    let after = editor.sequence().find_clip(clip).unwrap().1;
+    assert_eq!(after.source_in, Ticks::ZERO, "{}", editor.status());
+    assert_eq!(after.timeline_start, before.timeline_start, "a slip moved the clip");
+    assert_eq!(after.duration, before.duration, "a slip changed the clip's length");
+
+    editor.act(Action::Undo);
+    assert_eq!(editor.sequence().find_clip(clip).unwrap().1.source_in, secs(1));
+}
+
+#[test]
+fn a_slide_gesture_moves_the_clip_into_its_neighbours() {
+    let mut editor = Editor::with_spare_source(3);
+    let v1 = editor.track(TrackKind::Video, 0);
+    let ids = editor.clip_ids(v1);
+    let length = editor.sequence().duration();
+    let half = Ticks::from_millis(500);
+
+    editor.act(Action::SlideClipTo {
+        clip: ids[1],
+        track: v1,
+        to: secs(1) + half,
+        coalesce: true,
+    });
+    editor.act(Action::EndGesture);
+
+    let clips = editor.sequence().track(v1).unwrap().clips();
+    assert_eq!(clips[1].timeline_start, secs(1) + half, "{}", editor.status());
+    assert_eq!(clips[1].duration, secs(1), "the slid clip changed length");
+    assert_eq!(clips[1].source_in, secs(1), "the slid clip changed which frames it shows");
+    assert_eq!(clips[0].duration, secs(1) + half, "the left neighbour did not absorb it");
+    assert_eq!(clips[2].timeline_start, secs(2) + half);
+    assert_eq!(clips[2].source_in, secs(1) + half, "the right neighbour gave up its head");
+    assert_eq!(editor.sequence().duration(), length, "a slide changed the sequence length");
+
+    editor.act(Action::Undo);
+    assert_eq!(editor.starts(v1), vec![0, 1, 2]);
+}
+
+#[test]
+fn a_refused_gesture_step_leaves_the_project_alone() {
+    let mut editor = Editor::with_spare_source(3);
+    let v1 = editor.track(TrackKind::Video, 0);
+    let ids = editor.clip_ids(v1);
+    let before = editor.state.project.clone();
+    let depth = editor.state.history.undo_depth();
+
+    // Far beyond what the neighbours can pay for: during a real drag this is
+    // just the pointer having run ahead, so it is refused in silence.
+    editor.act(Action::SlideClipTo { clip: ids[1], track: v1, to: secs(100), coalesce: true });
+    assert_eq!(editor.state.project, before);
+    assert_eq!(editor.state.history.undo_depth(), depth);
+}
+
+#[test]
+fn a_marquee_takes_every_clip_it_covers() {
+    let mut editor = Editor::with_clips(3);
+    let v1 = editor.track(TrackKind::Video, 0);
+    let v2 = editor.track(TrackKind::Video, 1);
+    let asset = editor.video_asset();
+    editor.act(Action::AddAssetToTimeline { asset, track: v2, at: Ticks::ZERO });
+    let ids = editor.clip_ids(v1);
+
+    // A rectangle over V1 only, covering the first two clips.
+    editor.act(Action::SelectClipsIn {
+        range: ve_time::TimeRange::from_bounds(Ticks::ZERO, secs(CLIP + 1)),
+        tracks: vec![v1],
+        additive: false,
+    });
+    assert_eq!(editor.state.selection.clips, vec![ids[0], ids[1]]);
+
+    // Shrinking the rectangle lets the second one go again, because each step
+    // rebuilds the selection rather than adding to it.
+    editor.act(Action::SelectClipsIn {
+        range: ve_time::TimeRange::from_bounds(Ticks::ZERO, secs(1)),
+        tracks: vec![v1],
+        additive: false,
+    });
+    assert_eq!(editor.state.selection.clips, vec![ids[0]]);
+
+    // Both tracks, and a clip only partly covered still counts.
+    editor.act(Action::SelectClipsIn {
+        range: ve_time::TimeRange::from_bounds(secs(1), secs(2)),
+        tracks: vec![v1, v2],
+        additive: false,
+    });
+    assert_eq!(editor.state.selection.clips.len(), 2);
+
+    editor.act(Action::SelectClipsIn {
+        range: ve_time::TimeRange::from_bounds(secs(CLIP), secs(CLIP * 2)),
+        tracks: vec![v1],
+        additive: true,
+    });
+    assert_eq!(editor.state.selection.clips.len(), 3, "an additive sweep replaced instead");
+}
+
+#[test]
+fn the_tool_is_named_when_it_changes() {
+    let mut editor = Editor::new();
+    assert_eq!(editor.state.tool, ve_app::state::TimelineTool::Select);
+
+    editor.act(Action::SetTool(ve_app::state::TimelineTool::Slip));
+    assert_eq!(editor.state.tool, ve_app::state::TimelineTool::Slip);
+    assert!(editor.status().contains("Slip tool (Y)"), "{}", editor.status());
 }

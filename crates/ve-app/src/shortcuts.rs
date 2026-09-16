@@ -7,6 +7,7 @@
 use egui::{Key, Modifiers};
 
 use crate::actions::Action;
+use crate::state::TimelineTool;
 
 /// A shortcut, its action, and how it is described in the menu.
 pub struct Binding {
@@ -97,6 +98,17 @@ pub fn collect(ctx: &egui::Context, timeline_width: f32) -> Vec<Action> {
         if i.consume_key(plain, Key::M) {
             actions.push(Action::AddMarkerAtPlayhead);
         }
+        // The timeline tools, on the keys every other editor puts them on.
+        for (key, tool) in [
+            (Key::V, TimelineTool::Select),
+            (Key::N, TimelineTool::Roll),
+            (Key::Y, TimelineTool::Slip),
+            (Key::U, TimelineTool::Slide),
+        ] {
+            if i.consume_key(plain, key) {
+                actions.push(Action::SetTool(tool));
+            }
+        }
         if i.consume_key(ctrl, Key::ArrowLeft) {
             actions.push(Action::GoToMarker(-1));
         }
@@ -145,6 +157,7 @@ pub const BINDINGS: &[Binding] = &[
     Binding { label: "Toggle clip enabled", keys: "E" },
     Binding { label: "Clear selection", keys: "Esc" },
     Binding { label: "Toggle snapping", keys: "S" },
+    Binding { label: "Select / roll / slip / slide tool", keys: "V / N / Y / U" },
     Binding { label: "Add marker", keys: "M" },
     Binding { label: "Previous / next marker", keys: "Ctrl + ← / →" },
     Binding { label: "Zoom in / out", keys: "+ / −" },

@@ -13,7 +13,7 @@ use ve_core::{Sequence, TrackKind};
 use ve_time::{Rate, Ticks, TimeRange};
 
 use crate::actions::Action;
-use crate::state::{EditorState, TimelineDrag, TrimEdgeKind};
+use crate::state::{EditorState, TimelineDrag, TimelineTool, TrimEdgeKind};
 use crate::theme;
 
 /// How close to a clip edge the pointer must be to start a trim instead of a move.
@@ -57,6 +57,7 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, playhead: Ticks, actions: &mut
     draw_vertical_scrollbar(&painter, lane_area, state, content_height);
     draw_markers(&painter, lane_area, ruler_rect, state, &sequence, lanes_left);
     draw_playhead(&painter, full, ruler_rect, state, playhead, lanes_left);
+    draw_marquee(&painter, lane_area, state, &response, lanes_left);
 
     handle_pointer(ui, state, &sequence, &response, &lanes, ruler_rect, lanes_left, actions);
 }
@@ -76,6 +77,19 @@ fn toolbar(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
         if ui.small_button("Fit").on_hover_text("Zoom to fit (Shift+Z)").clicked() {
             actions.push(Action::ZoomToFit(width));
         }
+
+        ui.add_space(8.0);
+        for tool in TimelineTool::ALL {
+            let (key, what) = tool.hint();
+            if ui
+                .selectable_label(state.tool == tool, tool.label())
+                .on_hover_text(format!("{what} ({key})"))
+                .clicked()
+            {
+                actions.push(Action::SetTool(tool));
+            }
+        }
+        ui.add_space(8.0);
 
         let mut snapping = state.timeline.snapping;
         if ui
@@ -543,6 +557,29 @@ fn draw_markers(
     }
 }
 
+/// The selection rectangle, while one is being swept out.
+fn draw_marquee(
+    painter: &egui::Painter,
+    area: Rect,
+    state: &EditorState,
+    response: &egui::Response,
+    lanes_left: f32,
+) {
+    let TimelineDrag::Marquee { origin_time, origin_y } = state.drag else { return };
+    let Some(pointer) = response.interact_pointer_pos() else { return };
+    // Derived from the origin *time* rather than a stored X, so the rectangle
+    // stays over the same clips if the view scrolls mid-drag.
+    let origin_x = lanes_left + state.timeline.x_of(origin_time);
+    let rect = Rect::from_two_pos(Pos2::new(origin_x, origin_y), pointer).intersect(area);
+    painter.rect_filled(rect, CornerRadius::same(2), theme::ACCENT.gamma_multiply(0.18));
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(2),
+        Stroke::new(1.0, theme::ACCENT),
+        egui::StrokeKind::Inside,
+    );
+}
+
 fn draw_playhead(
     painter: &egui::Painter,
     full: Rect,
@@ -651,37 +688,35 @@ fn handle_pointer(
         if pointer.y <= ruler.bottom() {
             state.drag = TimelineDrag::Playhead;
         } else if let Some(lane) = lanes.iter().find(|l| l.rect.contains(pointer)) {
+            let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
             match hit_test_clip(state, sequence, lane, pointer, lanes_left) {
                 Some((clip, edge)) => {
-                    let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
                     actions.push(Action::SelectClip { clip, track: lane.track, additive });
-                    if lane.locked {
-                        state.drag = TimelineDrag::None;
+                    state.drag = if lane.locked {
+                        TimelineDrag::None
                     } else {
-                        state.drag = match edge {
-                            Some(edge) => {
-                                TimelineDrag::TrimClip { clip, track: lane.track, edge }
-                            }
-                            None => {
-                                let start = sequence
-                                    .find_clip(clip)
-                                    .map(|(_, c)| c.timeline_start)
-                                    .unwrap_or(Ticks::ZERO);
-                                TimelineDrag::MoveClip {
-                                    clip,
-                                    track: lane.track,
-                                    grab_offset: time_at_pointer - start,
-                                }
-                            }
-                        };
-                    }
+                        begin_clip_drag(state, sequence, lane, clip, edge, time_at_pointer)
+                    };
                 }
-                // Clicking empty track space deselects and moves the playhead,
-                // which is what a click in a timeline background should do.
                 None => {
-                    actions.push(Action::ClearSelection);
+                    if !additive {
+                        actions.push(Action::ClearSelection);
+                    }
                     state.selection.track = Some(lane.track);
-                    state.drag = TimelineDrag::Playhead;
+                    if response.drag_started() {
+                        // Dragging from empty track space sweeps out a
+                        // selection rectangle.
+                        state.drag = TimelineDrag::Marquee {
+                            origin_time: time_at_pointer,
+                            origin_y: pointer.y,
+                        };
+                    } else {
+                        // A click that never moves still moves the playhead,
+                        // as clicking a timeline background always has.
+                        let to = snap(state, sequence, time_at_pointer, None);
+                        actions.push(Action::ScrubTo(to));
+                        state.drag = TimelineDrag::None;
+                    }
                 }
             }
         }
@@ -713,6 +748,44 @@ fn handle_pointer(
                     coalesce: true,
                 });
             }
+            TimelineDrag::RollEdge { left, right, track } => {
+                // The cut itself is the thing being dragged, so neither clip is
+                // excluded from snapping: their far edges are legitimate limits.
+                let to = sequence.snap_to_frame(snap(state, sequence, time_at_pointer, None));
+                actions.push(Action::RollEditTo { left, right, track, to, coalesce: true });
+            }
+            TimelineDrag::SlipClip { clip, track, grab_time, source_in_at_grab } => {
+                // Dragging right pulls the clip's contents right, which means
+                // showing *earlier* frames — hence the sign.
+                let Some((_, c)) = sequence.find_clip(clip) else { return };
+                let shift = c.speed.timeline_to_source(time_at_pointer - grab_time);
+                actions.push(Action::SlipClipTo {
+                    clip,
+                    track,
+                    to_source_in: source_in_at_grab - shift,
+                    coalesce: true,
+                });
+            }
+            TimelineDrag::SlideClip { clip, track, grab_offset } => {
+                let raw = (time_at_pointer - grab_offset).clamp_non_negative();
+                let to = sequence.snap_to_frame(snap(state, sequence, raw, Some(clip)));
+                actions.push(Action::SlideClipTo { clip, track, to, coalesce: true });
+            }
+            TimelineDrag::Marquee { origin_time, origin_y } => {
+                let range = TimeRange::from_bounds(
+                    origin_time.min(time_at_pointer),
+                    origin_time.max(time_at_pointer),
+                );
+                let (top, bottom) = (origin_y.min(pointer.y), origin_y.max(pointer.y));
+                let tracks = lanes
+                    .iter()
+                    .filter(|l| l.rect.top() <= bottom && l.rect.bottom() >= top)
+                    .map(|l| l.track)
+                    .collect();
+                // Rebuilt from scratch on every pointer move rather than added
+                // to, so shrinking the rectangle lets clips go again.
+                actions.push(Action::SelectClipsIn { range, tracks, additive: false });
+            }
             TimelineDrag::None => {}
         }
     }
@@ -733,7 +806,11 @@ fn handle_pointer(
     if !response.dragged() && pointer.y > ruler.bottom() {
         if let Some(lane) = lanes.iter().find(|l| l.rect.contains(pointer)) {
             if let Some((_, edge)) = hit_test_clip(state, sequence, lane, pointer, lanes_left) {
-                ui.ctx().set_cursor_icon(if edge.is_some() {
+                let horizontal = match state.tool {
+                    TimelineTool::Select => edge.is_some(),
+                    TimelineTool::Roll | TimelineTool::Slip | TimelineTool::Slide => true,
+                };
+                ui.ctx().set_cursor_icon(if horizontal {
                     egui::CursorIcon::ResizeHorizontal
                 } else {
                     egui::CursorIcon::Grab
@@ -749,6 +826,71 @@ fn finish_drag(state: &mut EditorState, actions: &mut Vec<Action>) {
         actions.push(Action::EndGesture);
     }
     state.drag = TimelineDrag::None;
+}
+
+/// Decides which gesture a press on a clip begins, from the active tool.
+///
+/// The select tool splits by where on the clip the press landed — edges trim,
+/// the body moves. The other three each do one thing wherever they are pressed,
+/// which is the point of having them.
+fn begin_clip_drag(
+    state: &EditorState,
+    sequence: &Sequence,
+    lane: &Lane,
+    clip: ve_core::ClipId,
+    edge: Option<TrimEdgeKind>,
+    time_at_pointer: Ticks,
+) -> TimelineDrag {
+    let Some((_, c)) = sequence.find_clip(clip) else { return TimelineDrag::None };
+    match state.tool {
+        TimelineTool::Select => match edge {
+            Some(edge) => TimelineDrag::TrimClip { clip, track: lane.track, edge },
+            None => TimelineDrag::MoveClip {
+                clip,
+                track: lane.track,
+                grab_offset: time_at_pointer - c.timeline_start,
+            },
+        },
+        TimelineTool::Roll => match roll_pair(sequence, lane.track, clip, time_at_pointer) {
+            Some((left, right)) => TimelineDrag::RollEdge { left, right, track: lane.track },
+            // A clip with nothing butted against the near end has no cut to
+            // roll, so the press does nothing rather than doing something else.
+            None => TimelineDrag::None,
+        },
+        TimelineTool::Slip => TimelineDrag::SlipClip {
+            clip,
+            track: lane.track,
+            grab_time: time_at_pointer,
+            source_in_at_grab: c.source_in,
+        },
+        TimelineTool::Slide => TimelineDrag::SlideClip {
+            clip,
+            track: lane.track,
+            grab_offset: time_at_pointer - c.timeline_start,
+        },
+    }
+}
+
+/// The two clips meeting at the cut nearest the pointer, if there is one.
+fn roll_pair(
+    sequence: &Sequence,
+    track: ve_core::TrackId,
+    clip: ve_core::ClipId,
+    at: Ticks,
+) -> Option<(ve_core::ClipId, ve_core::ClipId)> {
+    let track = sequence.track(track)?;
+    let this = track.clip(clip)?;
+    let (before, after) = track.neighbours_of(clip);
+    // Whichever end of this clip the press was nearer decides which cut is
+    // meant; a neighbour separated by a gap is not a cut at all.
+    let nearer_start = (at - this.timeline_start) < (this.timeline_end() - at);
+    if nearer_start {
+        let left = before.filter(|l| l.timeline_end() == this.timeline_start)?;
+        Some((left.id, clip))
+    } else {
+        let right = after.filter(|r| r.timeline_start == this.timeline_end())?;
+        Some((clip, right.id))
+    }
 }
 
 /// The track header switch under the pointer, and the value clicking it sets.

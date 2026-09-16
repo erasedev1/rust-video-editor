@@ -490,7 +490,44 @@ fn several_assets_decode_concurrently() {
 fn dropping_the_service_shuts_its_workers_down() {
     // The real assertion is that this returns rather than hanging on a worker
     // that never notices the shutdown.
-    let (svc, asset) = service();
-    svc.request(FrameRequest::interactive(asset, Rate::FPS_30.frame_to_ticks(10)));
-    drop(svc);
+    //
+    // What actually guarantees that is where the shutdown flag lives: inside
+    // the queue, behind the mutex the worker evaluates its whole park condition
+    // under. This test cannot prove that, and it would be dishonest to pretend
+    // otherwise — the window a flag outside the lock opens is a few
+    // instructions wide, and churn alone hits it only every few runs. It is
+    // here as a smoke test over the paths a single tidy drop misses: several
+    // threads dropping services at every point across a decode, with a watchdog
+    // so that a worker which does deadlock fails the run instead of hanging it.
+    let (done, finished) = std::sync::mpsc::channel();
+    let churning: Vec<_> = (0..4)
+        .map(|t| {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                for i in 0..60u64 {
+                    let (svc, asset) = service();
+                    svc.request(FrameRequest::interactive(
+                        asset,
+                        Rate::FPS_30.frame_to_ticks(((t * 60 + i) % 80) as i64),
+                    ));
+                    // Walks the drop across the decode rather than always
+                    // landing in the same place relative to it.
+                    std::thread::sleep(Duration::from_micros((i % 20) * 50));
+                    drop(svc);
+                }
+                let _ = done.send(());
+            })
+        })
+        .collect();
+    drop(done);
+
+    for _ in 0..churning.len() {
+        assert!(
+            finished.recv_timeout(Duration::from_secs(120)).is_ok(),
+            "a decode worker never noticed the shutdown"
+        );
+    }
+    for thread in churning {
+        thread.join().expect("a shutdown loop panicked");
+    }
 }

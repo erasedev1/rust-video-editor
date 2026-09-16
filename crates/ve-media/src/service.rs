@@ -18,7 +18,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -248,6 +247,17 @@ struct Queue {
     /// True while the worker is decoding, so `is_idle` does not report done
     /// with a job in flight.
     busy: bool,
+    /// Set once, to tell the worker to stop.
+    ///
+    /// This lives *inside* the queue, rather than beside it as an atomic, so
+    /// that it cannot be written without the lock the worker reads it under.
+    /// That is not a style preference: the worker tests this immediately before
+    /// parking on `wake`, so a write that slips into the few instructions
+    /// between the test and the park is delivered to nobody, and the thread
+    /// then waits forever for a wake that has already happened. Keeping the
+    /// flag behind the same mutex as the rest of the condition makes that race
+    /// unrepresentable rather than merely unlikely.
+    shutdown: bool,
 }
 
 impl Queue {
@@ -264,7 +274,6 @@ impl Queue {
 struct WorkerShared {
     queue: Mutex<Queue>,
     wake: Condvar,
-    shutdown: AtomicBool,
 }
 
 struct Worker {
@@ -287,7 +296,6 @@ impl Worker {
         let shared = Arc::new(WorkerShared {
             queue: Mutex::new(Queue::default()),
             wake: Condvar::new(),
-            shutdown: AtomicBool::new(false),
         });
 
         let thread_shared = Arc::clone(&shared);
@@ -298,12 +306,10 @@ impl Worker {
                     let job = {
                         let mut queue = thread_shared.queue.lock();
                         queue.busy = false;
-                        while !queue.has_work()
-                            && !thread_shared.shutdown.load(Ordering::Acquire)
-                        {
+                        while !queue.has_work() && !queue.shutdown {
                             thread_shared.wake.wait(&mut queue);
                         }
-                        if thread_shared.shutdown.load(Ordering::Acquire) {
+                        if queue.shutdown {
                             return;
                         }
                         let job = queue.take_job();
@@ -392,19 +398,24 @@ impl Worker {
     }
 
     fn shutdown(mut self) {
-        self.shared.shutdown.store(true, Ordering::Release);
-        self.shared.wake.notify_all();
+        self.signal_shutdown();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+
+    /// Tells the worker to stop. See [`Queue::shutdown`] for why the flag is
+    /// set through the lock rather than beside it.
+    fn signal_shutdown(&self) {
+        self.shared.queue.lock().shutdown = true;
+        self.shared.wake.notify_all();
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
         // Reached when the map is dropped without an explicit shutdown.
-        self.shared.shutdown.store(true, Ordering::Release);
-        self.shared.wake.notify_all();
+        self.signal_shutdown();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
