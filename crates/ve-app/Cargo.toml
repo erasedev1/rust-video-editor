@@ -25,15 +25,26 @@ ve-render = { workspace = true }
 ve-engine = { workspace = true }
 ve-metrics = { workspace = true }
 
-eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts"] }
 egui = "0.36"
 egui-wgpu = "0.36"
 wgpu = { workspace = true }
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+rfd = { version = "0.15", default-features = false, features = ["tokio"] }
 log = { workspace = true }
 env_logger = { workspace = true }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
+
+# Linux windowing backends. Kept target-specific so that a Windows or macOS
+# build does not carry feature flags that only mean something on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+
+# Asks Windows for the version 6 common controls, so file dialogs match the
+# rest of the desktop rather than looking two decades old.
+[target.'cfg(target_os = "windows")'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["common-controls-v6"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
