@@ -15,14 +15,17 @@
 
 use std::any::Any;
 
-use ve_core::{ClipId, CoreError, Project, SequenceId, TrackId};
+use ve_core::{Clip, ClipId, CoreError, Project, SequenceId, TrackId};
+use ve_time::Ticks;
 
 mod clip_commands;
+mod edit_commands;
 mod history;
 mod property_commands;
 mod structure_commands;
 
 pub use clip_commands::{AddClip, MoveClip, RemoveClip, SplitClip, TrimClip, TrimEdge};
+pub use edit_commands::{Compound, RollEdit, ShiftClips, SlideClip, SlipClip};
 pub use history::{History, HistoryEntry};
 pub use property_commands::{
     ClipProperty, PropertyValue, RemoveClipKeyframe, SetClipKeyframe, SetClipProperty,
@@ -83,6 +86,57 @@ pub enum CommandError {
     NothingToRedo,
     #[error("{0}")]
     Rejected(String),
+}
+
+/// The part of a clip that every trim-shaped edit has to put back on undo.
+///
+/// A head trim moves the timeline position *and* rolls the source window;
+/// restoring only one of the two would silently change which frames the clip
+/// shows. Capturing all three together, and writing them back wholesale rather
+/// than replaying an inverse trim, also sidesteps the minimum-duration and
+/// source-bound checks on the way back — the state being restored was legal
+/// when it was captured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClipWindow {
+    source_in: Ticks,
+    timeline_start: Ticks,
+    duration: Ticks,
+}
+
+impl ClipWindow {
+    pub(crate) fn capture(clip: &Clip) -> Self {
+        ClipWindow {
+            source_in: clip.source_in,
+            timeline_start: clip.timeline_start,
+            duration: clip.duration,
+        }
+    }
+
+    pub(crate) fn restore(self, clip: &mut Clip) {
+        clip.source_in = self.source_in;
+        clip.timeline_start = self.timeline_start;
+        clip.duration = self.duration;
+    }
+}
+
+/// Resolves a clip for reading, turning any missing link in the chain into a
+/// typed error. The read-only half of [`track_mut`]: commands that need to
+/// check bounds before mutating go through here first, because the checks need
+/// values (asset duration, the minimum clip length) that live on the project
+/// and cannot be read while a track is borrowed mutably.
+pub(crate) fn clip_of(
+    project: &Project,
+    sequence: SequenceId,
+    track: TrackId,
+    clip: ClipId,
+) -> Result<&Clip, CommandError> {
+    project
+        .sequence(sequence)
+        .ok_or(CommandError::SequenceNotFound(sequence))?
+        .track(track)
+        .ok_or(CommandError::TrackNotFound(track))?
+        .clip(clip)
+        .ok_or(CommandError::ClipNotFound(clip))
 }
 
 /// Resolves a `(sequence, track)` pair, turning a missing one into a typed

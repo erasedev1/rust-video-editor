@@ -5,7 +5,7 @@ use std::any::Any;
 use ve_core::{Clip, ClipId, Project, SequenceId, TrackId};
 use ve_time::Ticks;
 
-use crate::{track_mut, Command, CommandError};
+use crate::{track_mut, ClipWindow, Command, CommandError};
 
 /// Places a clip on a track.
 #[derive(Debug)]
@@ -180,9 +180,8 @@ pub enum TrimEdge {
 
 /// Trims one edge of a clip.
 ///
-/// Undo restores the source window as well as the timeline position, because a
-/// head trim changes both and restoring only one would silently shift which
-/// frames the clip shows.
+/// Undo restores the whole source window, not just the timeline position: see
+/// [`ClipWindow`].
 #[derive(Debug)]
 pub struct TrimClip {
     sequence: SequenceId,
@@ -190,14 +189,7 @@ pub struct TrimClip {
     clip_id: ClipId,
     edge: TrimEdge,
     to: Ticks,
-    before: Option<TrimState>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct TrimState {
-    source_in: Ticks,
-    timeline_start: Ticks,
-    duration: Ticks,
+    before: Option<ClipWindow>,
 }
 
 impl TrimClip {
@@ -232,15 +224,9 @@ impl Command for TrimClip {
         };
 
         let track = track_mut(project, self.sequence, self.track)?;
-        let captured = {
-            let clip =
-                track.clip(self.clip_id).ok_or(CommandError::ClipNotFound(self.clip_id))?;
-            TrimState {
-                source_in: clip.source_in,
-                timeline_start: clip.timeline_start,
-                duration: clip.duration,
-            }
-        };
+        let captured = ClipWindow::capture(
+            track.clip(self.clip_id).ok_or(CommandError::ClipNotFound(self.clip_id))?,
+        );
 
         match self.edge {
             TrimEdge::Start => track.trim_clip_start(self.clip_id, self.to, min_duration)?,
@@ -258,14 +244,9 @@ impl Command for TrimClip {
             .before
             .ok_or_else(|| CommandError::Rejected("trim was never applied".into()))?;
         let track = track_mut(project, self.sequence, self.track)?;
-        // Restoring the whole window at once, rather than by replaying an
-        // inverse trim, avoids tripping the minimum-duration and source-bound
-        // checks on the way back.
         let clip =
             track.clip_mut(self.clip_id).ok_or(CommandError::ClipNotFound(self.clip_id))?;
-        clip.source_in = before.source_in;
-        clip.timeline_start = before.timeline_start;
-        clip.duration = before.duration;
+        before.restore(clip);
         debug_assert!(track.invariants_hold());
         Ok(())
     }

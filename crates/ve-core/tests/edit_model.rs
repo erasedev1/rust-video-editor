@@ -442,6 +442,118 @@ fn locked_tracks_refuse_every_mutation() {
 }
 
 #[test]
+fn shifting_the_tail_moves_exactly_the_clips_at_or_after_the_point() {
+    let (mut p, seq, track, asset) = fixture();
+    add_clip(&mut p, seq, track, asset, 0, 10);
+    add_clip(&mut p, seq, track, asset, 10, 10);
+    add_clip(&mut p, seq, track, asset, 20, 10);
+    let t = p.sequence_mut(seq).unwrap().track_mut(track).unwrap();
+
+    assert_eq!(t.shift_clips_from(Ticks::from_seconds(10), Ticks::from_seconds(5)), Ok(2));
+    let starts: Vec<i64> =
+        t.clips().iter().map(|c| c.timeline_start.as_secs_f64() as i64).collect();
+    assert_eq!(starts, vec![0, 15, 25]);
+    assert!(t.invariants_hold());
+
+    // A clip starting exactly at the point is included; one merely overlapping
+    // it is not, because ripples move whole clips rather than cutting them.
+    assert_eq!(t.shift_clips_from(Ticks::from_seconds(20), Ticks::from_seconds(1)), Ok(1));
+    assert_eq!(t.content_end(), Ticks::from_seconds(36));
+}
+
+#[test]
+fn shifting_the_tail_back_stops_at_the_clip_left_behind() {
+    let (mut p, seq, track, asset) = fixture();
+    add_clip(&mut p, seq, track, asset, 0, 10);
+    add_clip(&mut p, seq, track, asset, 12, 10);
+    let t = p.sequence_mut(seq).unwrap().track_mut(track).unwrap();
+
+    // Two seconds of gap: pulling back two closes it exactly, three collides.
+    assert_eq!(
+        t.shift_clips_from(Ticks::from_seconds(12), Ticks::from_seconds(-3)),
+        Err(CoreError::ClipOverlap)
+    );
+    assert_eq!(
+        t.clips()[1].timeline_start,
+        Ticks::from_seconds(12),
+        "a refused shift moved a clip"
+    );
+    assert_eq!(t.shift_clips_from(Ticks::from_seconds(12), Ticks::from_seconds(-2)), Ok(1));
+    assert_eq!(t.clips()[1].timeline_start, Ticks::from_seconds(10));
+}
+
+#[test]
+fn shifting_the_first_clip_back_stops_at_the_start_of_the_timeline() {
+    let (mut p, seq, track, asset) = fixture();
+    add_clip(&mut p, seq, track, asset, 4, 10);
+    let t = p.sequence_mut(seq).unwrap().track_mut(track).unwrap();
+
+    assert_eq!(
+        t.shift_clips_from(Ticks::ZERO, Ticks::from_seconds(-5)),
+        Err(CoreError::ClipOverlap)
+    );
+    assert_eq!(t.shift_clips_from(Ticks::ZERO, Ticks::from_seconds(-4)), Ok(1));
+    assert_eq!(t.clips()[0].timeline_start, Ticks::ZERO);
+}
+
+#[test]
+fn shifting_past_the_last_clip_moves_nothing() {
+    let (mut p, seq, track, asset) = fixture();
+    add_clip(&mut p, seq, track, asset, 0, 10);
+    let t = p.sequence_mut(seq).unwrap().track_mut(track).unwrap();
+
+    assert_eq!(t.shift_clips_from(Ticks::from_seconds(50), Ticks::from_seconds(5)), Ok(0));
+    assert_eq!(t.shift_clips_from(Ticks::ZERO, Ticks::ZERO), Ok(0));
+    assert_eq!(t.content_end(), Ticks::from_seconds(10));
+}
+
+#[test]
+fn a_gap_is_the_empty_span_between_two_clips() {
+    let (mut p, seq, track, asset) = fixture();
+    add_clip(&mut p, seq, track, asset, 5, 5);
+    add_clip(&mut p, seq, track, asset, 20, 5);
+    let t = p.sequence(seq).unwrap().track(track).unwrap();
+
+    // Inside a clip there is no gap.
+    assert_eq!(t.gap_at(Ticks::from_seconds(7)), None);
+    // Between the two clips.
+    assert_eq!(
+        t.gap_at(Ticks::from_seconds(15)),
+        Some(TimeRange::from_bounds(Ticks::from_seconds(10), Ticks::from_seconds(20)))
+    );
+    // Before the first clip, bounded by the start of the timeline.
+    assert_eq!(
+        t.gap_at(Ticks::from_seconds(2)),
+        Some(TimeRange::from_bounds(Ticks::ZERO, Ticks::from_seconds(5)))
+    );
+    // Past the last clip there is nothing to pull back, so no gap.
+    assert_eq!(t.gap_at(Ticks::from_seconds(40)), None);
+    // A butt join is not a gap.
+    assert_eq!(t.clip_at(Ticks::from_seconds(10)), None);
+    assert_eq!(
+        t.gap_at(Ticks::from_seconds(10)).map(|g| g.duration),
+        Some(Ticks::from_seconds(10))
+    );
+}
+
+#[test]
+fn neighbours_are_positional_and_survive_gaps() {
+    let (mut p, seq, track, asset) = fixture();
+    let a = add_clip(&mut p, seq, track, asset, 0, 5);
+    let b = add_clip(&mut p, seq, track, asset, 20, 5);
+    let c = add_clip(&mut p, seq, track, asset, 30, 5);
+    let t = p.sequence(seq).unwrap().track(track).unwrap();
+
+    let (left, right) = t.neighbours_of(b);
+    assert_eq!(left.map(|c| c.id), Some(a), "a gap should not hide the neighbour");
+    assert_eq!(right.map(|c| c.id), Some(c));
+
+    assert_eq!(t.neighbours_of(a).0.map(|c| c.id), None);
+    assert_eq!(t.neighbours_of(c).1.map(|c| c.id), None);
+    assert!(matches!(t.neighbours_of(ClipId::from_raw(9_999)), (None, None)));
+}
+
+#[test]
 fn first_free_slot_skips_occupied_space() {
     let (mut p, seq, track, asset) = fixture();
     add_clip(&mut p, seq, track, asset, 0, 10);

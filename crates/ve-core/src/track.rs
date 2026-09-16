@@ -275,6 +275,68 @@ impl Track {
             && self.clips.iter().all(|c| c.duration.raw() > 0)
     }
 
+    /// Shifts every clip starting at or after `from` along the track.
+    ///
+    /// This is the one primitive behind every ripple: deleting a clip and
+    /// closing the hole, inserting into the middle of a sequence, and closing a
+    /// gap are all "shift the tail". Because every affected clip moves by the
+    /// same amount, their relative order and spacing are preserved and the sort
+    /// invariant cannot break — only the join with the clip *before* the shifted
+    /// run can collide, which is the one thing checked here.
+    ///
+    /// Returns how many clips moved.
+    pub fn shift_clips_from(&mut self, from: Ticks, delta: Ticks) -> Result<usize, CoreError> {
+        if self.locked {
+            return Err(CoreError::TrackLocked);
+        }
+        let first = self.clips.partition_point(|c| c.timeline_start < from);
+        if delta.is_zero() || first == self.clips.len() {
+            return Ok(0);
+        }
+        if delta.is_negative() {
+            // Pulling the tail back can only run into the clip left behind, or
+            // into the start of the timeline when there is none.
+            let limit =
+                if first == 0 { Ticks::ZERO } else { self.clips[first - 1].timeline_end() };
+            if self.clips[first].timeline_start + delta < limit {
+                return Err(CoreError::ClipOverlap);
+            }
+        }
+        for clip in &mut self.clips[first..] {
+            clip.timeline_start += delta;
+        }
+        debug_assert!(self.invariants_hold());
+        Ok(self.clips.len() - first)
+    }
+
+    /// The empty span containing `t`, bounded by its neighbouring clips.
+    ///
+    /// `None` when `t` lies inside a clip, or past the last one — trailing
+    /// empty timeline is not a gap, because there is nothing after it to pull
+    /// back.
+    pub fn gap_at(&self, t: Ticks) -> Option<TimeRange> {
+        let idx = self.clips.partition_point(|c| c.timeline_start <= t);
+        let start = match idx.checked_sub(1) {
+            Some(i) if self.clips[i].range().contains(t) => return None,
+            Some(i) => self.clips[i].timeline_end(),
+            None => Ticks::ZERO,
+        };
+        let gap = TimeRange::from_bounds(start, self.clips.get(idx)?.timeline_start);
+        (!gap.is_empty()).then_some(gap)
+    }
+
+    /// The clips immediately before and after `id` on the track, if any.
+    ///
+    /// Adjacency here is positional, not "butt-joined": a neighbour separated
+    /// by a gap is still the neighbour, which is what a slide has to know about
+    /// to decide how far it may go.
+    pub fn neighbours_of(&self, id: ClipId) -> (Option<&Clip>, Option<&Clip>) {
+        match self.index_of(id) {
+            Some(idx) => (idx.checked_sub(1).map(|i| &self.clips[i]), self.clips.get(idx + 1)),
+            None => (None, None),
+        }
+    }
+
     /// The first position at or after `after` where `duration` ticks are free.
     pub fn first_free_slot(&self, after: Ticks, duration: Ticks) -> Ticks {
         let mut cursor = after.clamp_non_negative();
