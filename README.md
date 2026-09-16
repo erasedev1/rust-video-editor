@@ -183,7 +183,7 @@ how three real decoder bugs were caught.
 - [Architecture](docs/ARCHITECTURE.md) — the design and why it is that way
 - [Project format](docs/PROJECT_FORMAT.md) — the `.verge` file
 - [Benchmarks](docs/BENCHMARKS.md) — measured performance
-- [Roadmap](docs/ROADMAP.md) — where this is going
+- [Roadmap](docs/ROADMAP.md) — where this is going in the future
 - [Releasing](docs/RELEASING.md) — how the release builds work
 
 ## Layout
