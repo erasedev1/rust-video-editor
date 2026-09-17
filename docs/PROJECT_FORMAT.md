@@ -112,6 +112,21 @@ with a test that loads a document without it and asserts the mode comes back as
 `normal`. A bump is for a change that would make an older document mean something
 different — a renamed field, a changed unit, a restructured tree.
 
+Everything audio added in Phase 4 is additive, and still at version 2:
+
+| Field                        | Where            | Missing means |
+|------------------------------|------------------|---------------|
+| `audio.fade_in` / `fade_out` | clip, comp layer | no fade       |
+| `volume`                     | track            | unity gain    |
+| `pan`                        | track            | centre        |
+
+A fade is `{"length": <ticks>, "curve": "linear" | "equal_power" | "smooth"}`
+and is **omitted entirely** when its length is zero, which is the overwhelming
+case — a clip with no fades writes no fade fields at all, and a test asserts
+that. Track `volume` and `pan` are plain numbers; both are clamped when they are
+*read*, so a hand-edited file cannot push a negative gain or an out-of-range pan
+into the mixer.
+
 ## Robustness
 
 The loader treats the file as untrusted. It repairs what it can and reports the

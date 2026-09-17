@@ -6,8 +6,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use ve_core::{
-    BlendMode, Clip, CompositionLayer, CompositionSettings, Interpolation, MediaInfo, Project,
-    Size, Source, VideoStreamInfo,
+    BlendMode, Clip, CompositionLayer, CompositionSettings, FadeCurve, Interpolation,
+    MediaInfo, Project, Size, Source, VideoStreamInfo,
 };
 use ve_project::{autosave, store, Autosave, ProjectError, FORMAT_MAGIC, FORMAT_VERSION};
 use ve_time::{Rate, Ticks};
@@ -738,4 +738,142 @@ fn a_colour_space_survives_a_round_trip() {
 
     let loaded = store::load(&path).unwrap();
     assert_eq!(loaded.project.active().unwrap().settings.color_space, ColorSpace::Linear);
+}
+
+// ---- audio: fades and track levels --------------------------------------
+
+/// A project carrying everything Phase 4 added, for the round trips below.
+fn project_with_audio(media: &Path) -> Project {
+    let mut p = Project::with_default_sequence("Mix");
+    let asset = p.add_asset(
+        media,
+        MediaInfo {
+            duration: Ticks::from_seconds(30),
+            video: None,
+            audio: Some(ve_core::AudioStreamInfo {
+                sample_rate: ve_time::SampleRate::HZ_48000,
+                channels: 2,
+                duration: Ticks::from_seconds(30),
+                codec: "pcm_s16le".into(),
+            }),
+            container: "wav".into(),
+        },
+    );
+    let seq = p.active_sequence.unwrap();
+    let track = p
+        .sequence(seq)
+        .unwrap()
+        .tracks
+        .iter()
+        .find(|t| t.kind == ve_core::TrackKind::Audio)
+        .unwrap()
+        .id;
+
+    let clip_id = p.new_clip_id();
+    let mut clip =
+        Clip::new(clip_id, asset, "vo_01", Ticks::ZERO, Ticks::ZERO, Ticks::from_seconds(10));
+    clip.audio.fade_in = ve_core::Fade::new(Ticks::from_millis(750), FadeCurve::EqualPower);
+    clip.audio.fade_out = ve_core::Fade::new(Ticks::from_seconds(2), FadeCurve::Smooth);
+    clip.audio.volume = ve_core::Property::constant(0.8);
+    p.sequence_mut(seq).unwrap().track_mut(track).unwrap().insert_clip(clip).unwrap();
+
+    let t = p.sequence_mut(seq).unwrap().track_mut(track).unwrap();
+    t.volume = 0.6;
+    t.pan = -0.35;
+    p
+}
+
+#[test]
+fn fades_and_track_levels_survive_a_save_and_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("vo.wav");
+    fs::write(&media, b"not really audio").unwrap();
+    let path = dir.path().join("mix.verge");
+
+    store::save(&project_with_audio(&media), &path).unwrap();
+    let loaded = store::load(&path).unwrap();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+
+    let seq = loaded.project.active().unwrap();
+    let track = seq.tracks.iter().find(|t| !t.is_empty()).expect("the audio track");
+    assert_eq!(track.audio_level(), (0.6, -0.35));
+
+    let clip = &track.clips()[0];
+    assert_eq!(clip.audio.fade_in.length, Ticks::from_millis(750));
+    assert_eq!(clip.audio.fade_in.curve, FadeCurve::EqualPower);
+    assert_eq!(clip.audio.fade_out.length, Ticks::from_seconds(2));
+    assert_eq!(clip.audio.fade_out.curve, FadeCurve::Smooth);
+    assert_eq!(clip.audio.volume.value, 0.8);
+}
+
+/// Fades and track levels are additive, so they need no format bump: a file
+/// written before they existed still opens, with no fade and unity gain.
+#[test]
+fn a_project_written_before_fades_existed_opens_silent_of_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("vo.wav");
+    fs::write(&media, b"not really audio").unwrap();
+    let path = dir.path().join("old.verge");
+
+    store::save(&project_with_audio(&media), &path).unwrap();
+
+    // Strip every field this phase introduced, as an older build's file would
+    // simply not have had them.
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    for track in doc["project"]["sequences"][0]["tracks"].as_array_mut().unwrap() {
+        track.as_object_mut().unwrap().remove("volume");
+        track.as_object_mut().unwrap().remove("pan");
+        for clip in track["clips"].as_array_mut().unwrap() {
+            let audio = clip["audio"].as_object_mut().unwrap();
+            audio.remove("fade_in");
+            audio.remove("fade_out");
+        }
+    }
+    fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    let loaded = store::load(&path).unwrap();
+    let seq = loaded.project.active().unwrap();
+    let track = seq.tracks.iter().find(|t| !t.is_empty()).expect("the audio track");
+    assert!(track.is_unity(), "a track with no level recorded plays at unity");
+
+    let clip = &track.clips()[0];
+    assert!(!clip.audio.fade_in.is_active());
+    assert!(!clip.audio.fade_out.is_active());
+    assert_eq!(clip.audio.volume.value, 0.8, "the level that was recorded is kept");
+}
+
+/// The common case — no fades at all — must not bloat every clip in the file.
+#[test]
+fn a_clip_with_no_fades_writes_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("plain.verge");
+    store::save(&Project::with_default_sequence("Plain"), &path).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("fade_in"), "an absent fade should not be written out");
+}
+
+/// A hand-edited file cannot push the mixer somewhere it will not go.
+#[test]
+fn a_hand_edited_track_level_is_clamped_when_it_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("vo.wav");
+    fs::write(&media, b"not really audio").unwrap();
+    let path = dir.path().join("hostile.verge");
+
+    store::save(&project_with_audio(&media), &path).unwrap();
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    for track in doc["project"]["sequences"][0]["tracks"].as_array_mut().unwrap() {
+        track["volume"] = serde_json::json!(-5.0);
+        track["pan"] = serde_json::json!(12.0);
+    }
+    fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    let loaded = store::load(&path).unwrap();
+    for track in &loaded.project.active().unwrap().tracks {
+        let (gain, pan) = track.audio_level();
+        assert_eq!(gain, 0.0, "a negative gain must not invert the phase");
+        assert_eq!(pan, 1.0);
+    }
 }

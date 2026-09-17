@@ -9,13 +9,14 @@
 
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, Ui};
 use ve_command::TrimEdge;
-use ve_core::{Sequence, TrackKind};
+use ve_core::{FadeEdge, Sequence, TrackKind};
+use ve_engine::AudioLevels;
 use ve_media::WaveformService;
 use ve_time::{Rate, Ticks, TimeRange};
 
 use crate::actions::Action;
 use crate::panels::waveform;
-use crate::state::{EditorState, TimelineDrag, TimelineTool, TrimEdgeKind};
+use crate::state::{EditorState, FadeEdgeKind, TimelineDrag, TimelineTool, TrimEdgeKind};
 use crate::theme;
 
 /// How close to a clip edge the pointer must be to start a trim instead of a move.
@@ -24,12 +25,21 @@ const TRIM_HANDLE_PX: f32 = 6.0;
 const SNAP_RADIUS_PX: f32 = 8.0;
 /// Side of a mute/solo/lock button in a track header.
 const SWITCH_PX: f32 = 15.0;
+/// Height of the level meter strip in an audio track's header.
+const METER_PX: f32 = 5.0;
+/// How near a fade grip the pointer must be to take hold of it.
+const FADE_GRIP_PX: f32 = 7.0;
+/// How far down a clip the fade grips reach. Shallow, so the rest of the clip's
+/// top edge still starts a move and the corners still start a trim.
+const FADE_BAND_PX: f32 = 11.0;
 
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     state: &mut EditorState,
     waveforms: &WaveformService,
     playhead: Ticks,
+    levels: &AudioLevels,
     actions: &mut Vec<Action>,
 ) {
     let Some(sequence) = state.active_sequence().cloned() else { return };
@@ -65,6 +75,7 @@ pub fn show(
         state,
         &sequence,
         waveforms,
+        levels,
         header_width,
         full.left(),
         hover,
@@ -129,6 +140,14 @@ fn toolbar(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
             .clicked()
         {
             actions.push(Action::RippleDeleteSelected);
+        }
+        if ui
+            .add_enabled(state.selection.clips.len() == 2, egui::Button::new("Crossfade"))
+            .on_hover_text("Fade two overlapping clips into each other (Ctrl+Shift+F)")
+            .on_disabled_hover_text("Select two clips that overlap in time")
+            .clicked()
+        {
+            actions.push(Action::CrossfadeSelection(ve_core::FadeCurve::EqualPower));
         }
 
         ui.add_space(8.0);
@@ -261,6 +280,7 @@ fn draw_tracks(
     state: &EditorState,
     sequence: &Sequence,
     waveforms: &WaveformService,
+    levels: &AudioLevels,
     header_width: f32,
     left: f32,
     hover: Option<Pos2>,
@@ -313,7 +333,8 @@ fn draw_tracks(
             Stroke::new(1.0, theme::SEPARATOR),
         );
 
-        let switches = draw_track_header(painter, header_rect, track, hover);
+        let switches =
+            draw_track_header(painter, header_rect, track, levels.track(track.id), hover);
         draw_grid(painter, lane_rect, state, sequence, lanes_left);
 
         // The culling that makes a big timeline cheap: only clips actually
@@ -362,6 +383,7 @@ fn draw_track_header(
     painter: &egui::Painter,
     rect: Rect,
     track: &ve_core::Track,
+    level: ve_engine::Meter,
     hover: Option<Pos2>,
 ) -> [Rect; 3] {
     let accent = match track.kind {
@@ -380,12 +402,40 @@ fn draw_track_header(
         FontId::proportional(11.5),
         if track.muted { theme::TEXT_FAINT } else { theme::TEXT },
     );
+    // An audio track gives the bottom of its header to a meter, which is where
+    // the eye goes while mixing. The strip is drawn whether or not anything is
+    // playing: an empty meter in a fixed place reads as silence, whereas one
+    // that appears and disappears reads as a glitch.
+    let metered = track.kind == TrackKind::Audio && rect.height() >= 38.0;
+    let mut footer = rect.bottom() - 5.0;
+    if metered {
+        let strip = Rect::from_min_max(
+            Pos2::new(rect.left() + 6.0, rect.bottom() - METER_PX - 3.0),
+            Pos2::new(rect.right() - 6.0, rect.bottom() - 3.0),
+        );
+        crate::meter::draw(painter, strip, level);
+        footer -= METER_PX + 3.0;
+    }
+
+    let summary = if track.is_unity() {
+        format!("{} clip{}", track.len(), if track.len() == 1 { "" } else { "s" })
+    } else {
+        // A track that is not passing its audio through untouched has to say
+        // so: a mix set up last week and reopened today is otherwise a mystery.
+        format!(
+            "{} clip{}   {}  {}",
+            track.len(),
+            if track.len() == 1 { "" } else { "s" },
+            crate::meter::gain_label(track.volume),
+            crate::meter::pan_label(track.pan),
+        )
+    };
     painter.text(
-        Pos2::new(rect.left() + 10.0, rect.bottom() - 5.0),
+        Pos2::new(rect.left() + 10.0, footer),
         Align2::LEFT_BOTTOM,
-        format!("{} clip{}", track.len(), if track.len() == 1 { "" } else { "s" }),
+        summary,
         FontId::proportional(9.5),
-        theme::TEXT_FAINT,
+        if track.is_unity() { theme::TEXT_FAINT } else { theme::TEXT_DIM },
     );
 
     let on = [track.muted, track.solo, track.locked];
@@ -533,6 +583,10 @@ fn draw_clip(
         }
     }
 
+    if kind == TrackKind::Audio {
+        draw_fades(painter, rect, clip, x0..x1);
+    }
+
     // Only label a clip wide enough to read, so a dense timeline does not turn
     // into overlapping text.
     if labelled {
@@ -575,6 +629,120 @@ fn draw_clip(
             theme::ACCENT,
         );
     }
+}
+
+/// Draws a clip's fades, and the grips that set them.
+///
+/// The envelope is drawn as a line falling to the clip's silent corner, which
+/// is the shape every editor uses and the one the waveform underneath is
+/// already scaled by — the two agree because both read the same evaluated gain.
+///
+/// A clip with no fade still gets its grips, sitting in its top corners. That is
+/// what makes a fade discoverable: there is something to pull rather than a
+/// menu to find.
+fn draw_fades(
+    painter: &egui::Painter,
+    rect: Rect,
+    clip: &ve_core::Clip,
+    whole: std::ops::Range<f32>,
+) {
+    if rect.width() < 12.0 || rect.height() < FADE_BAND_PX + 4.0 {
+        return;
+    }
+    let pixels_per_tick = (whole.end - whole.start) / clip.duration.raw().max(1) as f32;
+    let (fade_in, fade_out) = clip.audio.fitted_fades(clip.duration);
+
+    for (edge, fade) in [(FadeEdge::In, fade_in), (FadeEdge::Out, fade_out)] {
+        let span = fade.length.raw() as f32 * pixels_per_tick;
+        let (anchor, tip) = match edge {
+            FadeEdge::In => (whole.start, whole.start + span),
+            FadeEdge::Out => (whole.end, whole.end - span),
+        };
+
+        if fade.is_active() && span >= 2.0 {
+            // The line from silence to full level, plus a wash under it so the
+            // fade reads at a glance rather than only on inspection.
+            painter.line_segment(
+                [
+                    Pos2::new(anchor.clamp(rect.left(), rect.right()), rect.bottom()),
+                    Pos2::new(tip.clamp(rect.left(), rect.right()), rect.top()),
+                ],
+                Stroke::new(1.5, theme::PLAYHEAD),
+            );
+            let wedge = Rect::from_min_max(
+                Pos2::new(anchor.min(tip).max(rect.left()), rect.top()),
+                Pos2::new(anchor.max(tip).min(rect.right()), rect.bottom()),
+            );
+            if wedge.width() > 0.0 {
+                painter.rect_filled(
+                    wedge,
+                    CornerRadius::ZERO,
+                    theme::PLAYHEAD.gamma_multiply(0.12),
+                );
+            }
+        }
+
+        let grip = fade_grip(rect, tip);
+        if rect.x_range().contains(grip.center().x) {
+            painter.rect_filled(
+                grip,
+                CornerRadius::same(2),
+                if fade.is_active() {
+                    theme::PLAYHEAD
+                } else {
+                    theme::TEXT_FAINT.gamma_multiply(0.7)
+                },
+            );
+        }
+    }
+}
+
+/// Where a fade grip sits, given where the fade reaches full level.
+fn fade_grip(rect: Rect, tip: f32) -> Rect {
+    Rect::from_center_size(
+        Pos2::new(tip, rect.top() + FADE_GRIP_PX * 0.5),
+        egui::Vec2::splat(FADE_GRIP_PX),
+    )
+}
+
+/// The fade grip under the pointer, if any.
+///
+/// Checked before the trim handles, because the grips sit in the clip's top
+/// corners where a trim would otherwise start. They are confined to a shallow
+/// band so the rest of the edge still trims.
+fn hit_test_fade(
+    state: &EditorState,
+    sequence: &Sequence,
+    lane: &Lane,
+    pointer: Pos2,
+    lanes_left: f32,
+) -> Option<(ve_core::ClipId, FadeEdge)> {
+    let track = sequence.track(lane.track)?;
+    if track.kind != TrackKind::Audio {
+        return None;
+    }
+    if pointer.y > lane.rect.top() + FADE_BAND_PX {
+        return None;
+    }
+    let clip = track.clip_at(state.timeline.time_at(pointer.x - lanes_left))?;
+
+    let x0 = lanes_left + state.timeline.x_of(clip.timeline_start);
+    let x1 = lanes_left + state.timeline.x_of(clip.timeline_end());
+    if (x1 - x0) < 12.0 {
+        return None;
+    }
+    let pixels_per_tick = (x1 - x0) / clip.duration.raw().max(1) as f32;
+    let (fade_in, fade_out) = clip.audio.fitted_fades(clip.duration);
+
+    for (edge, tip) in [
+        (FadeEdge::In, x0 + fade_in.length.raw() as f32 * pixels_per_tick),
+        (FadeEdge::Out, x1 - fade_out.length.raw() as f32 * pixels_per_tick),
+    ] {
+        if (pointer.x - tip).abs() <= FADE_GRIP_PX {
+            return Some((clip.id, edge));
+        }
+    }
+    None
 }
 
 /// Works out which part of the source file a clip's visible body shows.
@@ -786,17 +954,42 @@ fn handle_pointer(
 
     // Starting a gesture.
     if response.drag_started() || response.clicked() {
-        if pointer.y <= ruler.bottom() {
+        // Where the *press* landed, not where the pointer is now. A drag is only
+        // reported once the pointer has travelled past egui's threshold, by
+        // which time it has left whatever small target it took hold of — which
+        // is how a fade grip or a trim handle gets missed and a move begins
+        // instead. The press origin is what the user aimed at.
+        let grab = ui.input(|i| i.pointer.press_origin()).unwrap_or(pointer);
+        let grab_time = state.timeline.time_at(grab.x - lanes_left);
+
+        if grab.y <= ruler.bottom() {
             state.drag = TimelineDrag::Playhead;
-        } else if let Some(lane) = lanes.iter().find(|l| l.rect.contains(pointer)) {
+        } else if let Some(lane) = lanes.iter().find(|l| l.rect.contains(grab)) {
             let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
-            match hit_test_clip(state, sequence, lane, pointer, lanes_left) {
+            // A fade grip is answered before anything else: it sits in a clip's
+            // top corner, where a trim would otherwise take hold.
+            if !lane.locked && state.tool == TimelineTool::Select {
+                if let Some((clip, edge)) =
+                    hit_test_fade(state, sequence, lane, grab, lanes_left)
+                {
+                    actions.push(Action::SelectClip { clip, track: lane.track, additive });
+                    state.drag = TimelineDrag::FadeHandle {
+                        clip,
+                        edge: match edge {
+                            FadeEdge::In => FadeEdgeKind::In,
+                            FadeEdge::Out => FadeEdgeKind::Out,
+                        },
+                    };
+                    return;
+                }
+            }
+            match hit_test_clip(state, sequence, lane, grab, lanes_left) {
                 Some((clip, edge)) => {
                     actions.push(Action::SelectClip { clip, track: lane.track, additive });
                     state.drag = if lane.locked {
                         TimelineDrag::None
                     } else {
-                        begin_clip_drag(state, sequence, lane, clip, edge, time_at_pointer)
+                        begin_clip_drag(state, sequence, lane, clip, edge, grab_time)
                     };
                 }
                 None => {
@@ -807,14 +1000,12 @@ fn handle_pointer(
                     if response.drag_started() {
                         // Dragging from empty track space sweeps out a
                         // selection rectangle.
-                        state.drag = TimelineDrag::Marquee {
-                            origin_time: time_at_pointer,
-                            origin_y: pointer.y,
-                        };
+                        state.drag =
+                            TimelineDrag::Marquee { origin_time: grab_time, origin_y: grab.y };
                     } else {
                         // A click that never moves still moves the playhead,
                         // as clicking a timeline background always has.
-                        let to = snap(state, sequence, time_at_pointer, None);
+                        let to = snap(state, sequence, grab_time, None);
                         actions.push(Action::ScrubTo(to));
                         state.drag = TimelineDrag::None;
                     }
@@ -872,6 +1063,34 @@ fn handle_pointer(
                 let to = sequence.snap_to_frame(snap(state, sequence, raw, Some(clip)));
                 actions.push(Action::SlideClipTo { clip, track, to, coalesce: true });
             }
+            TimelineDrag::FadeHandle { clip, edge } => {
+                let Some((_, c)) = sequence.find_clip(clip) else { return };
+                // The pointer names where the fade reaches full level; the
+                // length is the distance back to the clip's own end.
+                let length = match edge {
+                    FadeEdgeKind::In => time_at_pointer - c.timeline_start,
+                    FadeEdgeKind::Out => c.timeline_end() - time_at_pointer,
+                };
+                let length = Ticks::new(length.raw().clamp(0, c.duration.raw()));
+                actions.push(Action::SetClipFade {
+                    clip,
+                    edge: match edge {
+                        FadeEdgeKind::In => FadeEdge::In,
+                        FadeEdgeKind::Out => FadeEdge::Out,
+                    },
+                    length,
+                    // Keeping the curve the clip already has means dragging a
+                    // handle changes the length and nothing else.
+                    curve: c
+                        .audio
+                        .fade(match edge {
+                            FadeEdgeKind::In => FadeEdge::In,
+                            FadeEdgeKind::Out => FadeEdge::Out,
+                        })
+                        .curve,
+                    coalesce: true,
+                });
+            }
             TimelineDrag::Marquee { origin_time, origin_y } => {
                 let range = TimeRange::from_bounds(
                     origin_time.min(time_at_pointer),
@@ -906,6 +1125,10 @@ fn handle_pointer(
     // A cursor that tells the user which gesture a press would begin.
     if !response.dragged() && pointer.y > ruler.bottom() {
         if let Some(lane) = lanes.iter().find(|l| l.rect.contains(pointer)) {
+            if hit_test_fade(state, sequence, lane, pointer, lanes_left).is_some() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                return;
+            }
             if let Some((_, edge)) = hit_test_clip(state, sequence, lane, pointer, lanes_left) {
                 let horizontal = match state.tool {
                     TimelineTool::Select => edge.is_some(),

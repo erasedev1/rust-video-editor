@@ -48,6 +48,22 @@ impl CpalSink {
         })
     }
 
+    /// The default output device's format, without opening a stream for it.
+    ///
+    /// Used to size the ring before the sink is built, so the buffer is the
+    /// same span of *time* whatever rate the device turns out to want.
+    pub fn default_format() -> Result<(SampleRate, u16), AudioError> {
+        let host = cpal::default_host();
+        let device = host.default_output_device().ok_or(AudioError::NoDevice)?;
+        let supported = device
+            .default_output_config()
+            .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+        let channels = supported.channels();
+        let rate = SampleRate::new(supported.sample_rate().0)
+            .map_err(|e| AudioError::UnsupportedFormat(e.to_string()))?;
+        Ok((rate, channels))
+    }
+
     pub fn device_name(&self) -> String {
         self.device.name().unwrap_or_else(|_| "<unknown>".into())
     }

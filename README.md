@@ -29,6 +29,13 @@ The first vertical slice is complete and tested end to end:
 - Audio waveforms on timeline clips, analysed in the background and filling in
   as they are read, at a cost that follows what is on screen rather than the
   length of the file
+- Fades at either end of a clip — linear, equal-power or smooth — dragged from
+  the clip's corners or set exactly in the inspector, and drawn into the waveform
+- Crossfades between two clips that overlap in time, with equal-power curves
+- Track volume, pan and peak meters that read what the device is playing
+- Audio playback through the system's default output device, mixed ahead on its
+  own thread — built and tested to the device boundary, but **unverified against
+  real hardware**, because this was developed in a container with no sound card
 - GPU compositing with transforms, opacity and alpha blending
 - Blend modes — normal, add, multiply and screen — as pipeline variants
 - A render cache keyed on the composition itself: an unchanged picture is never
@@ -38,6 +45,11 @@ The first vertical slice is complete and tested end to end:
 - A development performance overlay reporting real measurements
 
 ![The editor with a project open, playing](docs/images/editor.png)
+
+Audio: fades drawn into the waveform, a crossfade between two overlapping clips,
+and a track strip with its level, pan and meter.
+
+![Fades, a crossfade and the track strip](docs/images/audio.png)
 
 The development overlay reports what the frame actually cost, broken down by
 stage, so a regression is visible while editing rather than weeks later:
@@ -171,13 +183,17 @@ a bug worth reporting rather than an intended limitation.
 Two things are known to be platform-specific in the code today, both isolated
 behind interfaces: process memory reporting in `ve-metrics` is implemented for
 Linux only and reports "unavailable" elsewhere, and audio output goes through
-`cpal`, which has not been exercised on any platform yet (see
-[Architecture](docs/ARCHITECTURE.md#what-is-deliberately-absent)).
+`cpal`, which has not been exercised on **any** platform: the container this was
+developed in has no sound card, so the mixing, metering and ring code is tested
+end to end but no test has heard a sample (see
+[Architecture](docs/ARCHITECTURE.md#what-is-deliberately-absent)). A machine
+without an output device is treated as an ordinary state — the editor opens,
+says so in the performance overlay, and keeps cutting.
 
 ## Testing
 
 ```sh
-cargo test --workspace     # 510 tests
+cargo test --workspace     # 579 tests
 cargo bench                # measured, not estimated
 ```
 

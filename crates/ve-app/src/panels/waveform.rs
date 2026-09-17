@@ -161,15 +161,16 @@ fn scaled(peak: Peak, gain: f32) -> Peak {
     Peak { min: peak.min * gain, max: peak.max * gain, rms: peak.rms * gain }
 }
 
-/// The clip's volume at the time a column covers.
+/// The clip's audible level at the time a column covers: its volume, its
+/// automation and its fades, which is exactly what the mixer will apply.
 ///
-/// Constant volume — the overwhelming case — is evaluated once per column and
-/// costs a property lookup; it is not worth a special case, because the same
-/// call is what makes an animated fade draw as one.
+/// Constant volume and no fade — the overwhelming case — is evaluated once per
+/// column and costs a property lookup; it is not worth a special case, because
+/// the same call is what makes a fade draw as one.
 fn gain_at(clip: &Clip, area: &Area, index: usize, columns: usize) -> f32 {
     let fraction = (index as f64 + 0.5) / columns as f64;
     let at = area.timeline.start
         + Ticks::from_secs_f64(area.timeline.duration.as_secs_f64() * fraction);
     let local = clip.local_time_at(at);
-    clip.audio.volume.evaluate(local).clamp(0.0, 4.0) as f32
+    clip.audio.evaluate(local, clip.duration).0.clamp(0.0, 4.0) as f32
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use eframe::CreationContext;
 use ve_core::{Project, Size};
-use ve_engine::{EngineUpdate, PlaybackClock, PlaybackEngine};
+use ve_engine::{AudioOutput, EngineUpdate, PlaybackClock, PlaybackEngine, Viewing};
 use ve_media::{DecodeService, WaveformService};
 use ve_metrics::{spans, Metrics};
 
@@ -33,6 +33,20 @@ pub struct VergeApp {
     /// interface.
     waveforms: Arc<WaveformService>,
     preview: Option<Preview>,
+    /// The device, the mixing thread and the ring behind them. `None` when the
+    /// machine has no sound card, which is an ordinary state — the editor cuts
+    /// perfectly well without one — rather than a failure to report loudly.
+    audio: Option<AudioOutput>,
+    /// Why there is no audio, if there is none. Shown in the overlay rather
+    /// than in a dialogue: it is a fact about the machine, not a problem the
+    /// user can act on mid-edit.
+    audio_error: Option<String>,
+    /// The project revision the mixer has been given, so a snapshot is
+    /// published once per edit rather than once per frame.
+    published_revision: Option<u64>,
+    /// Where the audio mixer was last pointed, so scrubbing only moves it when
+    /// the playhead actually moved.
+    audio_position: ve_time::Ticks,
     metrics: Metrics,
     adapter_name: String,
     software_gpu: bool,
@@ -76,11 +90,34 @@ impl VergeApp {
             }
         };
 
+        // No device is not an error worth stopping for: a headless machine, a
+        // container, or a laptop with everything muted all land here, and the
+        // editor is perfectly usable without sound.
+        let (audio, audio_error) = match AudioOutput::open(metrics.clone()) {
+            Ok(output) => {
+                log::info!(
+                    "audio output: {} at {} Hz, {} channels",
+                    output.device_name(),
+                    output.sample_rate().hz(),
+                    output.channels()
+                );
+                (Some(output), None)
+            }
+            Err(e) => {
+                log::warn!("no audio output: {e}");
+                (None, Some(e.to_string()))
+            }
+        };
+
         let mut app = VergeApp {
             state,
             engine,
             waveforms,
             preview,
+            audio,
+            audio_error,
+            published_revision: None,
+            audio_position: ve_time::Ticks::ZERO,
             metrics,
             adapter_name,
             software_gpu,
@@ -122,6 +159,58 @@ impl VergeApp {
             });
         }
         self.last_update = Some(update);
+    }
+
+    /// Keeps the audio mixer pointed at the same edit and the same instant the
+    /// picture is.
+    ///
+    /// The two transports are not locked to each other: the picture is driven
+    /// from the wall clock and the sound from the device's sample counter, which
+    /// differ by parts per million rather than by anything audible over the
+    /// length of a cut. Slaving the picture to the audio clock is what a long
+    /// programme needs, and it belongs with the rest of the professional audio
+    /// work rather than being half-done here.
+    fn drive_audio(&mut self, position: ve_time::Ticks, playing: bool) {
+        let Some(audio) = self.audio.as_mut() else { return };
+
+        // A composition previewed on its own is picture only: its layers have
+        // no sequence track to reach the mix through, and pretending otherwise
+        // would put sound on a meter that is not on screen.
+        let Some(Viewing::Sequence(sequence)) = self.state.viewing() else {
+            if audio.is_playing() {
+                audio.stop();
+            }
+            return;
+        };
+
+        if self.published_revision != Some(self.state.revision()) {
+            audio.publish(&self.state.project, sequence);
+            self.published_revision = Some(self.state.revision());
+        }
+
+        match (playing, audio.is_playing()) {
+            (true, false) => audio.play(position),
+            (false, true) => audio.stop(),
+            // Scrubbing while stopped: move where the mixer reads from, so
+            // pressing play starts where the playhead is rather than where it
+            // was when the sound last stopped.
+            (false, false) if self.audio_position != position => audio.seek(position),
+            _ => {}
+        }
+        self.audio_position = position;
+    }
+
+    /// How long a crossfade of the current selection would be, if one is
+    /// possible at all. Drives whether the menu item is offered.
+    fn crossfade_candidate(&self) -> Option<ve_time::Ticks> {
+        let sequence = self.state.active_sequence_id()?;
+        let mut clips = self.state.selection.clips.iter().copied();
+        let (a, b, extra) = (clips.next()?, clips.next()?, clips.next());
+        if extra.is_some() {
+            return None;
+        }
+        ve_command::CrossfadeClips::overlap(&self.state.project, sequence, a, b)
+            .map(|(_, _, length)| length)
     }
 
     fn menu_bar(&mut self, root: &mut egui::Ui, actions_out: &mut Vec<Action>) {
@@ -246,6 +335,32 @@ impl VergeApp {
                     }
                     if ui.button("Close Gap    Ctrl+Backspace").clicked() {
                         actions_out.push(Action::CloseGapAtPlayhead);
+                        ui.close();
+                    }
+                    ui.separator();
+
+                    // Two clips, overlapping in time, which on a timeline whose
+                    // tracks hold no overlaps means two tracks. The item is
+                    // enabled only when that is actually the case, so it never
+                    // offers something it would then refuse.
+                    let pair = self.crossfade_candidate();
+                    if ui
+                        .add_enabled(
+                            pair.is_some(),
+                            egui::Button::new("Crossfade Selected    Ctrl+Shift+F"),
+                        )
+                        .on_hover_text(
+                            "Fades two overlapping clips into each other, with \
+                             equal-power curves",
+                        )
+                        .on_disabled_hover_text(
+                            "Select two clips that overlap in time — on a single \
+                             track they never sound together",
+                        )
+                        .clicked()
+                    {
+                        actions_out
+                            .push(Action::CrossfadeSelection(ve_core::FadeCurve::EqualPower));
                         ui.close();
                     }
                 });
@@ -486,6 +601,9 @@ impl eframe::App for VergeApp {
         let pending = update.map(|u| u.pending).unwrap_or(0);
         let visible = update.map(|u| u.layer_count()).unwrap_or(0);
 
+        self.drive_audio(position, playing);
+        let levels = self.audio.as_ref().map(|a| a.levels()).unwrap_or_default();
+
         let mut pending_actions = Vec::new();
 
         // 2. Keyboard, unless a text field has the keyboard.
@@ -508,6 +626,7 @@ impl eframe::App for VergeApp {
                     &mut self.state,
                     &self.waveforms,
                     position,
+                    &levels,
                     &mut pending_actions,
                 );
             });
@@ -524,7 +643,7 @@ impl eframe::App for VergeApp {
             .default_size(248.0)
             .min_size(180.0)
             .show(root, |ui| {
-                panels::inspector::show(ui, &self.state, &mut pending_actions);
+                panels::inspector::show(ui, &self.state, &levels, &mut pending_actions);
             });
 
         // The darkest surface surrounds the picture, so the preview is judged
@@ -581,6 +700,16 @@ impl eframe::App for VergeApp {
                 software_gpu: self.software_gpu,
                 clip_count: self.state.project.clip_count(),
                 visible_layers: visible,
+                audio: match (&self.audio, &self.audio_error) {
+                    (Some(output), _) => panels::overlay::AudioStatus::Open {
+                        device: output.device_name(),
+                        sample_rate: output.sample_rate().hz(),
+                        channels: output.channels(),
+                        levels: &levels,
+                    },
+                    (None, Some(reason)) => panels::overlay::AudioStatus::Unavailable(reason),
+                    (None, None) => panels::overlay::AudioStatus::Unavailable("not opened"),
+                },
             };
             panels::overlay::show(&ctx, &input);
         }

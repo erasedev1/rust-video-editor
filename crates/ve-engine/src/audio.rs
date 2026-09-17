@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use ve_core::{AssetId, Project, Sequence};
+use ve_core::{AssetId, Project, Sequence, TrackId};
 use ve_media::{AudioDecoder, MediaError};
 use ve_metrics::Metrics;
 use ve_time::{SampleRate, Ticks};
 
-use crate::mixer::{AudioMixer, MixSource, MixStats};
+use crate::mixer::{AudioMixer, Meter, MixSource, MixStats};
 use crate::plan::evaluate_project;
 use crate::ring::Producer;
 
@@ -77,6 +77,20 @@ impl AudioSource {
     }
 }
 
+/// One clip's decoded samples, held while the mix borrows them.
+///
+/// The borrow checker will not allow decoding into `AudioRenderer::sources`
+/// while the mixer holds slices out of it, so each contribution is copied out
+/// first. Named rather than a tuple because it now carries enough fields that a
+/// tuple stopped saying what any of them were.
+struct Block {
+    samples: Vec<f32>,
+    channels: u16,
+    gain: f64,
+    pan: f64,
+    track: Option<TrackId>,
+}
+
 /// Mixes a sequence's audio ahead of the device.
 ///
 /// Runs on an ordinary thread, never in the device callback: it decodes, mixes
@@ -91,6 +105,13 @@ pub struct AudioRenderer {
     position: Ticks,
     metrics: Metrics,
     last_stats: MixStats,
+    /// Per-source readings from the last block, reused so metering allocates
+    /// nothing in steady state.
+    source_meters: Vec<Meter>,
+    /// The same readings folded down to one per track, which is what a track
+    /// header shows. A track with three clips playing at once reads as the
+    /// loudest of them, because that is what reaches the mix through it.
+    track_meters: Vec<(TrackId, Meter)>,
 }
 
 impl AudioRenderer {
@@ -103,6 +124,8 @@ impl AudioRenderer {
             position: Ticks::ZERO,
             metrics,
             last_stats: MixStats::default(),
+            source_meters: Vec::new(),
+            track_meters: Vec::new(),
         }
     }
 
@@ -116,6 +139,25 @@ impl AudioRenderer {
 
     pub fn last_stats(&self) -> MixStats {
         self.last_stats
+    }
+
+    /// What each track contributed to the last block mixed.
+    ///
+    /// Only tracks that actually contributed appear; a silent track is absent
+    /// rather than present at zero, so a caller can tell "nothing playing here"
+    /// from "playing, but quiet".
+    pub fn track_meters(&self) -> &[(TrackId, Meter)] {
+        &self.track_meters
+    }
+
+    /// The reading for one track, or [`Meter::SILENT`] when it contributed
+    /// nothing.
+    pub fn track_meter(&self, track: TrackId) -> Meter {
+        self.track_meters
+            .iter()
+            .find(|(id, _)| *id == track)
+            .map(|(_, m)| *m)
+            .unwrap_or(Meter::SILENT)
     }
 
     /// Registers where an asset's media lives. Decoders open lazily, on the
@@ -132,6 +174,10 @@ impl AudioRenderer {
     /// Restarts mixing at a new timeline position, discarding what was buffered.
     pub fn seek(&mut self, to: Ticks) {
         self.position = to.clamp_non_negative();
+        // The meters described sound that is no longer playing; leaving them up
+        // would show a level for a part of the timeline the playhead has left.
+        self.track_meters.clear();
+        self.last_stats = MixStats::default();
     }
 
     /// Mixes up to `max_frames` sample frames and pushes them into `producer`.
@@ -162,12 +208,14 @@ impl AudioRenderer {
         // Gather each clip's samples first, then mix: the borrow checker will
         // not allow decoding into `self.sources` while the mixer holds slices
         // out of it, and collecting the owned blocks is the honest fix.
-        let mut blocks: Vec<(Vec<f32>, u16, f64, f64)> = Vec::new();
+        let mut blocks: Vec<Block> = Vec::new();
         for clip in &plan.audio {
             if clip.gain <= 0.0 {
                 continue;
             }
             let asset = clip.asset;
+            let track = clip.track;
+            let (gain, pan) = (clip.gain, clip.pan);
             let Some(source) = self.source_for(asset) else { continue };
             if let Err(e) = source.ensure(clip.source_time, frames, rate) {
                 log::warn!("audio decode failed for asset {asset}: {e}");
@@ -177,23 +225,45 @@ impl AudioRenderer {
             if slice.is_empty() {
                 continue;
             }
-            blocks.push((slice.to_vec(), source.channels, clip.gain, clip.pan));
+            blocks.push(Block {
+                samples: slice.to_vec(),
+                channels: source.channels,
+                gain,
+                pan,
+                track,
+            });
         }
 
         let sources: Vec<MixSource<'_>> = blocks
             .iter()
-            .map(|(samples, channels, gain, pan)| MixSource {
-                samples,
-                channels: *channels,
-                gain: *gain,
-                pan: *pan,
+            .map(|b| MixSource {
+                samples: &b.samples,
+                channels: b.channels,
+                gain: b.gain,
+                pan: b.pan,
             })
             .collect();
 
         self.scratch.resize(frames * channels, 0.0);
-        self.last_stats = self.mixer.mix_into(&mut self.scratch, &sources, frames);
+        self.source_meters.clear();
+        self.source_meters.resize(sources.len(), Meter::SILENT);
+        self.last_stats = self.mixer.mix_metered(
+            &mut self.scratch,
+            &sources,
+            frames,
+            &mut self.source_meters,
+        );
         if self.last_stats.clipped > 0 {
             self.metrics.incr("audio_clipped_samples", self.last_stats.clipped as u64);
+        }
+
+        self.track_meters.clear();
+        for (block, meter) in blocks.iter().zip(&self.source_meters) {
+            let Some(track) = block.track else { continue };
+            match self.track_meters.iter_mut().find(|(id, _)| *id == track) {
+                Some((_, existing)) => existing.absorb(*meter),
+                None => self.track_meters.push((track, *meter)),
+            }
         }
 
         let written = producer.push(&self.scratch[..frames * channels]);

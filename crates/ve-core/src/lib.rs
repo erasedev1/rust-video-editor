@@ -19,6 +19,7 @@ pub mod blend;
 pub mod clip;
 pub mod composition;
 pub mod effect;
+pub mod fade;
 pub mod geometry;
 pub mod id;
 pub mod project;
@@ -32,6 +33,7 @@ pub use blend::BlendMode;
 pub use clip::{Clip, Speed};
 pub use composition::{Composition, CompositionLayer, CompositionSettings};
 pub use effect::{AudioProperties, Effect, ParamValue, Transform, TransformState};
+pub use fade::{Fade, FadeCurve, FadeEdge};
 pub use geometry::{ColorSpace, Rgba, Size, Vec2};
 pub use id::{
     AssetId, ClipId, CompositionId, EffectId, Id, IdAllocator, LayerId, MarkerId, SequenceId,

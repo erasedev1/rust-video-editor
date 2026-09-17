@@ -6,6 +6,7 @@
 //! being discovered in a benchmark weeks later.
 
 use egui::{Color32, Context, RichText};
+use ve_engine::AudioLevels;
 use ve_media::{CacheStats, WaveformStats};
 use ve_metrics::{counters, spans, Metrics};
 use ve_render::CompositeCacheStats;
@@ -22,6 +23,18 @@ pub struct OverlayInput<'a> {
     pub software_gpu: bool,
     pub clip_count: usize,
     pub visible_layers: usize,
+    /// The output device, or why there is none. Reported here rather than in a
+    /// dialogue: a machine with no sound card is a fact to know, not a problem
+    /// to interrupt an edit with.
+    pub audio: AudioStatus<'a>,
+}
+
+/// What the overlay says about audio output.
+pub enum AudioStatus<'a> {
+    /// Open, with its device name, format, and the level coming out of it.
+    Open { device: &'a str, sample_rate: u32, channels: u16, levels: &'a AudioLevels },
+    /// Not open, with the reason.
+    Unavailable(&'a str),
 }
 
 pub fn show(ctx: &Context, input: &OverlayInput<'_>) {
@@ -188,6 +201,53 @@ pub fn show(ctx: &Context, input: &OverlayInput<'_>) {
                 .size(10.0)
                 .color(crate::theme::TEXT_FAINT),
             );
+            ui.separator();
+            match &input.audio {
+                AudioStatus::Open { device, sample_rate, channels, levels } => {
+                    let master = levels.master;
+                    let reading = match master.dbfs() {
+                        Some(db) => format!("{db:>6.1} dBFS"),
+                        None => "      silent".to_string(),
+                    };
+                    ui.label(
+                        RichText::new(format!("audio    {reading}"))
+                            .monospace()
+                            .size(10.5)
+                            .color(if master.is_over() {
+                                crate::theme::ERROR
+                            } else {
+                                crate::theme::TEXT_DIM
+                            }),
+                    );
+                    if levels.clipped > 0 {
+                        ui.label(
+                            RichText::new(format!("  clipped {} samples", levels.clipped))
+                                .monospace()
+                                .size(10.0)
+                                .color(crate::theme::ERROR),
+                        );
+                    }
+                    ui.label(
+                        RichText::new(format!("{device} · {} Hz · {channels} ch", sample_rate))
+                            .monospace()
+                            .size(9.5)
+                            .color(crate::theme::TEXT_FAINT),
+                    );
+                }
+                AudioStatus::Unavailable(reason) => {
+                    // Device errors arrive as several sentences of backend
+                    // prose. The first one says what happened; the rest is on
+                    // hover, and all of it is in the log.
+                    let short = reason.split_once(". ").map(|(a, _)| a).unwrap_or(reason);
+                    ui.label(
+                        RichText::new(format!("audio    {short}"))
+                            .monospace()
+                            .size(9.5)
+                            .color(crate::theme::WARNING),
+                    )
+                    .on_hover_text(*reason);
+                }
+            }
             ui.label(
                 RichText::new(input.adapter)
                     .monospace()

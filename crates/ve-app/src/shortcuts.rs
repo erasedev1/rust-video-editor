@@ -71,6 +71,9 @@ pub fn collect(ctx: &egui::Context, timeline_width: f32) -> Vec<Action> {
         if i.consume_key(ctrl, Key::Backspace) {
             actions.push(Action::CloseGapAtPlayhead);
         }
+        if i.consume_key(ctrl | shift, Key::F) {
+            actions.push(Action::CrossfadeSelection(ve_core::FadeCurve::EqualPower));
+        }
         if i.consume_key(ctrl, Key::C) {
             actions.push(Action::Copy);
         }
@@ -152,6 +155,7 @@ pub const BINDINGS: &[Binding] = &[
     Binding { label: "Delete selected", keys: "Delete" },
     Binding { label: "Ripple delete", keys: "Shift + Delete" },
     Binding { label: "Close gap at playhead", keys: "Ctrl + Backspace" },
+    Binding { label: "Crossfade two overlapping clips", keys: "Ctrl + Shift + F" },
     Binding { label: "Copy / cut / paste", keys: "Ctrl + C / X / V" },
     Binding { label: "Select all", keys: "Ctrl + A" },
     Binding { label: "Toggle clip enabled", keys: "E" },

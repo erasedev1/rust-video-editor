@@ -29,7 +29,7 @@
 
 use ve_core::{
     AssetId, BlendMode, ClipId, ColorSpace, Composition, CompositionId, LayerId, Project, Rgba,
-    Sequence, Size, Source, TrackKind, TransformState,
+    Sequence, Size, Source, TrackId, TrackKind, TransformState,
 };
 use ve_time::Ticks;
 
@@ -120,10 +120,17 @@ pub struct AudibleItem {
     pub origin: Origin,
     pub asset: AssetId,
     pub source_time: Ticks,
-    /// Linear gain, already resolved and composed down the nesting chain.
+    /// Linear gain, already resolved and composed down the nesting chain, with
+    /// the track's own level folded in.
     pub gain: f64,
     /// -1 hard left to +1 hard right.
     pub pan: f64,
+    /// The sequence track this sound reaches the mix through, which is what a
+    /// per-track meter is grouped by.
+    ///
+    /// `None` when a composition is being previewed on its own: there is no
+    /// sequence, so there is no track for its layers to belong to.
+    pub track: Option<TrackId>,
 }
 
 /// Everything a single instant resolves to.
@@ -280,6 +287,12 @@ impl Evaluator<'_> {
             // Properties are keyed on clip-local time, so moving a clip along
             // the timeline carries its animation with it.
             let local = clip.local_time_at(at);
+            // Everything this track adds to the mix lands after here, so the
+            // track's own level is applied to that slice once the clip and any
+            // composition under it have had their say. Folding it in afterwards
+            // rather than threading a gain through every call keeps nesting and
+            // track level independent of each other.
+            let from = audio.len();
 
             match track.kind {
                 TrackKind::Video => {
@@ -297,7 +310,7 @@ impl Evaluator<'_> {
                     }
                 }
                 TrackKind::Audio => {
-                    let (gain, pan) = clip.audio.evaluate(local);
+                    let (gain, pan) = clip.audio.evaluate(local, clip.duration);
                     self.audio_items(
                         Origin::Clip(clip.id),
                         clip.source,
@@ -309,6 +322,8 @@ impl Evaluator<'_> {
                     );
                 }
             }
+
+            apply_track_level(&mut audio[from..], track);
         }
 
         nodes.push(PlanNode {
@@ -395,7 +410,7 @@ impl Evaluator<'_> {
             // A layer's own sound, lifted into the root mix. Scaled by the
             // holding layer's opacity so fading a nested composition out takes
             // its audio with it, which is what the picture doing so implies.
-            let (gain, pan) = layer.audio.evaluate(local);
+            let (gain, pan) = layer.audio.evaluate(local, layer.duration);
             self.audio_items(
                 Origin::Layer(layer.id),
                 layer.source,
@@ -444,6 +459,7 @@ impl Evaluator<'_> {
                     source_time,
                     gain,
                     pan: pan.clamp(-1.0, 1.0),
+                    track: None,
                 });
             }
             Source::Composition(id) => {
@@ -455,7 +471,7 @@ impl Evaluator<'_> {
                 for layer in composition.layers_at(source_time) {
                     let Some(inner_time) = layer.source_time_at(source_time) else { continue };
                     let local = layer.local_time_at(source_time);
-                    let (inner_gain, inner_pan) = layer.audio.evaluate(local);
+                    let (inner_gain, inner_pan) = layer.audio.evaluate(local, layer.duration);
                     self.audio_items(
                         Origin::Layer(layer.id),
                         layer.source,
@@ -468,6 +484,21 @@ impl Evaluator<'_> {
                 }
             }
         }
+    }
+}
+
+/// Folds a track's level into every sound that reached the mix through it, and
+/// records which track that was.
+///
+/// Gain multiplies and pan adds, exactly as they do down a nesting chain: a
+/// track pulled down 6 dB pulls everything on it down 6 dB, and a track pushed
+/// right carries its clips' own positions with it rather than overriding them.
+fn apply_track_level(items: &mut [AudibleItem], track: &ve_core::Track) {
+    let (gain, pan) = track.audio_level();
+    for item in items {
+        item.track = Some(track.id);
+        item.gain *= gain;
+        item.pan = (item.pan + pan).clamp(-1.0, 1.0);
     }
 }
 

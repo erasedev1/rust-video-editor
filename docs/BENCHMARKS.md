@@ -10,6 +10,7 @@ cargo bench -p ve-core --bench timeline       # edit model
 cargo bench -p ve-project --bench project_io  # save and load
 cargo bench -p ve-render --bench compositing  # GPU
 cargo bench -p ve-media  --bench waveforms    # audio analysis and display
+cargo bench -p ve-engine --bench audio        # mixing, metering and fades
 ```
 
 ## The machine these were taken on
@@ -221,6 +222,72 @@ rather than a second pass over the audio, so they cannot disagree with it: a
 transient in the base grid is in the envelope of every level above it. A test
 asserts exactly that, across four zoom levels.
 
+## Audio
+
+Same container, `cargo bench -p ve-engine --bench audio`. Nothing here touches
+the GPU, so unlike the compositing figures these are representative.
+
+### Mixing
+
+Each block is 4,800 stereo sample frames — a tenth of a second at 48 kHz — with
+every source at a different pan position. The figure that matters is the last
+column: a device will not wait, so the headroom a session has is the multiple of
+real time the mixer achieves.
+
+| Sources |     Time | Against real time |
+|---------|---------:|------------------:|
+| 1       |  62.1 µs |           1,611×  |
+| 4       |   115 µs |             872×  |
+| 16      |   326 µs |             307×  |
+| 64      |  1.19 ms |              84×  |
+
+Sixty-four simultaneous audio clips still mix **84× faster than they play**, on
+four cores with no vectorisation beyond what the compiler found. The ring holds
+200 ms, so that is a very large margin against a slow decode.
+
+### Metering costs nothing measurable
+
+The same blocks, mixed with per-source peak metering on:
+
+| Sources | Unmetered |  Metered | Difference |
+|---------|----------:|---------:|-----------:|
+| 1       |   62.1 µs |  62.7 µs |     +0.9%  |
+| 4       |    115 µs |   114 µs |     −0.4%  |
+| 16      |    326 µs |   327 µs |     +0.6%  |
+| 64      |   1.19 ms |  1.18 ms |     −0.8%  |
+
+Two of the four differences are **negative**, which is the honest way of saying
+the effect is inside the noise: the peak is taken from values the mix loop has
+already computed and holds in registers. A meter that cost anything real would
+be a meter people turned off.
+
+### Fades are cheap, but not free
+
+This one did not come out the way the claim was written, so the claim was
+changed rather than the number.
+
+| Benchmark                | No fade |  Faded | Difference |
+|--------------------------|--------:|-------:|-----------:|
+| `audio_envelope`         | 12.2 ns | 22.6 ns |    +86%   |
+| `audio_plan/4 tracks`    |  181 ns |  240 ns |    +33%   |
+| `audio_plan/16 tracks`   |  723 ns | 995 ns  |    +38%   |
+| `audio_plan/64 tracks`   | 2.44 µs | 3.34 µs |    +37%   |
+
+A fade **roughly doubles** the cost of evaluating one clip's audio envelope —
+two extra `sin`/`cos` evaluations against what was a pair of branch-predictable
+lookups — and adds about a third to resolving the whole instant.
+
+It does not matter, and here is the arithmetic that says so. The plan is
+evaluated **once per mixed block**, not once per sample, and the mixing thread's
+block is 50 ms of audio. Sixty-four faded tracks cost 3.34 µs against that:
+**0.007% of the time available**. Against the 1.19 ms the same 64 sources take
+to mix, it is 0.3%.
+
+The reason to record it anyway is that the shape would change if fades ever moved
+onto the per-sample path — a per-sample envelope at 48 kHz would be 22.6 ns ×
+48,000 = 1.1 ms a second per clip, which is no longer nothing. They are not there,
+and this table is why they should not go there.
+
 ## Live measurements
 
 The editor's own overlay reports what it is doing, measured the same way. From
@@ -258,3 +325,6 @@ Named because their absence is a gap, not because they are unimportant:
 - Thumbnail generation (not written yet)
 - Timeline scrolling and zoom as interactions, as opposed to the queries
   underneath them
+- The audio device itself. Mixing, metering and the ring are measured; the
+  latency and underrun behaviour of a real sound card are not, because this
+  container has none.

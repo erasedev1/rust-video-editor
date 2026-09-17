@@ -9,15 +9,16 @@
 use std::path::PathBuf;
 
 use ve_command::{
-    AddClip, AddMarker, AddTrack, ClipProperty, Command, Compound, MoveClip, MoveTrack,
-    PropertyValue, RemoveClip, RemoveMarker, RemoveTrack, RollEdit, SetClipBlendMode,
-    SetClipEnabled, SetClipProperty, SetClipSpeed, SetCompositionSettings,
-    SetSequenceColorSpace, SetSequenceFormat, SetTrackFlag, ShiftClips, SlideClip, SlipClip,
-    SplitClip, TrackFlag, TrimClip, TrimEdge,
+    AddClip, AddMarker, AddTrack, ClipProperty, Command, Compound, CrossfadeClips, MoveClip,
+    MoveTrack, PropertyValue, RemoveClip, RemoveMarker, RemoveTrack, RollEdit,
+    SetClipBlendMode, SetClipEnabled, SetClipFade, SetClipProperty, SetClipSpeed,
+    SetCompositionSettings, SetSequenceColorSpace, SetSequenceFormat, SetTrackFlag,
+    SetTrackLevel, ShiftClips, SlideClip, SlipClip, SplitClip, TrackFlag, TrackLevel, TrimClip,
+    TrimEdge,
 };
 use ve_core::{
-    AssetId, BlendMode, Clip, ClipId, ColorSpace, MarkerId, Project, SequenceId, Speed,
-    TrackId, TrackKind,
+    AssetId, BlendMode, Clip, ClipId, ColorSpace, Fade, FadeCurve, FadeEdge, MarkerId, Project,
+    SequenceId, Speed, TrackId, TrackKind,
 };
 use ve_engine::PlaybackEngine;
 use ve_media::WaveformService;
@@ -81,6 +82,18 @@ pub enum Action {
         clip: ClipId,
         blend: BlendMode,
     },
+    // The envelope at one end of a clip. `coalesce` is set while a fade handle
+    // is being dragged, so the whole drag is one undo step.
+    SetClipFade {
+        clip: ClipId,
+        edge: FadeEdge,
+        length: Ticks,
+        curve: FadeCurve,
+        coalesce: bool,
+    },
+    // Fades two selected clips into each other across the time they overlap,
+    // which means across two tracks — clips on one track never sound together.
+    CrossfadeSelection(FadeCurve),
     /// Applies to whatever canvas is being viewed: the sequence, or a
     /// composition when one is open.
     SetColorSpace(ColorSpace),
@@ -98,6 +111,11 @@ pub enum Action {
         track: TrackId,
         flag: TrackFlag,
         value: bool,
+    },
+    SetTrackLevel {
+        track: TrackId,
+        which: TrackLevel,
+        value: f64,
     },
 
     // Markers
@@ -190,6 +208,7 @@ pub fn dispatch(
             // Asset ids are per project, so peaks from the old one would be
             // read as belonging to whatever asset inherits the id next.
             waveforms.clear();
+            state.project_replaced();
             state.set_status(Status::info("new project"));
         }
 
@@ -210,6 +229,7 @@ pub fn dispatch(
                 for (asset, e) in failures {
                     state.warnings.push(format!("asset {asset}: {e}"));
                 }
+                state.project_replaced();
                 let n = state.project.clip_count();
                 state.set_status(Status::info(format!(
                     "opened {} ({n} clip{})",
@@ -407,6 +427,58 @@ pub fn dispatch(
 
         Action::SetClipProperty { clip, property, value } => {
             let command = Box::new(SetClipProperty::new(sequence_id, clip, property, value));
+            match state.history.execute_coalesced(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetClipFade { clip, edge, length, curve, coalesce } => {
+            let fade = Fade::new(length, curve);
+            let command = Box::new(SetClipFade::new(sequence_id, clip, edge, fade));
+            let result = if coalesce {
+                state.history.execute_coalesced(&mut state.project, command)
+            } else {
+                state.history.execute(&mut state.project, command)
+            };
+            match result {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::CrossfadeSelection(curve) => {
+            let mut selected = state.selection.clips.iter().copied();
+            let (Some(a), Some(b), None) = (selected.next(), selected.next(), selected.next())
+            else {
+                state.set_status(Status::warning("select exactly two clips to crossfade"));
+                return;
+            };
+            let length = match CrossfadeClips::overlap(&state.project, sequence_id, a, b) {
+                Some((_, _, length)) => length,
+                None => {
+                    state.set_status(Status::warning(
+                        "those clips never sound together — a crossfade needs them \
+                         overlapping, which means on different tracks",
+                    ));
+                    return;
+                }
+            };
+            let command = Box::new(CrossfadeClips::new(sequence_id, a, b, curve));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.set_status(Status::info(format!(
+                        "crossfaded over {:.2}s",
+                        length.as_secs_f64()
+                    )));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetTrackLevel { track, which, value } => {
+            let command = Box::new(SetTrackLevel::new(sequence_id, track, which, value));
             match state.history.execute_coalesced(&mut state.project, command) {
                 Ok(()) => state.mark_edited(),
                 Err(e) => state.set_status(Status::warning(e.to_string())),

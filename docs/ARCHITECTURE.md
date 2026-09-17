@@ -115,6 +115,10 @@ Every easing mode is a cubic Bezier on the unit square evaluated by one solver,
 so a graph editor can later promote any named preset to a free-form curve
 without changing the representation.
 
+The one thing deliberately outside this system is the **fade** at a clip's end,
+which multiplies the animated level rather than being it — see [Fades are not
+keyframes](#fades-are-not-keyframes).
+
 Keyframe times are **clip-local**, which is what lets a clip be moved or rippled
 without touching its animation — and what obliges `split_at` to rebase the
 right-hand clip's keyframes.
@@ -364,6 +368,96 @@ centred audio, or that can push a mix into clipping, is the worse surprise.
 
 Clipping is counted and reported rather than swallowed.
 
+### Three threads, one direction
+
+`AudioOutput` owns the whole path. The interface thread owns the device stream
+and publishes a snapshot of the project; a mixing thread reads that snapshot,
+decodes and mixes ahead, and pushes into the ring; the device callback copies
+out. Nothing travels the other way, and nothing the interface does can block the
+callback.
+
+The mixer cannot borrow the project the interface is editing, so it gets an
+`Arc<Project>` republished whenever the edit changes — one clone of the *edit
+model* per edit, no media, which is far cheaper than a lock held across a decode.
+A revision counter on the editor state is what makes that once per edit rather
+than once per frame.
+
+The picture and the sound are **not** locked to each other. Playback position
+for the picture comes from the wall clock and the sound from the device's own
+sample counter; the two differ by parts per million, which is nothing over the
+length of a cut. Slaving the transport to the audio clock is what a long
+programme needs, and it belongs with the rest of the professional audio work
+rather than being half-done now.
+
+### Levels, and where they compose
+
+Three gains multiply on the way to the mixer, in this order:
+
+1. the clip's own `volume`, which is a `Property<f64>` and so can be keyframed;
+2. the clip's **fades**, one at each end;
+3. the **track**'s level, folded in once the clip and anything nested under it
+   have had their say.
+
+Pan composes the same way, except that it *adds* and clamps: a track pushed
+right carries its clips' own positions with it rather than overriding them.
+
+Track level is a plain number rather than a `Property`, deliberately. A track has
+no timeline of its own for keyframes to be relative to, so track automation would
+have to be keyed on *sequence* time — a different feature from the clip-relative
+animation everything else uses, and one that belongs with keyframe editing rather
+than being half-built here.
+
+### Fades are not keyframes
+
+A fade could be two keyframes on `volume`, and that would reuse the animation
+system. It is a field of its own anyway, for two reasons that outweigh the reuse:
+
+- A fade **multiplies** the level rather than replacing it. As keyframes it would
+  discard whatever level the clip was set to, and every later change to that
+  level would have to rewrite the keyframes to keep the fade's shape.
+- A fade is anchored to an **end** of the clip, not to a point in time. Trimming
+  the tail should carry the fade-out with it; a keyframe at a fixed clip-local
+  time would be left stranded in the middle.
+
+Each curve is evaluated from its closed form — `sin`, `cos` — rather than being
+approximated by a Bezier ease. That is cheaper *and* exact, and equal-power in
+particular only has its defining property if it really is a quarter sine: two
+complementary equal-power fades sum to constant **power**, which a test asserts
+to within 1e-12 across a thousand points.
+
+Fades that would overlap in a clip shorter than both of them are scaled back
+proportionally at evaluation, so a trimmed clip still reaches full level
+somewhere; the stored lengths are untouched, so widening the clip again restores
+what was asked for.
+
+### A crossfade needs an overlap
+
+A track holds non-overlapping clips by construction, so two clips meeting at a
+cut are never audible at the same instant. Fading them into each other there
+would mean both reaching silence at the cut — a dip, not a transition. So
+`CrossfadeClips` **requires two clips that overlap in time**, which in this model
+means two tracks, and refuses anything else with that as the reason. The
+alternative would have been to call a pair of fades at a cut a crossfade, which
+is the kind of thing that is discovered by ear three hours later.
+
+### Meters read what is being heard
+
+Mixing runs ahead of the device by up to the ring's depth — 200 ms. The block
+being mixed is therefore not the block coming out of the speakers, and a meter
+fed straight from the mixer would lead the sound by a fifth of a second and never
+agree with it.
+
+Each block's reading is instead queued with the sample count it ends at, and the
+published reading is the newest one the device has actually reached, worked out
+from what is still queued in the ring. Readings are taken **before** limiting, so
+a mix that went 6 dB over says so instead of pinning silently at full scale; the
+samples themselves are still limited, and the count of limited samples is
+reported separately.
+
+Per-track grouping is the caller's business, not the mixer's: `mix_metered`
+reports one reading per *source*, and the renderer folds them by track. That is
+what lets the same mixer serve a live meter, an export report and a test.
+
 ### Waveforms
 
 A minute of stereo 48 kHz audio is 5.8 million sample frames and a few hundred
@@ -458,7 +552,14 @@ Honest gaps, not oversights:
   maximum zoom, where the display interpolates between bucket centres rather
   than storing more. Editing that needs individual samples — repairing a click —
   would read the file, not the peaks.
-- **`CpalSink` is unverified.** The audio pipeline is tested up to the sink
-  boundary, including the ring under concurrent threads, but the machine this
-  was built on has no audio device.
+- **Audio output is unverified on a real device.** The pipeline is tested end to
+  end — plan, fades, track levels, mixing, metering and the ring under concurrent
+  threads — but the machine this was built on has no sound card, so `CpalSink`
+  and `AudioOutput` are the one part no test here has exercised against
+  hardware. The editor treats a missing device as an ordinary state and says so
+  in the performance overlay rather than failing.
+- **No track automation.** Track level and pan are static values; keyframing them
+  needs a sequence-time animation domain, which arrives with keyframe editing.
+- **No loudness measurement.** The meters are peak meters. LUFS is a different
+  measurement with a different purpose and belongs with the delivery work.
 - **Non-linear compositing only**, as described above.

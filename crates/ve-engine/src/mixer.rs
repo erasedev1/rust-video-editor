@@ -19,8 +19,58 @@ pub struct MixSource<'a> {
     pub pan: f64,
 }
 
+/// A peak level, per side of the stereo field.
+///
+/// Peak rather than RMS because a meter's job in an editor is to show how close
+/// the mix is to the ceiling, and only the peak answers that. Loudness is a
+/// different measurement and belongs with the loudness work, not here.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Meter {
+    pub left: f32,
+    pub right: f32,
+}
+
+impl Meter {
+    pub const SILENT: Meter = Meter { left: 0.0, right: 0.0 };
+
+    pub fn peak(self) -> f32 {
+        self.left.max(self.right)
+    }
+
+    pub fn is_silent(self) -> bool {
+        self.left <= 0.0 && self.right <= 0.0
+    }
+
+    /// Whether this level reached or passed full scale.
+    pub fn is_over(self) -> bool {
+        self.peak() >= 1.0
+    }
+
+    /// Takes the louder of the two on each side. Used to fold several blocks,
+    /// or several clips on one track, into a single reading.
+    pub fn absorb(&mut self, other: Meter) {
+        self.left = self.left.max(other.left);
+        self.right = self.right.max(other.right);
+    }
+
+    /// The level scaled by `factor`, for a meter that falls back towards
+    /// silence between blocks instead of freezing at the last peak.
+    pub fn decayed(self, factor: f32) -> Meter {
+        Meter { left: self.left * factor, right: self.right * factor }
+    }
+
+    /// Full scale in decibels, `0.0` being unity and `None` being silence.
+    ///
+    /// `None` rather than negative infinity so a caller has to say what it
+    /// wants drawn for silence instead of formatting `-inf` into the interface.
+    pub fn dbfs(self) -> Option<f32> {
+        let peak = self.peak();
+        (peak > 0.0).then(|| 20.0 * peak.log10())
+    }
+}
+
 /// What a mix produced, beyond the samples themselves.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct MixStats {
     /// Samples that exceeded full scale and were limited.
     ///
@@ -28,6 +78,12 @@ pub struct MixStats {
     /// user discovers only after exporting.
     pub clipped: usize,
     pub sources: usize,
+    /// The loudest sample in the block, per side, **before** limiting.
+    ///
+    /// Before rather than after, so a meter can show by how much a mix went
+    /// over rather than pinning at exactly full scale and saying nothing. The
+    /// samples themselves are still limited; only the reading is unclamped.
+    pub master: Meter,
 }
 
 /// Mixes clips down to the sequence's output format.
@@ -67,14 +123,37 @@ impl AudioMixer {
         sources: &[MixSource<'_>],
         frames: usize,
     ) -> MixStats {
+        self.mix_metered(out, sources, frames, &mut [])
+    }
+
+    /// Mixes, and additionally reports what each source contributed.
+    ///
+    /// `meters` is parallel to `sources` and may be shorter — a caller that
+    /// wants no per-source reading passes an empty slice and pays nothing for
+    /// it. Per source rather than per track because the mixer has no idea what
+    /// a track is: grouping the readings is the caller's business, and keeping
+    /// it that way is what lets the same mixer serve a live meter, an export
+    /// report and a test.
+    pub fn mix_metered(
+        &self,
+        out: &mut [f32],
+        sources: &[MixSource<'_>],
+        frames: usize,
+        meters: &mut [Meter],
+    ) -> MixStats {
         let channels = self.channels as usize;
         let wanted = frames * channels;
         let limit = wanted.min(out.len());
         out[..limit].fill(0.0);
 
-        for source in sources {
+        for meter in meters.iter_mut() {
+            *meter = Meter::SILENT;
+        }
+
+        for (index, source) in sources.iter().enumerate() {
             let (left, right) = pan_gains(source.gain, source.pan);
             let src_channels = source.channels.max(1) as usize;
+            let mut meter = Meter::SILENT;
 
             for frame in 0..frames {
                 let src_base = frame * src_channels;
@@ -98,26 +177,46 @@ impl AudioMixer {
                     (source.samples[src_base], source.samples[src_base + 1])
                 };
 
+                // What this source puts into the mix, which is what its own
+                // meter reads — after its gain and pan, before everything else
+                // sums on top of it.
+                let (cl, cr) = (sl * left as f32, sr * right as f32);
+                meter.absorb(Meter { left: cl.abs(), right: cr.abs() });
+
                 if channels == 1 {
                     // Downmix: average rather than sum, so a centred stereo
                     // source does not double in level when folded to mono.
-                    out[dst_base] += (sl * left as f32 + sr * right as f32) * 0.5;
+                    out[dst_base] += (cl + cr) * 0.5;
                 } else {
-                    out[dst_base] += sl * left as f32;
-                    out[dst_base + 1] += sr * right as f32;
+                    out[dst_base] += cl;
+                    out[dst_base + 1] += cr;
                     // Any channels past stereo get the source's first channel,
                     // which is a placeholder until real surround routing exists.
                     for c in 2..channels {
                         if dst_base + c < limit {
-                            out[dst_base + c] += sl * left as f32;
+                            out[dst_base + c] += cl;
                         }
                     }
                 }
             }
+
+            if let Some(slot) = meters.get_mut(index) {
+                *slot = meter;
+            }
         }
 
         let mut clipped = 0usize;
-        for sample in out[..limit].iter_mut() {
+        let mut master = Meter::SILENT;
+        for (index, sample) in out[..limit].iter_mut().enumerate() {
+            // Read before limiting, so the meter can show the overshoot that
+            // `clipped` is counting rather than pinning silently at full scale.
+            let level = sample.abs();
+            if channels > 1 && index % channels == 1 {
+                master.right = master.right.max(level);
+            } else {
+                master.left = master.left.max(level);
+            }
+
             if *sample > 1.0 {
                 *sample = 1.0;
                 clipped += 1;
@@ -126,8 +225,11 @@ impl AudioMixer {
                 clipped += 1;
             }
         }
+        if channels == 1 {
+            master.right = master.left;
+        }
 
-        MixStats { clipped, sources: sources.len() }
+        MixStats { clipped, sources: sources.len(), master }
     }
 }
 
@@ -158,7 +260,7 @@ mod tests {
     fn no_sources_mixes_to_silence() {
         let (out, stats) = mixer().mix(&[], 4);
         assert_eq!(out, vec![0.0; 8]);
-        assert_eq!(stats, MixStats { clipped: 0, sources: 0 });
+        assert_eq!(stats, MixStats { clipped: 0, sources: 0, master: Meter::SILENT });
     }
 
     #[test]
@@ -302,6 +404,105 @@ mod tests {
         let (out, _) =
             mixer().mix(&[MixSource { samples: &[], channels: 2, gain: 1.0, pan: 0.0 }], 4);
         assert_eq!(out, vec![0.0; 8]);
+    }
+
+    #[test]
+    fn the_master_meter_reads_the_loudest_sample_on_each_side() {
+        let samples = [0.5f32, -0.25];
+        let (_, stats) = mixer()
+            .mix(&[MixSource { samples: &samples, channels: 2, gain: 1.0, pan: 0.0 }], 1);
+        assert_eq!(stats.master, Meter { left: 0.5, right: 0.25 });
+        assert_eq!(stats.master.peak(), 0.5);
+    }
+
+    /// The reading is taken before limiting, which is the whole point of
+    /// measuring it there: a mix that went 6 dB over says so.
+    #[test]
+    fn the_master_meter_shows_an_overshoot_rather_than_pinning_at_full_scale() {
+        let samples = [2.0f32, 2.0];
+        let (out, stats) = mixer()
+            .mix(&[MixSource { samples: &samples, channels: 2, gain: 1.0, pan: 0.0 }], 1);
+        assert_eq!(out, vec![1.0, 1.0], "the samples themselves are still limited");
+        assert_eq!(stats.master, Meter { left: 2.0, right: 2.0 });
+        assert!(stats.master.is_over());
+        assert_eq!(stats.clipped, 2);
+    }
+
+    #[test]
+    fn per_source_meters_read_each_contribution_after_its_own_gain_and_pan() {
+        let loud = [1.0f32, 1.0];
+        let quiet = [0.5f32, 0.5];
+        let mut out = vec![0.0f32; 2];
+        let mut meters = [Meter::SILENT; 2];
+        let stats = mixer().mix_metered(
+            &mut out,
+            &[
+                MixSource { samples: &loud, channels: 2, gain: 0.25, pan: 0.0 },
+                MixSource { samples: &quiet, channels: 2, gain: 1.0, pan: 1.0 },
+            ],
+            1,
+            &mut meters,
+        );
+        assert_eq!(meters[0], Meter { left: 0.25, right: 0.25 });
+        assert_eq!(meters[1], Meter { left: 0.0, right: 0.5 }, "hard right silences the left");
+        // And the master is the sum of the two, not either one.
+        assert_eq!(stats.master, Meter { left: 0.25, right: 0.75 });
+    }
+
+    #[test]
+    fn a_meter_slice_shorter_than_the_sources_is_filled_as_far_as_it_goes() {
+        let samples = [1.0f32, 1.0];
+        let mut out = vec![0.0f32; 2];
+        let mut meters = [Meter::SILENT; 1];
+        mixer().mix_metered(
+            &mut out,
+            &[
+                MixSource { samples: &samples, channels: 2, gain: 0.5, pan: 0.0 },
+                MixSource { samples: &samples, channels: 2, gain: 0.5, pan: 0.0 },
+            ],
+            1,
+            &mut meters,
+        );
+        assert_eq!(meters[0], Meter { left: 0.5, right: 0.5 });
+    }
+
+    #[test]
+    fn meters_are_reset_between_blocks_rather_than_holding_an_old_peak() {
+        let loud = [1.0f32, 1.0];
+        let quiet = [0.1f32, 0.1];
+        let m = mixer();
+        let mut out = vec![0.0f32; 2];
+        let mut meters = [Meter::SILENT; 1];
+
+        m.mix_metered(
+            &mut out,
+            &[MixSource { samples: &loud, channels: 2, gain: 1.0, pan: 0.0 }],
+            1,
+            &mut meters,
+        );
+        assert_eq!(meters[0].peak(), 1.0);
+
+        m.mix_metered(
+            &mut out,
+            &[MixSource { samples: &quiet, channels: 2, gain: 1.0, pan: 0.0 }],
+            1,
+            &mut meters,
+        );
+        assert!((meters[0].peak() - 0.1).abs() < 1e-6, "a stale peak would hide a drop");
+    }
+
+    #[test]
+    fn a_meter_reports_full_scale_as_zero_decibels_and_silence_as_nothing() {
+        assert_eq!(Meter { left: 1.0, right: 1.0 }.dbfs(), Some(0.0));
+        assert_eq!(Meter::SILENT.dbfs(), None);
+        let half = Meter { left: 0.5, right: 0.0 }.dbfs().expect("not silent");
+        assert!((half + 6.0206).abs() < 0.001, "half amplitude is about -6 dB, got {half}");
+    }
+
+    #[test]
+    fn a_decayed_meter_falls_towards_silence() {
+        let meter = Meter { left: 1.0, right: 0.5 }.decayed(0.5);
+        assert_eq!(meter, Meter { left: 0.5, right: 0.25 });
     }
 
     #[test]

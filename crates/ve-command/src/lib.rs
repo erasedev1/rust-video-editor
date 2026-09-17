@@ -18,6 +18,7 @@ use std::any::Any;
 use ve_core::{Clip, ClipId, CompositionId, CoreError, LayerId, Project, SequenceId, TrackId};
 use ve_time::Ticks;
 
+mod audio_commands;
 mod clip_commands;
 mod composition_commands;
 mod edit_commands;
@@ -25,6 +26,7 @@ mod history;
 mod property_commands;
 mod structure_commands;
 
+pub use audio_commands::{CrossfadeClips, SetClipFade, SetTrackLevel, TrackLevel};
 pub use clip_commands::{AddClip, MoveClip, RemoveClip, SplitClip, TrimClip, TrimEdge};
 pub use composition_commands::{
     composition_clip, AddComposition, AddLayer, LayerEdge, LayerFlag, MoveLayer,

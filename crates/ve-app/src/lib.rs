@@ -8,6 +8,7 @@
 pub mod actions;
 pub mod app;
 pub mod dialogs;
+pub mod meter;
 pub mod panels;
 pub mod preview;
 pub mod shortcuts;

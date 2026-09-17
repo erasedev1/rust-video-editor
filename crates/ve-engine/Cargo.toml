@@ -19,3 +19,8 @@ cpal = "0.15"
 
 [dev-dependencies]
 ve-render = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "audio"
+harness = false

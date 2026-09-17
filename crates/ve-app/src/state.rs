@@ -298,6 +298,20 @@ pub enum TimelineDrag {
     SlipClip { clip: ClipId, track: TrackId, grab_time: Ticks, source_in_at_grab: Ticks },
     /// Dragging a clip into its neighbours.
     SlideClip { clip: ClipId, track: TrackId, grab_offset: Ticks },
+    /// Pulling a fade grip along a clip's top edge.
+    ///
+    /// Only the clip and the end are kept: the fade's length is whatever the
+    /// pointer says it is, measured from that end, so the gesture states an
+    /// absolute destination and merges into one undo step like every other drag.
+    FadeHandle { clip: ClipId, edge: FadeEdgeKind },
+}
+
+/// Which end of a clip a fade drag has hold of. Mirrors `ve_core::FadeEdge`
+/// without making the state module depend on an enum it only forwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FadeEdgeKind {
+    In,
+    Out,
 }
 
 /// Which edge a trim drag has hold of. Mirrors `ve_command::TrimEdge` without
@@ -358,6 +372,12 @@ pub struct EditorState {
     /// about the sequence — which is what "open a composition" has to mean for
     /// it to be editable at all.
     pub open_composition: Option<CompositionId>,
+    /// Bumped whenever the project changes.
+    ///
+    /// The audio mixer runs on its own thread and cannot borrow the project, so
+    /// it works from a snapshot; this is how the frame loop knows a new one is
+    /// due without comparing two whole projects.
+    revision: u64,
 }
 
 impl EditorState {
@@ -378,7 +398,21 @@ impl EditorState {
             warnings: Vec::new(),
             show_performance_overlay: cfg!(debug_assertions),
             open_composition: None,
+            revision: 0,
         }
+    }
+
+    /// How many times the project has changed since the editor started.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Notes that the project is no longer what anything else may be holding.
+    ///
+    /// Separate from [`EditorState::mark_edited`] because opening or creating a
+    /// project replaces it wholesale without that being a *dirty* edit.
+    pub fn project_replaced(&mut self) {
+        self.revision += 1;
     }
 
     /// What the transport and the preview are pointed at.
@@ -446,5 +480,6 @@ impl EditorState {
     /// is the one place autosave and the title bar need to learn about edits.
     pub fn mark_edited(&mut self) {
         self.autosave.mark_dirty();
+        self.revision += 1;
     }
 }

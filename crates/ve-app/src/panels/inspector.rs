@@ -1,14 +1,17 @@
 //! The inspector: properties of whatever is selected.
 
 use egui::{DragValue, RichText, Ui};
-use ve_command::{ClipProperty, PropertyValue};
-use ve_core::{BlendMode, ColorSpace, Vec2};
+use ve_command::{ClipProperty, PropertyValue, TrackLevel};
+use ve_core::{BlendMode, ColorSpace, Fade, FadeCurve, FadeEdge, Vec2};
+use ve_engine::AudioLevels;
+use ve_time::Ticks;
 
 use crate::actions::Action;
+use crate::meter;
 use crate::state::EditorState;
 use crate::theme;
 
-pub fn show(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
+pub fn show(ui: &mut Ui, state: &EditorState, levels: &AudioLevels, actions: &mut Vec<Action>) {
     ui.label(RichText::new("INSPECTOR").small().color(theme::TEXT_FAINT));
     ui.separator();
 
@@ -36,6 +39,7 @@ pub fn show(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
         // Nothing selected is the natural place for the canvas's own settings:
         // the panel is otherwise empty, and they describe what the preview is
         // showing.
+        track_section(ui, state, levels, actions);
         canvas_section(ui, state, actions);
         return;
     };
@@ -130,6 +134,31 @@ pub fn show(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
         });
 
         section(ui, "Audio", |ui| {
+            fade_row(ui, "Fade In", FadeEdge::In, clip.audio.fade_in, clip.duration, |fade| {
+                actions.push(Action::SetClipFade {
+                    clip: clip_id,
+                    edge: FadeEdge::In,
+                    length: fade.length,
+                    curve: fade.curve,
+                    coalesce: true,
+                });
+            });
+            fade_row(
+                ui,
+                "Fade Out",
+                FadeEdge::Out,
+                clip.audio.fade_out,
+                clip.duration,
+                |fade| {
+                    actions.push(Action::SetClipFade {
+                        clip: clip_id,
+                        edge: FadeEdge::Out,
+                        length: fade.length,
+                        curve: fade.curve,
+                        coalesce: true,
+                    });
+                },
+            );
             scalar_row(
                 ui,
                 "Volume",
@@ -163,6 +192,8 @@ pub fn show(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
                 },
             );
         });
+
+        track_section(ui, state, levels, actions);
 
         if !clip.effects.is_empty() {
             section(ui, "Effects", |ui| {
@@ -350,4 +381,119 @@ fn canvas_section(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
             .small()
             .color(theme::TEXT_FAINT),
     );
+}
+
+/// One fade: how long it lasts, and what shape it follows.
+///
+/// Length in seconds rather than in frames, because a fade is heard rather than
+/// counted and nothing about it has to land on the frame grid — the mixer works
+/// in samples, which are finer than frames by three orders of magnitude.
+fn fade_row(
+    ui: &mut Ui,
+    label: &str,
+    edge: FadeEdge,
+    fade: Fade,
+    clip_duration: Ticks,
+    mut on_change: impl FnMut(Fade),
+) {
+    ui.horizontal(|ui| {
+        property_label(ui, label, fade.is_active());
+
+        let mut seconds = fade.length.as_secs_f64();
+        let longest = clip_duration.as_secs_f64().max(0.0);
+        let response = ui.add(
+            DragValue::new(&mut seconds)
+                .speed(0.01)
+                .range(0.0..=longest)
+                .suffix(" s")
+                .max_decimals(3),
+        );
+        if response.changed() {
+            on_change(Fade::new(Ticks::from_secs_f64(seconds), fade.curve));
+        }
+
+        egui::ComboBox::from_id_salt(("fade-curve", edge))
+            .width(96.0)
+            .selected_text(fade.curve.label())
+            .show_ui(ui, |ui| {
+                for curve in FadeCurve::ALL {
+                    if ui
+                        .selectable_label(curve == fade.curve, curve.label())
+                        .on_hover_text(curve.description())
+                        .clicked()
+                        && curve != fade.curve
+                    {
+                        on_change(Fade::new(fade.length, curve));
+                    }
+                }
+            });
+    });
+}
+
+/// The level, position and live reading of the track in focus.
+///
+/// Shown whether or not a clip is selected, because a mix is something you set
+/// while listening rather than while pointing at a clip. The meter reads what is
+/// actually coming out of the device — see [`ve_engine::AudioOutput`] for how it
+/// is kept in step with the sound rather than with the mixer.
+fn track_section(
+    ui: &mut Ui,
+    state: &EditorState,
+    levels: &AudioLevels,
+    actions: &mut Vec<Action>,
+) {
+    let Some(sequence) = state.active_sequence() else { return };
+    let Some(track_id) = state.selection.track else { return };
+    let Some(track) = sequence.track(track_id) else { return };
+
+    let title = format!("Track — {}", track.name);
+    section(ui, &title, |ui| {
+        ui.horizontal(|ui| {
+            property_label(ui, "Level", !track.is_unity());
+            let mut volume = track.volume;
+            let response = ui
+                .add(DragValue::new(&mut volume).speed(0.01).range(0.0..=4.0).max_decimals(3));
+            if response.changed() {
+                actions.push(Action::SetTrackLevel {
+                    track: track_id,
+                    which: TrackLevel::Volume,
+                    value: volume,
+                });
+            }
+            ui.label(
+                RichText::new(meter::gain_label(track.volume))
+                    .small()
+                    .monospace()
+                    .color(theme::TEXT_FAINT),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            property_label(ui, "Pan", false);
+            let mut pan = track.pan;
+            let response =
+                ui.add(DragValue::new(&mut pan).speed(0.01).range(-1.0..=1.0).max_decimals(3));
+            if response.changed() {
+                actions.push(Action::SetTrackLevel {
+                    track: track_id,
+                    which: TrackLevel::Pan,
+                    value: pan,
+                });
+            }
+            ui.label(
+                RichText::new(meter::pan_label(track.pan))
+                    .small()
+                    .monospace()
+                    .color(theme::TEXT_FAINT),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            property_label(ui, "Meter", false);
+            let width = ui.available_width().max(40.0);
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(width, 12.0), egui::Sense::hover());
+            meter::draw(ui.painter(), rect, levels.track(track_id));
+        });
+    });
 }

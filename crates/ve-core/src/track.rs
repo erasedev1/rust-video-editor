@@ -38,6 +38,19 @@ pub struct Track {
     pub locked: bool,
     #[serde(default)]
     pub solo: bool,
+    /// Linear gain applied to everything this track contributes to the mix,
+    /// `1.0` being unity.
+    ///
+    /// A plain number rather than a [`crate::Property`]: a track has no
+    /// timeline of its own for keyframes to be relative to, so track automation
+    /// would have to be keyed on sequence time and is a different feature from
+    /// the clip-relative animation everything else uses. It belongs with the
+    /// keyframe editing in the next phase rather than being half-built here.
+    #[serde(default = "unity_gain")]
+    pub volume: f64,
+    /// `-1.0` hard left to `1.0` hard right, offsetting every clip's own pan.
+    #[serde(default)]
+    pub pan: f64,
     /// UI row height in logical pixels. Project data because users expect their
     /// track layout to survive a reopen.
     #[serde(default = "default_track_height")]
@@ -49,6 +62,10 @@ fn default_track_height() -> f32 {
     64.0
 }
 
+fn unity_gain() -> f64 {
+    1.0
+}
+
 impl Track {
     pub fn new(id: TrackId, kind: TrackKind, name: impl Into<String>) -> Self {
         Track {
@@ -58,9 +75,26 @@ impl Track {
             muted: false,
             locked: false,
             solo: false,
+            volume: unity_gain(),
+            pan: 0.0,
             height: default_track_height(),
             clips: Vec::new(),
         }
+    }
+
+    /// The track's level and stereo position, clamped to what the mixer accepts.
+    ///
+    /// Read through here rather than off the fields directly, so a project file
+    /// carrying a negative gain or an out-of-range pan cannot reach the mixer.
+    #[inline]
+    pub fn audio_level(&self) -> (f64, f64) {
+        (self.volume.max(0.0), self.pan.clamp(-1.0, 1.0))
+    }
+
+    /// Whether the track passes its audio through untouched.
+    #[inline]
+    pub fn is_unity(&self) -> bool {
+        self.volume == 1.0 && self.pan == 0.0
     }
 
     #[inline]

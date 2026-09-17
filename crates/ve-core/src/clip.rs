@@ -339,8 +339,7 @@ impl Clip {
     /// clips can have a single composited result cached for their whole span.
     pub fn is_animated(&self) -> bool {
         self.transform.is_animated()
-            || self.audio.volume.is_animated()
-            || self.audio.pan.is_animated()
+            || self.audio.is_animated()
             || self.effects.iter().any(|e| e.enabled && e.is_animated())
     }
 }

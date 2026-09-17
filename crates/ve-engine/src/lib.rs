@@ -26,6 +26,7 @@ pub mod clock;
 mod cpal_sink;
 mod engine;
 pub mod mixer;
+pub mod output;
 pub mod plan;
 pub mod ring;
 
@@ -36,7 +37,8 @@ pub use engine::{
     peek, EngineUpdate, LayerContent, PlaybackEngine, ResolvedLayer, ResolvedNode, Timebase,
     Viewing,
 };
-pub use mixer::{AudioMixer, MixSource, MixStats};
+pub use mixer::{AudioMixer, Meter, MixSource, MixStats};
+pub use output::{AudioLevels, AudioOutput};
 pub use plan::{
     evaluate, evaluate_composition, evaluate_frames, evaluate_project, AudibleItem, Draw,
     Origin, PlanItem, PlanNode, RenderPlan, MAX_NESTING_DEPTH,

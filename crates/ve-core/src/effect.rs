@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use ve_time::Ticks;
 
 use crate::animation::Property;
+use crate::fade::{Fade, FadeEdge};
 use crate::geometry::{Rgba, Vec2};
 use crate::id::EffectId;
 
@@ -189,23 +190,89 @@ impl Default for TransformState {
     }
 }
 
-/// Per-clip audio state.
+/// Per-clip audio state: a level, a position in the stereo field, and a fade at
+/// each end.
+///
+/// Level and fades are separate and **multiply**. A clip can therefore ride a
+/// keyframed level and still fade in and out of it, and changing the level does
+/// not disturb the fades — see [`crate::fade`] for why that is worth a field of
+/// its own rather than two keyframes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioProperties {
-    /// Linear gain, `1.0` being unity. Animatable, which gives fades for free.
+    /// Linear gain, `1.0` being unity. Animatable.
     pub volume: Property<f64>,
     /// `-1.0` hard left to `1.0` hard right.
     pub pan: Property<f64>,
+    /// Rises from silence at the clip's start.
+    #[serde(default, skip_serializing_if = "Fade::is_inactive")]
+    pub fade_in: Fade,
+    /// Falls to silence at the clip's end.
+    #[serde(default, skip_serializing_if = "Fade::is_inactive")]
+    pub fade_out: Fade,
 }
 
 impl Default for AudioProperties {
     fn default() -> Self {
-        AudioProperties { volume: Property::constant(1.0), pan: Property::constant(0.0) }
+        AudioProperties {
+            volume: Property::constant(1.0),
+            pan: Property::constant(0.0),
+            fade_in: Fade::NONE,
+            fade_out: Fade::NONE,
+        }
     }
 }
 
 impl AudioProperties {
-    pub fn evaluate(&self, t: Ticks) -> (f64, f64) {
-        (self.volume.evaluate(t).max(0.0), self.pan.evaluate(t).clamp(-1.0, 1.0))
+    pub fn fade(&self, edge: FadeEdge) -> Fade {
+        match edge {
+            FadeEdge::In => self.fade_in,
+            FadeEdge::Out => self.fade_out,
+        }
+    }
+
+    pub fn set_fade(&mut self, edge: FadeEdge, fade: Fade) {
+        match edge {
+            FadeEdge::In => self.fade_in = fade,
+            FadeEdge::Out => self.fade_out = fade,
+        }
+    }
+
+    /// Both fades, shortened proportionally if they would otherwise overlap in
+    /// a clip of `duration`.
+    ///
+    /// This is what every evaluation goes through, so a clip trimmed shorter
+    /// than its fades keeps a sensible envelope instead of never reaching full
+    /// level — and the stored lengths are left alone, so widening the clip
+    /// again restores the fades the user asked for.
+    pub fn fitted_fades(&self, duration: Ticks) -> (Fade, Fade) {
+        (
+            self.fade_in.fitted(duration, self.fade_out.length),
+            self.fade_out.fitted(duration, self.fade_in.length),
+        )
+    }
+
+    /// The combined fade envelope at clip-local time `local`.
+    pub fn fade_gain(&self, local: Ticks, duration: Ticks) -> f64 {
+        let (fade_in, fade_out) = self.fitted_fades(duration);
+        fade_in.gain(FadeEdge::In.distance(local, duration))
+            * fade_out.gain(FadeEdge::Out.distance(local, duration))
+    }
+
+    /// Level and pan at clip-local time `local`, fades included.
+    ///
+    /// `duration` is the clip's own length, which the fade at the tail is
+    /// measured back from.
+    pub fn evaluate(&self, local: Ticks, duration: Ticks) -> (f64, f64) {
+        let gain = self.volume.evaluate(local).max(0.0) * self.fade_gain(local, duration);
+        (gain, self.pan.evaluate(local).clamp(-1.0, 1.0))
+    }
+
+    /// Whether the sound changes over the clip's own length, which is what
+    /// tells a cache it cannot reuse one answer for the whole span.
+    pub fn is_animated(&self) -> bool {
+        self.volume.is_animated()
+            || self.pan.is_animated()
+            || self.fade_in.is_active()
+            || self.fade_out.is_active()
     }
 }
