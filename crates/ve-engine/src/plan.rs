@@ -5,6 +5,14 @@
 //! [`Sequence`] and an instant it answers "what is on screen, where, and how
 //! loud", which makes every question about track ordering, muting, soloing and
 //! animation answerable in a unit test rather than by looking at a preview.
+//!
+//! # Why a plan and not a "composition"
+//!
+//! The result is a [`RenderPlan`]: the flattened, ready-to-draw description of
+//! one instant. It is deliberately not called a composition, because a
+//! composition is a thing the *user* authors and saves — see
+//! [`ve_core::RenderPlan`] — whereas this is derived, thrown away every frame,
+//! and never persisted.
 
 use ve_core::{AssetId, BlendMode, ClipId, Sequence, Size, TrackId, TrackKind, TransformState};
 use ve_time::Ticks;
@@ -38,9 +46,10 @@ pub struct AudibleClip {
     pub pan: f64,
 }
 
-/// Everything a single instant of the timeline resolves to.
+/// Everything a single instant of the timeline resolves to: what to draw, in
+/// what order, over what background, and what to mix.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Composition {
+pub struct RenderPlan {
     pub time: Ticks,
     pub size: Size,
     pub background: ve_core::Rgba,
@@ -49,7 +58,7 @@ pub struct Composition {
     pub audio: Vec<AudibleClip>,
 }
 
-impl Composition {
+impl RenderPlan {
     pub fn is_empty(&self) -> bool {
         self.video.is_empty() && self.audio.is_empty()
     }
@@ -68,13 +77,13 @@ impl Composition {
     }
 }
 
-/// Resolves a sequence at `at` into a flat composition.
+/// Resolves a sequence at `at` into a flat plan.
 ///
 /// Track order is layer order: index 0 is the bottom video layer, drawn first.
 /// Clips that are disabled, on a muted track, or excluded by a solo are left
 /// out entirely rather than being included at zero opacity, so the compositor
 /// never spends a draw call on something invisible.
-pub fn evaluate(sequence: &Sequence, at: Ticks) -> Composition {
+pub fn evaluate(sequence: &Sequence, at: Ticks) -> RenderPlan {
     // Solo is exclusive: the moment anything is soloed, everything else on that
     // side goes quiet. Video and audio solo independently, because soloing a
     // video track to inspect it should not silence the mix.
@@ -133,7 +142,7 @@ pub fn evaluate(sequence: &Sequence, at: Ticks) -> Composition {
         }
     }
 
-    Composition {
+    RenderPlan {
         time: at,
         size: sequence.settings.resolution,
         background: sequence.settings.background,
@@ -146,11 +155,7 @@ pub fn evaluate(sequence: &Sequence, at: Ticks) -> Composition {
 ///
 /// Used by export and by prefetch, both of which want to know what is coming
 /// rather than only what is current.
-pub fn evaluate_frames(
-    sequence: &Sequence,
-    first_frame: i64,
-    count: usize,
-) -> Vec<Composition> {
+pub fn evaluate_frames(sequence: &Sequence, first_frame: i64, count: usize) -> Vec<RenderPlan> {
     let rate = sequence.rate();
     (0..count)
         .map(|i| evaluate(sequence, rate.frame_to_ticks(first_frame + i as i64)))

@@ -1,4 +1,4 @@
-//! Orchestration: clock, composition, decode scheduling.
+//! Orchestration: clock, plan evaluation, decode scheduling.
 
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use ve_metrics::{spans, Metrics};
 use ve_time::Ticks;
 
 use crate::clock::{PlaybackClock, TransportState};
-use crate::composition::{evaluate, Composition, VisibleClip};
+use crate::plan::{evaluate, RenderPlan, VisibleClip};
 
 /// How far ahead to decode while playing, in frames.
 ///
@@ -25,7 +25,7 @@ pub struct ResolvedLayer {
 /// What the engine resolved for one instant.
 pub struct EngineUpdate {
     pub position: Ticks,
-    pub composition: Composition,
+    pub plan: RenderPlan,
     /// Layers whose frames are decoded and ready, bottom first.
     pub layers: Vec<ResolvedLayer>,
     /// Layers whose frames are still decoding. Non-zero means the preview is
@@ -43,8 +43,8 @@ impl EngineUpdate {
     }
 }
 
-/// Drives playback: reads the clock, resolves the composition, and asks the
-/// decode service for what it needs.
+/// Drives playback: reads the clock, resolves the instant into a plan, and asks
+/// the decode service for what it needs.
 ///
 /// Holds no GPU state and does no drawing. The UI calls [`PlaybackEngine::update`]
 /// once per repaint and composites whatever came back, which is what keeps the
@@ -152,12 +152,12 @@ impl PlaybackEngine {
         // resolves to the same cache key, so playback does not decode a frame
         // twice just because two repaints landed inside it.
         let position = sequence.snap_to_frame(self.clock.position());
-        let composition = evaluate(sequence, position);
+        let plan = evaluate(sequence, position);
 
-        let mut layers = Vec::with_capacity(composition.video.len());
+        let mut layers = Vec::with_capacity(plan.video.len());
         let mut pending = 0usize;
 
-        for clip in &composition.video {
+        for clip in &plan.video {
             match self.decode.cached_frame(clip.asset, clip.source_time) {
                 Some(frame) => layers.push(ResolvedLayer { clip: clip.clone(), frame }),
                 None => {
@@ -184,7 +184,7 @@ impl PlaybackEngine {
             self.prefetch(sequence, position);
         }
 
-        EngineUpdate { position, composition, layers, pending, playing, reached_end }
+        EngineUpdate { position, plan, layers, pending, playing, reached_end }
     }
 
     /// Queues decoding for the frames just after `position`.
@@ -237,6 +237,6 @@ impl PlaybackEngine {
 
 /// Resolves a sequence at an instant without any decoding, for tests and for
 /// tooling that only needs to know *what* is there.
-pub fn peek(project: &Project, sequence: SequenceId, at: Ticks) -> Option<Composition> {
+pub fn peek(project: &Project, sequence: SequenceId, at: Ticks) -> Option<RenderPlan> {
     project.sequence(sequence).map(|s| evaluate(s, at))
 }

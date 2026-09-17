@@ -92,7 +92,7 @@ impl Preview {
         // The preview always renders at the sequence's own resolution, not the
         // panel's. Composition geometry then does not depend on window size, so
         // what is previewed is exactly what will be exported.
-        if self.target.resize(device, update.composition.size) {
+        if self.target.resize(device, update.plan.size) {
             self.register(render_state);
             // A fresh target holds nothing, so nothing is presented.
             self.presented = None;
@@ -134,7 +134,7 @@ impl Preview {
         }
 
         let size = self.target.size();
-        let background = update.composition.background;
+        let background = update.plan.background;
         let key = CompositeKey::of(size, background, &layers);
 
         // 1. Already on screen. Nothing to draw, nothing to copy.

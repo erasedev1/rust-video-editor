@@ -8,8 +8,8 @@ use ve_media::{AudioDecoder, MediaError};
 use ve_metrics::Metrics;
 use ve_time::{SampleRate, Ticks};
 
-use crate::composition::evaluate;
 use crate::mixer::{AudioMixer, MixSource, MixStats};
+use crate::plan::evaluate;
 use crate::ring::Producer;
 
 /// One open audio file plus a window of decoded samples around the playhead.

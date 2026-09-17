@@ -142,13 +142,13 @@ fn the_first_milestone_works_end_to_end() {
     // The tone fixture is one second long, so half a second in is inside it.
     // At exactly one second it would not be: clip ranges are half-open, and
     // the instant a clip ends belongs to whatever comes next.
-    assert_eq!(update.composition.audio.len(), 1, "the audio clip should be audible");
+    assert_eq!(update.plan.audio.len(), 1, "the audio clip should be audible");
 
     editor.time.advance(Duration::from_millis(600));
     let update = editor.settle();
     assert!(update.position > Ticks::from_seconds(1));
     assert_eq!(update.layers.len(), 1, "the 3s video clip still covers this instant");
-    assert!(update.composition.audio.is_empty(), "the 1s tone has ended");
+    assert!(update.plan.audio.is_empty(), "the 1s tone has ended");
 
     // 10. Stop and resume.
     editor.act(Action::TogglePlayback);

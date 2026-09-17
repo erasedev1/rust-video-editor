@@ -1,4 +1,4 @@
-//! Playback: the clock, composition evaluation, decode scheduling and audio.
+//! Playback: the clock, plan evaluation, decode scheduling and audio.
 //!
 //! # Independent of the interface
 //!
@@ -23,16 +23,16 @@
 
 pub mod audio;
 pub mod clock;
-pub mod composition;
 mod cpal_sink;
 mod engine;
 pub mod mixer;
+pub mod plan;
 pub mod ring;
 
 pub use audio::{AudioError, AudioRenderer, AudioSink};
 pub use clock::{ManualTime, PlaybackClock, SystemTime, TimeSource, TransportState};
-pub use composition::{evaluate, evaluate_frames, AudibleClip, Composition, VisibleClip};
 pub use cpal_sink::CpalSink;
 pub use engine::{peek, EngineUpdate, PlaybackEngine, ResolvedLayer};
 pub use mixer::{AudioMixer, MixSource, MixStats};
+pub use plan::{evaluate, evaluate_frames, AudibleClip, RenderPlan, VisibleClip};
 pub use ring::{AudioRing, Consumer, Producer};

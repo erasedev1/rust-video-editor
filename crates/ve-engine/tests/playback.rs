@@ -89,7 +89,7 @@ impl Fixture {
     }
 }
 
-// ---- composition evaluation -------------------------------------------
+// ---- plan evaluation ---------------------------------------------------
 
 #[test]
 fn an_empty_sequence_evaluates_to_nothing() {
@@ -128,7 +128,7 @@ fn track_order_is_layer_order_with_v1_at_the_bottom() {
 }
 
 #[test]
-fn a_clips_blend_mode_reaches_the_composition() {
+fn a_clips_blend_mode_reaches_the_plan() {
     let mut f = fixture();
     let bottom = f.add_clip(f.v1, 0, 5);
     let top = f.add_clip(f.v2, 0, 5);
@@ -211,7 +211,7 @@ fn a_muted_solo_track_does_not_silence_everything() {
         t.muted = true;
     }
     // A track that is both soloed and muted must not win the solo and then
-    // contribute nothing, leaving the composition empty.
+    // contribute nothing, leaving the plan empty.
     assert_eq!(evaluate(f.sequence(), Ticks::from_seconds(1)).video.len(), 1);
 }
 
@@ -507,7 +507,7 @@ fn updating_resolves_layers_once_their_frames_decode() {
     engine.open_project_assets(&f.project);
 
     let update = settle(&mut engine, f.sequence());
-    assert_eq!(update.composition.video.len(), 1);
+    assert_eq!(update.plan.video.len(), 1);
     assert_eq!(update.layers.len(), 1, "the frame should have decoded");
     assert_eq!(update.pending, 0);
     assert_eq!(update.layers[0].frame.size(), Size::new(160, 120));
@@ -551,7 +551,7 @@ fn scrubbing_moves_the_playhead_and_stops_at_a_frame_boundary() {
 }
 
 #[test]
-fn playback_advances_the_composition_over_time() {
+fn playback_advances_the_plan_over_time() {
     let mut f = fixture();
     f.add_clip(f.v1, 0, 3);
     let metrics = Metrics::new();
