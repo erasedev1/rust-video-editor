@@ -11,10 +11,12 @@
 //! The result is a [`RenderPlan`]: the flattened, ready-to-draw description of
 //! one instant. It is deliberately not called a composition, because a
 //! composition is a thing the *user* authors and saves — see
-//! [`ve_core::RenderPlan`] — whereas this is derived, thrown away every frame,
+//! [`ve_core::Composition`] — whereas this is derived, thrown away every frame,
 //! and never persisted.
 
-use ve_core::{AssetId, BlendMode, ClipId, Sequence, Size, TrackId, TrackKind, TransformState};
+use ve_core::{
+    AssetId, BlendMode, ClipId, Sequence, Size, Source, TrackId, TrackKind, TransformState,
+};
 use ve_time::Ticks;
 
 /// One clip contributing picture at a given instant.
@@ -22,7 +24,8 @@ use ve_time::Ticks;
 pub struct VisibleClip {
     pub clip: ClipId,
     pub track: TrackId,
-    pub asset: AssetId,
+    /// Media, or a composition to render first.
+    pub source: Source,
     /// Where to read in the source media.
     pub source_time: Ticks,
     /// Every animated property resolved at this instant.
@@ -38,7 +41,7 @@ pub struct VisibleClip {
 pub struct AudibleClip {
     pub clip: ClipId,
     pub track: TrackId,
-    pub asset: AssetId,
+    pub source: Source,
     pub source_time: Ticks,
     /// Linear gain, already resolved from the clip's animated volume.
     pub gain: f64,
@@ -64,12 +67,16 @@ impl RenderPlan {
     }
 
     /// Assets this instant needs decoded, without duplicates.
+    ///
+    /// Only media: a nested composition needs rendering, not decoding, and what
+    /// *it* needs decoded is its own plan's business.
     pub fn required_assets(&self) -> Vec<AssetId> {
         let mut assets: Vec<AssetId> = self
             .video
             .iter()
-            .map(|c| c.asset)
-            .chain(self.audio.iter().map(|c| c.asset))
+            .map(|c| c.source)
+            .chain(self.audio.iter().map(|c| c.source))
+            .filter_map(|s| s.asset())
             .collect();
         assets.sort_unstable();
         assets.dedup();
@@ -121,7 +128,7 @@ pub fn evaluate(sequence: &Sequence, at: Ticks) -> RenderPlan {
                 video.push(VisibleClip {
                     clip: clip.id,
                     track: track.id,
-                    asset: clip.asset,
+                    source: clip.source,
                     source_time,
                     transform: clip.transform.evaluate(local),
                     blend: clip.blend,
@@ -133,7 +140,7 @@ pub fn evaluate(sequence: &Sequence, at: Ticks) -> RenderPlan {
                 audio.push(AudibleClip {
                     clip: clip.id,
                     track: track.id,
-                    asset: clip.asset,
+                    source: clip.source,
                     source_time,
                     gain,
                     pan,

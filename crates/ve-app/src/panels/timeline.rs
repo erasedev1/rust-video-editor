@@ -475,7 +475,15 @@ fn draw_clip(
         egui::StrokeKind::Inside,
     );
 
-    let offline = state.project.asset(clip.asset).map(|a| a.offline).unwrap_or(true);
+    // A clip holding a composition is never offline: there is no file to
+    // relink, and the composition either exists in the project or the loader
+    // already warned about it.
+    let offline = match clip.source {
+        ve_core::Source::Asset(id) => {
+            state.project.asset(id).map(|a| a.offline).unwrap_or(true)
+        }
+        ve_core::Source::Composition(id) => state.project.composition(id).is_none(),
+    };
     if offline {
         painter.rect_filled(rect, CornerRadius::same(3), theme::OFFLINE.gamma_multiply(0.45));
     }

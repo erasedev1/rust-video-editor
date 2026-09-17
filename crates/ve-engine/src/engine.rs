@@ -107,7 +107,9 @@ impl PlaybackEngine {
         let snapped = sequence.snap_to_frame(to).clamp_non_negative();
         self.clock.seek(snapped);
         for clip in evaluate(sequence, snapped).video {
-            self.decode.request(FrameRequest::interactive(clip.asset, clip.source_time));
+            if let Some(asset) = clip.source.asset() {
+                self.decode.request(FrameRequest::interactive(asset, clip.source_time));
+            }
         }
     }
 
@@ -158,15 +160,20 @@ impl PlaybackEngine {
         let mut pending = 0usize;
 
         for clip in &plan.video {
-            match self.decode.cached_frame(clip.asset, clip.source_time) {
+            // A nested composition has no decoded frame of its own; it is
+            // rendered, and that happens a layer up in `ve-render`.
+            let Some(asset) = clip.source.asset() else {
+                pending += 1;
+                continue;
+            };
+            match self.decode.cached_frame(asset, clip.source_time) {
                 Some(frame) => layers.push(ResolvedLayer { clip: clip.clone(), frame }),
                 None => {
                     pending += 1;
                     // Even while playing this is interactive work: it is the
                     // frame being shown right now, and it must beat any
                     // read-ahead already queued.
-                    self.decode
-                        .request(FrameRequest::interactive(clip.asset, clip.source_time));
+                    self.decode.request(FrameRequest::interactive(asset, clip.source_time));
                 }
             }
         }
@@ -202,10 +209,11 @@ impl PlaybackEngine {
                 break;
             }
             for clip in evaluate(sequence, at).video {
+                let Some(asset) = clip.source.asset() else { continue };
                 // Skip what is already decoded, so read-ahead does not fill the
                 // queue with work the cache has already done.
-                if self.decode.cached_frame(clip.asset, clip.source_time).is_none() {
-                    self.decode.request(FrameRequest::prefetch(clip.asset, clip.source_time));
+                if self.decode.cached_frame(asset, clip.source_time).is_none() {
+                    self.decode.request(FrameRequest::prefetch(asset, clip.source_time));
                 }
             }
         }

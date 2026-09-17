@@ -206,7 +206,7 @@ impl Command for RollEdit {
         // Rolling right needs unused tail on the left clip; rolling left needs
         // unused head on the right one. Either can run out before the minimum
         // duration does.
-        let left_source_available = project.asset_duration(left.asset);
+        let left_source_available = project.source_duration(left.source);
         if left.source_in + left.speed.timeline_to_source(left_duration) > left_source_available
         {
             return Err(ve_core::CoreError::TrimBeyondSource.into());
@@ -303,7 +303,7 @@ impl Command for SlipClip {
 
     fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
         let clip = clip_of(project, self.sequence, self.track, self.clip)?;
-        let available = project.asset_duration(clip.asset);
+        let available = project.source_duration(clip.source);
         let source_duration = clip.source_duration();
         if self.to_source_in.is_negative() || self.to_source_in + source_duration > available {
             return Err(ve_core::CoreError::TrimBeyondSource.into());
@@ -402,7 +402,7 @@ impl Command for SlideClip {
                     return Err(ve_core::CoreError::TrimTooShort.into());
                 }
                 if l.source_in + l.speed.timeline_to_source(duration)
-                    > project.asset_duration(l.asset)
+                    > project.source_duration(l.source)
                 {
                     return Err(ve_core::CoreError::TrimBeyondSource.into());
                 }
@@ -537,7 +537,7 @@ impl Command for SetClipSpeed {
             .ok_or(CommandError::SequenceNotFound(self.sequence))?
             .rate();
         let clip = clip_of(project, self.sequence, self.track, self.clip)?;
-        let available = project.asset_duration(clip.asset);
+        let available = project.source_duration(clip.source);
 
         let (was_speed, window) =
             self.before.unwrap_or((clip.speed, ClipWindow::capture(clip)));

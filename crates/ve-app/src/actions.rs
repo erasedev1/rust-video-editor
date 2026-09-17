@@ -832,15 +832,19 @@ fn plan_paste(
             let track = &seq.tracks[base + entry.track_offset];
             // A clip does not record whether it was video or audio — that was
             // its track's business — so what it can be pasted onto is decided
-            // by its media, exactly as a fresh import is.
-            let usable = match state.project.asset(entry.clip.asset) {
+            // by its source, exactly as a fresh import is.
+            let usable = match entry.clip.asset().and_then(|a| state.project.asset(a)) {
                 Some(asset) => match track.kind {
                     TrackKind::Video => asset.info.has_video(),
                     TrackKind::Audio => asset.info.has_audio(),
                 },
+                // A composition is picture, so it belongs on a video track.
                 // Media missing from the project cannot be judged here; the
                 // loader's missing-asset warning already covers that case.
-                None => true,
+                None => match entry.clip.composition() {
+                    Some(_) => track.kind == TrackKind::Video,
+                    None => true,
+                },
             };
             if !usable {
                 return Err(format!(

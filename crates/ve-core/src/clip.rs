@@ -4,6 +4,7 @@ use ve_time::{Ticks, TimeRange};
 use crate::blend::BlendMode;
 use crate::effect::{AudioProperties, Effect, Transform};
 use crate::id::{AssetId, ClipId, EffectId};
+use crate::source::Source;
 use crate::CoreError;
 
 /// Playback rate as an exact rational multiplier of the source.
@@ -93,7 +94,10 @@ const fn gcd(mut a: u32, mut b: u32) -> u32 {
 pub struct Clip {
     pub id: ClipId,
     pub name: String,
-    pub asset: AssetId,
+    /// What the clip shows: media, or a composition rendered on the spot. Named
+    /// `source` rather than `asset` because a cut can hold compositing work as
+    /// readily as a file.
+    pub source: Source,
 
     /// Offset into the source media of the clip's first frame.
     pub source_in: Ticks,
@@ -121,9 +125,12 @@ pub struct Clip {
 }
 
 impl Clip {
+    /// Takes anything that converts into a [`Source`], so the common
+    /// `Clip::new(id, asset_id, ..)` call reads as it always did while a
+    /// composition can be placed the same way.
     pub fn new(
         id: ClipId,
-        asset: AssetId,
+        source: impl Into<Source>,
         name: impl Into<String>,
         source_in: Ticks,
         timeline_start: Ticks,
@@ -132,7 +139,7 @@ impl Clip {
         Clip {
             id,
             name: name.into(),
-            asset,
+            source: source.into(),
             source_in,
             timeline_start,
             duration,
@@ -143,6 +150,21 @@ impl Clip {
             audio: AudioProperties::default(),
             effects: Vec::new(),
         }
+    }
+
+    /// The media this clip draws from, or `None` when it holds a composition.
+    ///
+    /// Most callers want exactly this: decoding, relinking and the media browser
+    /// are about files, and a nested composition is not their concern.
+    #[inline]
+    pub fn asset(&self) -> Option<AssetId> {
+        self.source.asset()
+    }
+
+    /// The composition this clip draws from, if any.
+    #[inline]
+    pub fn composition(&self) -> Option<crate::id::CompositionId> {
+        self.source.composition()
     }
 
     /// The clip's footprint on the timeline.

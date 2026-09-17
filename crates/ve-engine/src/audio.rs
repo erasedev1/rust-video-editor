@@ -153,19 +153,22 @@ impl AudioRenderer {
         }
 
         let rate = self.mixer.sample_rate();
-        let composition = evaluate(sequence, self.position);
+        let plan = evaluate(sequence, self.position);
 
         // Gather each clip's samples first, then mix: the borrow checker will
         // not allow decoding into `self.sources` while the mixer holds slices
         // out of it, and collecting the owned blocks is the honest fix.
         let mut blocks: Vec<(Vec<f32>, u16, f64, f64)> = Vec::new();
-        for clip in &composition.audio {
+        for clip in &plan.audio {
             if clip.gain <= 0.0 {
                 continue;
             }
-            let Some(source) = self.source_for(clip.asset) else { continue };
+            // Only media makes sound here. A nested composition's audio is part
+            // of that composition's own plan, which the engine mixes separately.
+            let Some(asset) = clip.source.asset() else { continue };
+            let Some(source) = self.source_for(asset) else { continue };
             if let Err(e) = source.ensure(clip.source_time, frames, rate) {
-                log::warn!("audio decode failed for asset {}: {e}", clip.asset);
+                log::warn!("audio decode failed for asset {asset}: {e}");
                 continue;
             }
             let slice = source.slice(clip.source_time, frames, rate);

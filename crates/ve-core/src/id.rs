@@ -129,8 +129,10 @@ macro_rules! id_types {
 id_types! {
     AssetTag => AssetId,
     SequenceTag => SequenceId,
+    CompositionTag => CompositionId,
     TrackTag => TrackId,
     ClipTag => ClipId,
+    LayerTag => LayerId,
     MarkerTag => MarkerId,
     EffectTag => EffectId,
 }

@@ -95,7 +95,7 @@ impl VergeApp {
         if let (Some(preview), Some(render_state)) = (self.preview.as_mut(), render_state) {
             let decode = self.engine.decode_service().clone();
             preview.render(render_state, &update, |clip| {
-                decode.key_for(clip.asset, clip.source_time)
+                decode.key_for(clip.source.asset()?, clip.source_time)
             });
         }
         self.last_update = Some(update);

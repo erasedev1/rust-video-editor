@@ -322,7 +322,7 @@ fn ids_survive_a_round_trip_so_references_stay_valid() {
     assert_eq!(loaded.assets[0].id, orig_asset);
     let clip = &loaded.active().unwrap().tracks[0].clips()[0];
     assert_eq!(clip.id, orig_clip);
-    assert_eq!(clip.asset, orig_asset, "the clip still points at the right media");
+    assert_eq!(clip.asset(), Some(orig_asset), "the clip still points at the right media");
 }
 
 #[test]

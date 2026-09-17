@@ -216,7 +216,7 @@ impl Command for TrimClip {
                 .ok_or(CommandError::TrackNotFound(self.track))?
                 .clip(self.clip_id)
                 .ok_or(CommandError::ClipNotFound(self.clip_id))?;
-            project.asset_duration(clip.asset)
+            project.source_duration(clip.source)
         };
 
         let track = track_mut(project, self.sequence, self.track)?;

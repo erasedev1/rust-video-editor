@@ -4,8 +4,13 @@ use serde::{Deserialize, Serialize};
 use ve_time::Ticks;
 
 use crate::asset::{MediaAsset, MediaInfo};
-use crate::id::{AssetId, ClipId, EffectId, IdAllocator, MarkerId, SequenceId, TrackId};
+use crate::composition::{Composition, CompositionSettings};
+use crate::id::{
+    AssetId, ClipId, CompositionId, EffectId, IdAllocator, LayerId, MarkerId, SequenceId,
+    TrackId,
+};
 use crate::sequence::{Sequence, SequenceSettings};
+use crate::source::Source;
 use crate::track::TrackKind;
 use crate::CoreError;
 
@@ -41,9 +46,9 @@ impl Default for ProjectSettings {
 
 /// The root of the edit model.
 ///
-/// Holds media references and sequences; owns the ID allocator that keeps every
-/// handle in the project unique. This type is pure data with no I/O, no
-/// threading and no GPU state, which is what lets the whole edit model be
+/// Holds media references, sequences and compositions; owns the ID allocator
+/// that keeps every handle in the project unique. This type is pure data with no
+/// I/O, no threading and no GPU state, which is what lets the whole edit model be
 /// tested, diffed and serialised in isolation from the engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
@@ -52,6 +57,10 @@ pub struct Project {
     pub settings: ProjectSettings,
     pub assets: Vec<MediaAsset>,
     pub sequences: Vec<Sequence>,
+    /// Compositing work, referenced by sequences and by each other. Defaulted on
+    /// read, so a project written before compositions existed still opens.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compositions: Vec<Composition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_sequence: Option<SequenceId>,
     pub ids: IdAllocator,
@@ -64,6 +73,7 @@ impl Project {
             settings: ProjectSettings::default(),
             assets: Vec::new(),
             sequences: Vec::new(),
+            compositions: Vec::new(),
             active_sequence: None,
             ids: IdAllocator::new(),
         }
@@ -118,12 +128,35 @@ impl Project {
     }
 
     pub fn clips_using_asset(&self, id: AssetId) -> impl Iterator<Item = ClipId> + '_ {
+        self.clips_using(Source::Asset(id))
+    }
+
+    /// Every clip drawing from a source, anywhere in the project.
+    pub fn clips_using(&self, source: Source) -> impl Iterator<Item = ClipId> + '_ {
         self.sequences
             .iter()
             .flat_map(|s| s.tracks.iter())
             .flat_map(|t| t.clips().iter())
-            .filter(move |c| c.asset == id)
+            .filter(move |c| c.source == source)
             .map(|c| c.id)
+    }
+
+    /// Every composition layer drawing from a source.
+    pub fn layers_using(
+        &self,
+        source: Source,
+    ) -> impl Iterator<Item = (CompositionId, LayerId)> + '_ {
+        self.compositions
+            .iter()
+            .flat_map(move |c| c.layers.iter().map(move |l| (c.id, l)))
+            .filter(move |(_, l)| l.source == source)
+            .map(|(c, l)| (c, l.id))
+    }
+
+    /// How many places use a source at all, which is what a delete has to refuse
+    /// over: a source still on a timeline or in a stack cannot just vanish.
+    pub fn uses_of(&self, source: Source) -> usize {
+        self.clips_using(source).count() + self.layers_using(source).count()
     }
 
     // ---- sequences ----------------------------------------------------
@@ -158,6 +191,79 @@ impl Project {
         self.sequence_mut(id)
     }
 
+    // ---- compositions -------------------------------------------------
+
+    pub fn add_composition(
+        &mut self,
+        name: impl Into<String>,
+        settings: CompositionSettings,
+    ) -> CompositionId {
+        let id = self.ids.alloc::<crate::id::CompositionTag>();
+        self.compositions.push(Composition::new(id, name, settings));
+        id
+    }
+
+    pub fn composition(&self, id: CompositionId) -> Option<&Composition> {
+        self.compositions.iter().find(|c| c.id == id)
+    }
+
+    pub fn composition_mut(&mut self, id: CompositionId) -> Option<&mut Composition> {
+        self.compositions.iter_mut().find(|c| c.id == id)
+    }
+
+    /// Removes a composition, refusing while anything still draws from it.
+    ///
+    /// The same rule as an asset in use: a dangling source would render as a
+    /// hole in someone's edit, and the count is what makes the refusal
+    /// actionable rather than mysterious.
+    pub fn remove_composition(&mut self, id: CompositionId) -> Result<Composition, CoreError> {
+        let places = self.uses_of(Source::Composition(id));
+        if places > 0 {
+            return Err(CoreError::CompositionInUse { id, places });
+        }
+        let index = self
+            .compositions
+            .iter()
+            .position(|c| c.id == id)
+            .ok_or(CoreError::CompositionNotFound(id))?;
+        Ok(self.compositions.remove(index))
+    }
+
+    /// Whether putting `inner` inside `outer` would close a nesting cycle.
+    ///
+    /// The one check that has to exist in the model rather than in a command:
+    /// every path that can create a nested reference goes through it, and a
+    /// cycle is not a rejected edit the user can reason about — it is a render
+    /// that never finishes.
+    pub fn nesting_would_cycle(&self, outer: CompositionId, inner: CompositionId) -> bool {
+        match self.composition(outer) {
+            Some(comp) => comp.would_cycle(inner, |id| self.composition(id)),
+            // No such composition to put anything inside; the caller will fail
+            // on that instead, and answering "yes, a cycle" here would be a lie.
+            None => false,
+        }
+    }
+
+    /// A composition's nesting depth, counting itself as one.
+    ///
+    /// Reported to the user when a nest is refused, and used by the engine's
+    /// depth limit. Cycles are already impossible by construction, but the
+    /// visited set means a hand-edited file cannot hang this either.
+    pub fn nesting_depth(&self, id: CompositionId) -> usize {
+        fn walk(project: &Project, id: CompositionId, seen: &mut Vec<CompositionId>) -> usize {
+            if seen.contains(&id) {
+                return 0;
+            }
+            seen.push(id);
+            let deepest = project
+                .composition(id)
+                .map(|c| c.nested().iter().map(|n| walk(project, *n, seen)).max().unwrap_or(0))
+                .unwrap_or(0);
+            1 + deepest
+        }
+        walk(self, id, &mut Vec::new())
+    }
+
     // ---- id allocation -------------------------------------------------
     //
     // Thin wrappers so call sites read as intent rather than as turbofished
@@ -175,6 +281,9 @@ impl Project {
     pub fn new_marker_id(&mut self) -> MarkerId {
         self.ids.alloc()
     }
+    pub fn new_layer_id(&mut self) -> LayerId {
+        self.ids.alloc()
+    }
 
     /// Shortest permitted clip duration, in the given sequence's timebase.
     pub fn min_clip_duration(&self, sequence: SequenceId) -> Ticks {
@@ -190,6 +299,20 @@ impl Project {
         self.asset(id).map(|a| a.duration()).unwrap_or(Ticks::ZERO)
     }
 
+    /// How much material a source offers, whichever kind it is.
+    ///
+    /// A composition's length is its own setting rather than a property of a
+    /// file, which is what lets a trim past the end of a nested composition be
+    /// refused for the same reason as a trim past the end of media.
+    pub fn source_duration(&self, source: Source) -> Ticks {
+        match source {
+            Source::Asset(id) => self.asset_duration(id),
+            Source::Composition(id) => {
+                self.composition(id).map(|c| c.duration()).unwrap_or(Ticks::ZERO)
+            }
+        }
+    }
+
     /// Repairs invariants after loading a project file.
     ///
     /// Returns a list of human-readable warnings. The project is always left in
@@ -203,6 +326,13 @@ impl Project {
         for a in &self.assets {
             max_id = max_id.max(a.id.raw());
         }
+        // Referenced IDs count too, not just owned ones. A clip pointing at a
+        // source that is missing from the file must not have that ID handed to a
+        // future import, or the orphan would silently bind to unrelated media.
+        let source_raw = |source: Source| match source {
+            Source::Asset(id) => id.raw(),
+            Source::Composition(id) => id.raw(),
+        };
         for s in &self.sequences {
             max_id = max_id.max(s.id.raw());
             for m in &s.markers {
@@ -212,20 +342,40 @@ impl Project {
                 max_id = max_id.max(t.id.raw());
                 for c in t.clips() {
                     max_id = max_id.max(c.id.raw());
-                    // Referenced IDs count too, not just owned ones. A clip
-                    // pointing at an asset that is missing from the file must
-                    // not have that ID handed to a future import, or the
-                    // orphan would silently bind to unrelated media.
-                    max_id = max_id.max(c.asset.raw());
+                    max_id = max_id.max(source_raw(c.source));
                     for e in &c.effects {
                         max_id = max_id.max(e.id.raw());
                     }
                 }
             }
         }
+        for c in &self.compositions {
+            max_id = max_id.max(c.id.raw());
+            for l in &c.layers {
+                max_id = max_id.max(l.id.raw());
+                max_id = max_id.max(source_raw(l.source));
+                for e in &l.effects {
+                    max_id = max_id.max(e.id.raw());
+                }
+            }
+        }
         self.ids.bump_past(max_id);
 
-        let known_assets: Vec<AssetId> = self.assets.iter().map(|a| a.id).collect();
+        // Compositions first: breaking a nesting cycle can only be done with
+        // every composition in view, and a sequence's report of a missing source
+        // should already reflect the repair.
+        for comp in &mut self.compositions {
+            warnings.extend(comp.normalise());
+        }
+        warnings.extend(self.break_nesting_cycles());
+
+        let known: Vec<Source> = self
+            .assets
+            .iter()
+            .map(|a| Source::Asset(a.id))
+            .chain(self.compositions.iter().map(|c| Source::Composition(c.id)))
+            .collect();
+
         for seq in &mut self.sequences {
             let seq_name = seq.name.clone();
             for id in seq.normalise() {
@@ -234,12 +384,22 @@ impl Project {
             }
             for track in &seq.tracks {
                 for clip in track.clips() {
-                    if !known_assets.contains(&clip.asset) {
+                    if !known.contains(&clip.source) {
                         warnings.push(format!(
-                            "sequence '{seq_name}': clip '{}' references missing asset {}",
-                            clip.name, clip.asset
+                            "sequence '{seq_name}': clip '{}' references missing {}",
+                            clip.name, clip.source
                         ));
                     }
+                }
+            }
+        }
+        for comp in &self.compositions {
+            for layer in &comp.layers {
+                if !known.contains(&layer.source) {
+                    warnings.push(format!(
+                        "composition '{}': layer '{}' references missing {}",
+                        comp.name, layer.name, layer.source
+                    ));
                 }
             }
         }
@@ -255,6 +415,82 @@ impl Project {
         }
 
         warnings
+    }
+
+    /// Removes the layers that close a nesting cycle, reporting each one.
+    ///
+    /// Only reachable from a hand-edited or corrupt file — every path through
+    /// the model refuses a cycle before it exists — but "only reachable from a
+    /// bad file" is exactly the case a loader has to survive, and the
+    /// alternative to breaking the cycle is a render that never returns.
+    fn break_nesting_cycles(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        loop {
+            // One offending (composition, layer) pair per pass, re-testing
+            // afterwards: removing a layer can resolve several cycles at once,
+            // and the graph is tiny. Document order decides which edge of a
+            // cycle goes, so the same file always loads the same way — with two
+            // compositions each holding the other there is no principled choice
+            // between the two edges, only a repeatable one.
+            let mut doomed = None;
+            'search: for comp in &self.compositions {
+                for layer in &comp.layers {
+                    if let Some(inner) = layer.source.composition() {
+                        if self.nesting_would_cycle_excluding(comp.id, inner, layer.id) {
+                            doomed = Some((
+                                comp.id,
+                                layer.id,
+                                comp.name.clone(),
+                                layer.name.clone(),
+                            ));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            let Some((comp_id, layer_id, comp_name, layer_name)) = doomed else { break };
+            if let Some(comp) = self.composition_mut(comp_id) {
+                comp.remove_layer(layer_id);
+            }
+            warnings.push(format!(
+                "composition '{comp_name}': layer '{layer_name}' closed a nesting cycle; removed"
+            ));
+        }
+        warnings
+    }
+
+    /// Cycle test that ignores one existing layer, which is what asking "is
+    /// *this* layer the one closing the loop?" requires: the layer is already in
+    /// place, so the plain test would always say yes.
+    fn nesting_would_cycle_excluding(
+        &self,
+        outer: CompositionId,
+        inner: CompositionId,
+        ignore: LayerId,
+    ) -> bool {
+        if outer == inner {
+            return true;
+        }
+        let mut stack = vec![inner];
+        let mut seen: Vec<CompositionId> = Vec::new();
+        while let Some(next) = stack.pop() {
+            if next == outer {
+                return true;
+            }
+            if seen.contains(&next) {
+                continue;
+            }
+            seen.push(next);
+            if let Some(comp) = self.composition(next) {
+                stack.extend(
+                    comp.layers
+                        .iter()
+                        .filter(|l| l.id != ignore)
+                        .filter_map(|l| l.source.composition()),
+                );
+            }
+        }
+        false
     }
 
     /// Total clip count, used by the benchmark suite and the status bar.

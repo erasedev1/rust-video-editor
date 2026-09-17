@@ -17,22 +17,29 @@ pub mod animation;
 pub mod asset;
 pub mod blend;
 pub mod clip;
+pub mod composition;
 pub mod effect;
 pub mod geometry;
 pub mod id;
 pub mod project;
 pub mod sequence;
+pub mod source;
 pub mod track;
 
 pub use animation::{Animatable, Interpolation, Keyframe, Property};
 pub use asset::{AudioStreamInfo, MediaAsset, MediaInfo, VideoStreamInfo};
 pub use blend::BlendMode;
 pub use clip::{Clip, Speed};
+pub use composition::{Composition, CompositionLayer, CompositionSettings};
 pub use effect::{AudioProperties, Effect, ParamValue, Transform, TransformState};
 pub use geometry::{Rgba, Size, Vec2};
-pub use id::{AssetId, ClipId, EffectId, Id, IdAllocator, MarkerId, SequenceId, TrackId};
+pub use id::{
+    AssetId, ClipId, CompositionId, EffectId, Id, IdAllocator, LayerId, MarkerId, SequenceId,
+    TrackId,
+};
 pub use project::{Project, ProjectSettings};
 pub use sequence::{Marker, Sequence, SequenceSettings};
+pub use source::Source;
 pub use track::{Track, TrackKind};
 
 pub(crate) fn default_true() -> bool {
@@ -53,8 +60,16 @@ pub enum CoreError {
     SequenceNotFound(SequenceId),
     #[error("asset {0} not found")]
     AssetNotFound(AssetId),
+    #[error("composition {0} not found")]
+    CompositionNotFound(CompositionId),
+    #[error("layer {0} not found")]
+    LayerNotFound(LayerId),
     #[error("asset {id} is still used by {clips} clip(s)")]
     AssetInUse { id: AssetId, clips: usize },
+    #[error("composition {id} is still used in {places} place(s)")]
+    CompositionInUse { id: CompositionId, places: usize },
+    #[error("a composition cannot contain itself, even indirectly")]
+    CompositionCycle,
     #[error("clips may not overlap on a track")]
     ClipOverlap,
     #[error("track is locked")]
