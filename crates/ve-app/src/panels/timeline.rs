@@ -511,6 +511,17 @@ fn draw_clip(
             theme::ACCENT,
         );
     }
+    // And one for a blend mode, because a clip that composites unusually is
+    // otherwise indistinguishable from its neighbours until it is selected.
+    if !clip.blend.is_normal() && rect.width() > 46.0 {
+        painter.text(
+            Pos2::new(rect.right() - 5.0, rect.bottom() - 5.0),
+            Align2::RIGHT_BOTTOM,
+            clip.blend.label().to_lowercase(),
+            FontId::proportional(9.0),
+            theme::ACCENT,
+        );
+    }
 }
 
 /// Truncates a label to fit, with an ellipsis.

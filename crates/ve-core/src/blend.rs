@@ -61,20 +61,10 @@ impl BlendMode {
         }
     }
 
-    /// Whether this is the default, which the renderer takes as the fast path
-    /// and the interface leaves unannotated.
+    /// Whether this is the default, which the timeline leaves unannotated and
+    /// the inspector shows as the resting state.
     pub fn is_normal(self) -> bool {
         self == BlendMode::Normal
-    }
-
-    /// Whether the mode's result depends on what is already composited beneath
-    /// the layer.
-    ///
-    /// True for everything except `Normal` over an empty backdrop, and the
-    /// reason a blended layer cannot be reordered freely: two layers with
-    /// different modes do not commute.
-    pub fn reads_backdrop(self) -> bool {
-        !self.is_normal()
     }
 }
 
