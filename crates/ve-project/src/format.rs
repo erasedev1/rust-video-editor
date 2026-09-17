@@ -10,7 +10,11 @@ pub const FORMAT_MAGIC: &str = "verge-project";
 ///
 /// Bump this whenever the on-disk shape changes in a way older builds cannot
 /// read, and add a migration in [`crate::migrate`] from the previous version.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// * **1** — the first released format.
+/// * **2** — a clip names a `source` (`{"asset": 3}` or `{"composition": 7}`)
+///   instead of an `asset`, because a clip can now hold a composition.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Conventional file extension.
 pub const PROJECT_EXTENSION: &str = "verge";

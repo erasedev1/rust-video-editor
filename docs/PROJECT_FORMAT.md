@@ -93,9 +93,17 @@ A file from a **newer** version is refused with a message naming both versions,
 rather than being read partially. A gap in the migration table is an error, not
 a silent skip.
 
-Version 1 is the first released format, so nothing needs migrating yet. The
-pipeline exists and is tested so that the first real format change is a one-line
-addition rather than new machinery.
+Version 1 was the first released format. Version 2 changed a clip's `asset`
+field into a tagged `source` — `{"asset": 3}` or `{"composition": 7}` — because a
+clip can now hold a composition as readily as a file. That is a shape version 1
+readers cannot understand, so it is a version rather than a defaulted field, and
+`migrate::clip_asset_to_source` is the one step that performs it. A version 1
+file therefore opens, reports the upgrade, and writes version 2 the next time it
+is saved.
+
+A migration that finds a clip already carrying a `source` leaves it alone rather
+than overwriting it, so a hand-edited or partially upgraded file migrates to
+something coherent instead of losing the composition it named.
 
 An **additive** field does not need a version bump at all: a new field that
 deserialises from a default reads an older file correctly, and an older build

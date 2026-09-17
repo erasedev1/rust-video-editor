@@ -5,7 +5,10 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use ve_core::{BlendMode, Clip, Interpolation, MediaInfo, Project, Size, VideoStreamInfo};
+use ve_core::{
+    BlendMode, Clip, CompositionLayer, CompositionSettings, Interpolation, MediaInfo, Project,
+    Size, Source, VideoStreamInfo,
+};
 use ve_project::{autosave, store, Autosave, ProjectError, FORMAT_MAGIC, FORMAT_VERSION};
 use ve_time::{Rate, Ticks};
 
@@ -45,6 +48,50 @@ fn sample_project(media: &Path) -> Project {
     clip.transform.opacity.set_keyframe(Ticks::from_seconds(1), 1.0, Interpolation::Linear);
     p.sequence_mut(seq).unwrap().track_mut(track).unwrap().insert_clip(clip).unwrap();
     p.sequence_mut(seq).unwrap().set_playhead(Ticks::from_seconds(3));
+    p
+}
+
+/// [`sample_project`] plus a composition holding media, nested inside another
+/// composition, with the outer one cut into the sequence. Everything the format
+/// has to carry for compositing, in one fixture.
+fn project_with_compositions(media: &Path) -> Project {
+    let mut p = sample_project(media);
+    let asset = p.assets[0].id;
+    let seq = p.active_sequence.unwrap();
+    let track = p.sequence(seq).unwrap().tracks[0].id;
+
+    let inner = p.add_composition("Lower Third", CompositionSettings::default());
+    let layer_id = p.new_layer_id();
+    p.composition_mut(inner).unwrap().push_layer(CompositionLayer::new(
+        layer_id,
+        "plate",
+        asset,
+        Ticks::ZERO,
+        Ticks::from_seconds(4),
+    ));
+
+    let outer = p.add_composition("Titles", CompositionSettings::default());
+    let nested_layer = p.new_layer_id();
+    let mut nested = CompositionLayer::new(
+        nested_layer,
+        "lower third",
+        inner,
+        Ticks::from_seconds(1),
+        Ticks::from_seconds(3),
+    );
+    nested.blend = BlendMode::Screen;
+    p.composition_mut(outer).unwrap().push_layer(nested);
+
+    let comp_clip_id = p.new_clip_id();
+    let comp_clip = Clip::new(
+        comp_clip_id,
+        outer,
+        "titles",
+        Ticks::ZERO,
+        Ticks::from_seconds(12),
+        Ticks::from_seconds(3),
+    );
+    p.sequence_mut(seq).unwrap().track_mut(track).unwrap().insert_clip(comp_clip).unwrap();
     p
 }
 
@@ -493,4 +540,165 @@ fn a_project_written_before_blend_modes_existed_loads_as_normal() {
     let sequence = loaded.active().unwrap();
     let clip = &sequence.tracks[0].clips()[0];
     assert_eq!(clip.blend, BlendMode::Normal, "a missing mode is Normal, not a failure");
+}
+
+#[test]
+fn a_version_1_file_is_migrated_when_it_is_opened() {
+    // A real version 1 document, as the first released build wrote them: a clip
+    // names an `asset`, and there is no composition list at all.
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("m.mp4");
+    fs::write(&media, b"m").unwrap();
+    let path = dir.path().join("v1.verge");
+
+    let doc = serde_json::json!({
+        "format": FORMAT_MAGIC,
+        "version": 1,
+        "app_version": "0.1.0",
+        "saved_at": "2026-01-01T00:00:00Z",
+        "saved_at_unix": 1767225600u64,
+        "project": {
+            "name": "Version One",
+            "assets": [{
+                "id": 1,
+                "name": "m.mp4",
+                "path": media.to_string_lossy(),
+                "info": {
+                    "duration": 300000000i64,
+                    "video": {
+                        "size": {"width": 1920, "height": 1080},
+                        "rate": {"num": 30, "den": 1},
+                        "duration": 300000000i64,
+                        "frame_count": 900,
+                        "codec": "h264",
+                        "pixel_format": "yuv420p",
+                        "sample_aspect_ratio": [1, 1],
+                    },
+                    "audio": null,
+                    "container": "mp4",
+                },
+            }],
+            "sequences": [{
+                "id": 2,
+                "name": "Sequence 1",
+                "settings": {
+                    "resolution": {"width": 1920, "height": 1080},
+                    "rate": {"num": 30, "den": 1},
+                    "sample_rate": 48000,
+                    "channels": 2,
+                },
+                "tracks": [{
+                    "id": 3,
+                    "kind": "video",
+                    "name": "V1",
+                    "clips": [{
+                        "id": 4,
+                        "name": "shot_01",
+                        "asset": 1,
+                        "source_in": 0,
+                        "timeline_start": 0,
+                        "duration": 100000000i64,
+                    }],
+                }],
+            }],
+            "active_sequence": 2,
+            "ids": 5,
+        },
+    });
+    fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    let outcome = store::load(&path).unwrap();
+    assert_eq!(outcome.migrated_from, Some(1), "the upgrade has to be reported");
+    assert!(
+        outcome.warnings.iter().any(|w| w.contains("version 2")),
+        "and named in the warnings: {:?}",
+        outcome.warnings
+    );
+
+    let clip = &outcome.project.active().unwrap().tracks[0].clips()[0];
+    assert_eq!(clip.source, Source::Asset(outcome.project.assets[0].id));
+    assert!(outcome.project.compositions.is_empty(), "there were none to read");
+
+    // And saving it again writes the current version, so the upgrade sticks.
+    store::save(&outcome.project, &path).unwrap();
+    assert_eq!(store::load(&path).unwrap().migrated_from, None);
+}
+
+#[test]
+fn compositions_and_their_nesting_survive_a_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("m.mp4");
+    fs::write(&media, b"m").unwrap();
+    let path = dir.path().join("comps.verge");
+    let original = project_with_compositions(&media);
+
+    store::save(&original, &path).unwrap();
+    let outcome = store::load(&path).unwrap();
+    assert!(
+        outcome.warnings.is_empty(),
+        "a clean project should load clean: {:?}",
+        outcome.warnings
+    );
+
+    // Equality across the whole composition list: every layer, its source, its
+    // blend mode, its transform and every ID.
+    assert_eq!(outcome.project.compositions, original.compositions);
+    // And the clip that holds the outer composition came back as a clip holding
+    // a composition, not as a clip pointing at asset number seven.
+    assert_eq!(
+        outcome.project.active().unwrap().tracks[0].clips(),
+        original.active().unwrap().tracks[0].clips()
+    );
+
+    let outer = outcome
+        .project
+        .compositions
+        .iter()
+        .find(|c| c.name == "Titles")
+        .expect("the outer composition");
+    assert_eq!(outer.layers.len(), 1);
+    assert_eq!(outer.layers[0].blend, BlendMode::Screen);
+    let inner = outer.layers[0].source.composition().expect("a nested composition");
+    assert_eq!(outcome.project.composition(inner).unwrap().name, "Lower Third");
+    assert_eq!(outcome.project.nesting_depth(outer.id), 2);
+}
+
+#[test]
+fn a_file_whose_compositions_form_a_cycle_opens_with_the_cycle_broken() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("m.mp4");
+    fs::write(&media, b"m").unwrap();
+    let path = dir.path().join("cycle.verge");
+    store::save(&project_with_compositions(&media), &path).unwrap();
+
+    // Hand-edit the inner composition to contain the outer one. Nothing in the
+    // editor can produce this; a text editor can, and the loader has to survive
+    // it rather than recursing forever at the first repaint.
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let comps = doc["project"]["compositions"].as_array_mut().unwrap();
+    let outer_id =
+        comps.iter().find(|c| c["name"] == "Titles").and_then(|c| c["id"].as_u64()).unwrap();
+    let inner = comps.iter_mut().find(|c| c["name"] == "Lower Third").unwrap();
+    inner["layers"].as_array_mut().unwrap().push(serde_json::json!({
+        "id": 9001,
+        "name": "loop",
+        "source": {"composition": outer_id},
+        "start": 0,
+        "duration": 10000000i64,
+    }));
+    fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    let outcome = store::load(&path).unwrap();
+    assert!(
+        outcome.warnings.iter().any(|w| w.contains("nesting cycle")),
+        "the repair has to be reported: {:?}",
+        outcome.warnings
+    );
+    let inner = outcome.project.compositions.iter().find(|c| c.name == "Lower Third").unwrap();
+    assert!(inner.nested().is_empty(), "the offending layer is gone");
+    assert!(
+        outcome.project.ids.peek() > 9001,
+        "and the hand-written id was counted, so a new layer cannot collide"
+    );
 }

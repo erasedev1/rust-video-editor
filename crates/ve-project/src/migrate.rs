@@ -6,7 +6,7 @@
 //! applied in sequence, which means only one step has to be written per format
 //! change no matter how old the file is.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::format::FORMAT_VERSION;
 use crate::ProjectError;
@@ -19,11 +19,51 @@ use crate::ProjectError;
 pub type MigrationFn = fn(&mut Value) -> Result<(), ProjectError>;
 
 /// Migrations from each version to the next, in ascending order.
+pub const MIGRATIONS: &[(u32, MigrationFn)] = &[(1, clip_asset_to_source)];
+
+/// **1 → 2.** A clip's `asset` becomes a tagged `source`.
 ///
-/// Version 1 is the first released format, so there is nothing to migrate from
-/// yet. The pipeline exists and is exercised by its own tests so that the first
-/// real format change is a one-line addition here rather than new machinery.
-pub const MIGRATIONS: &[(u32, MigrationFn)] = &[];
+/// Compositions can be cut into a sequence, so a clip's source is no longer
+/// necessarily a file. On disk that means `"asset": 3` becomes
+/// `"source": {"asset": 3}`, which is a shape older builds cannot read — hence a
+/// version rather than a defaulted field.
+///
+/// A clip that already carries a `source` is left alone: a file half-written by
+/// a newer build, or one a user has edited, should migrate to something coherent
+/// rather than being clobbered.
+fn clip_asset_to_source(doc: &mut Value) -> Result<(), ProjectError> {
+    let Some(sequences) = doc
+        .get_mut("project")
+        .and_then(|p| p.get_mut("sequences"))
+        .and_then(Value::as_array_mut)
+    else {
+        // A document with no sequences at all is odd but not broken, and a
+        // migration is not the place to start rejecting files.
+        return Ok(());
+    };
+
+    for sequence in sequences {
+        let Some(tracks) = sequence.get_mut("tracks").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for track in tracks {
+            let Some(clips) = track.get_mut("clips").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for clip in clips {
+                let Some(object) = clip.as_object_mut() else { continue };
+                if object.contains_key("source") {
+                    object.remove("asset");
+                    continue;
+                }
+                if let Some(asset) = object.remove("asset") {
+                    object.insert("source".into(), json!({ "asset": asset }));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Brings `doc` up to [`FORMAT_VERSION`], returning a description of each step
 /// applied so the UI can tell the user their file was upgraded.
@@ -63,7 +103,6 @@ pub fn migrate_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     /// A stand-in step, so the sequencing logic is covered before the first
     /// real format change needs it.
@@ -86,8 +125,8 @@ mod tests {
         let table: &[(u32, MigrationFn)] = &[(1, rename_title_to_name), (2, add_marker_list)];
         let mut doc = json!({"version": 1, "project": {"title": "Old"}});
 
-        // Only migrate as far as the table allows; FORMAT_VERSION is 1 today,
-        // so drive the loop manually to prove ordering.
+        // Driven manually rather than through `migrate_with`, so the ordering
+        // is asserted against a table that reaches further than the real one.
         let mut version = 1u32;
         for (from, step) in table {
             assert_eq!(*from, version);
@@ -99,6 +138,58 @@ mod tests {
         assert!(doc["project"].get("title").is_none());
         assert_eq!(doc["project"]["markers"], json!([]));
         assert_eq!(doc["version"], 3);
+    }
+
+    #[test]
+    fn a_version_1_clip_gains_a_tagged_source() {
+        let mut doc = json!({
+            "version": 1,
+            "project": {
+                "name": "Old",
+                "sequences": [{
+                    "tracks": [
+                        {"clips": [{"name": "a", "asset": 3}, {"name": "b", "asset": 4}]},
+                        {"clips": []},
+                    ]
+                }],
+            },
+        });
+
+        let applied = migrate_to_current(&mut doc).unwrap();
+        assert_eq!(applied.len(), 1, "one step from 1 to 2: {applied:?}");
+        assert_eq!(doc["version"], FORMAT_VERSION);
+
+        let clips = &doc["project"]["sequences"][0]["tracks"][0]["clips"];
+        assert_eq!(clips[0]["source"], json!({"asset": 3}));
+        assert_eq!(clips[1]["source"], json!({"asset": 4}));
+        assert!(clips[0].get("asset").is_none(), "the old field is gone");
+    }
+
+    #[test]
+    fn migrating_a_clip_that_already_has_a_source_keeps_it() {
+        // A hand-edited file, or one written by a newer build and re-versioned.
+        // Overwriting the source it already names would lose a nested
+        // composition, which is exactly the thing the version was bumped for.
+        let mut doc = json!({
+            "version": 1,
+            "project": {
+                "sequences": [{"tracks": [{"clips": [
+                    {"name": "nested", "source": {"composition": 9}, "asset": 3},
+                ]}]}],
+            },
+        });
+
+        migrate_to_current(&mut doc).unwrap();
+        let clip = &doc["project"]["sequences"][0]["tracks"][0]["clips"][0];
+        assert_eq!(clip["source"], json!({"composition": 9}));
+        assert!(clip.get("asset").is_none(), "the stale field goes with it");
+    }
+
+    #[test]
+    fn migrating_a_document_with_no_sequences_is_not_an_error() {
+        let mut doc = json!({"version": 1, "project": {"name": "Empty"}});
+        assert_eq!(migrate_to_current(&mut doc).unwrap().len(), 1);
+        assert_eq!(doc["version"], FORMAT_VERSION);
     }
 
     #[test]
