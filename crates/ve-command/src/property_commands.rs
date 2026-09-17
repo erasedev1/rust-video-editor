@@ -1,16 +1,25 @@
-//! Commands that set and animate clip properties.
+//! Commands that set and animate the properties of clips and layers.
 //!
 //! One command covers every animatable property rather than there being a
 //! `SetOpacity`, a `SetScale` and so on: [`ClipProperty`] names the target and
 //! [`PropertyValue`] carries the value. Adding an animatable parameter to the
 //! inspector therefore needs no new command type.
+//!
+//! A composition layer carries the same transform, audio and effect parameters a
+//! clip does, so [`SetLayerProperty`] reuses the same target enum and the same
+//! macro rather than duplicating the property table. Where they differ is what
+//! has to be looked up to reach the property, which is all the two commands do
+//! separately.
 
 use std::any::Any;
 
-use ve_core::{ClipId, EffectId, Interpolation, ParamValue, Project, Rgba, SequenceId, Vec2};
+use ve_core::{
+    ClipId, CompositionId, EffectId, Interpolation, LayerId, ParamValue, Project, Rgba,
+    SequenceId, Vec2,
+};
 use ve_time::Ticks;
 
-use crate::{Command, CommandError};
+use crate::{clip_mut, Command, CommandError};
 
 /// Which animatable value on a clip a command targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,17 +148,16 @@ macro_rules! with_property {
     }};
 }
 
-fn clip_mut(
+fn layer_mut(
     project: &mut Project,
-    sequence: SequenceId,
-    clip: ClipId,
-) -> Result<&mut ve_core::Clip, CommandError> {
+    composition: CompositionId,
+    layer: LayerId,
+) -> Result<&mut ve_core::CompositionLayer, CommandError> {
     project
-        .sequence_mut(sequence)
-        .ok_or(CommandError::SequenceNotFound(sequence))?
-        .find_clip_mut(clip)
-        .map(|(_, c)| c)
-        .ok_or(CommandError::ClipNotFound(clip))
+        .composition_mut(composition)
+        .ok_or(CommandError::CompositionNotFound(composition))?
+        .layer_mut(layer)
+        .ok_or(CommandError::LayerNotFound(layer))
 }
 
 /// Sets a property's static value, leaving any keyframes alone.
@@ -221,6 +229,92 @@ impl Command for SetClipProperty {
     fn merge(&mut self, next: &dyn Command) -> bool {
         match next.as_any().downcast_ref::<SetClipProperty>() {
             Some(other) if other.clip == self.clip && other.target == self.target => {
+                self.value = other.value;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Sets a property on a composition layer.
+///
+/// The layer-side twin of [`SetClipProperty`]: same targets, same values, same
+/// merging behaviour, reached through a composition and a layer instead of a
+/// sequence and a clip.
+#[derive(Debug)]
+pub struct SetLayerProperty {
+    composition: CompositionId,
+    layer: LayerId,
+    target: ClipProperty,
+    value: PropertyValue,
+    previous: Option<PropertyValue>,
+    label: String,
+}
+
+impl SetLayerProperty {
+    pub fn new(
+        composition: CompositionId,
+        layer: LayerId,
+        target: ClipProperty,
+        value: PropertyValue,
+    ) -> Self {
+        let label = format!("Set {}", target.label());
+        SetLayerProperty { composition, layer, target, value, previous: None, label }
+    }
+}
+
+impl Command for SetLayerProperty {
+    fn name(&self) -> &str {
+        &self.label
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let target = self.target.clone();
+        let value = self.value;
+        let layer = layer_mut(project, self.composition, self.layer)?;
+        let previous = with_property!(layer, &target, |p, Variant| {
+            let old = Variant(p.value);
+            match value {
+                Variant(v) => p.value = v,
+                other => {
+                    return Err(CommandError::Rejected(format!(
+                        "{other:?} is the wrong type for {}",
+                        target.label()
+                    )))
+                }
+            }
+            old
+        });
+        self.previous.get_or_insert(previous);
+        Ok(())
+    }
+
+    fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let previous = self
+            .previous
+            .ok_or_else(|| CommandError::Rejected("property was never set".into()))?;
+        let target = self.target.clone();
+        let layer = layer_mut(project, self.composition, self.layer)?;
+        with_property!(layer, &target, |p, Variant| {
+            if let Variant(v) = previous {
+                p.value = v;
+            }
+        });
+        Ok(())
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        match next.as_any().downcast_ref::<SetLayerProperty>() {
+            Some(other)
+                if other.layer == self.layer
+                    && other.composition == self.composition
+                    && other.target == self.target =>
+            {
                 self.value = other.value;
                 true
             }

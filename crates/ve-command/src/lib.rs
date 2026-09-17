@@ -15,20 +15,27 @@
 
 use std::any::Any;
 
-use ve_core::{Clip, ClipId, CoreError, Project, SequenceId, TrackId};
+use ve_core::{Clip, ClipId, CompositionId, CoreError, LayerId, Project, SequenceId, TrackId};
 use ve_time::Ticks;
 
 mod clip_commands;
+mod composition_commands;
 mod edit_commands;
 mod history;
 mod property_commands;
 mod structure_commands;
 
 pub use clip_commands::{AddClip, MoveClip, RemoveClip, SplitClip, TrimClip, TrimEdge};
+pub use composition_commands::{
+    composition_clip, AddComposition, AddLayer, LayerEdge, LayerFlag, MoveLayer,
+    MoveLayerInTime, NestClips, RemoveComposition, RemoveLayer, RenameComposition,
+    SetCompositionSettings, SetLayerBlendMode, SetLayerFlag, TrimLayer,
+};
 pub use edit_commands::{Compound, RollEdit, SetClipSpeed, ShiftClips, SlideClip, SlipClip};
 pub use history::{History, HistoryEntry};
 pub use property_commands::{
     ClipProperty, PropertyValue, RemoveClipKeyframe, SetClipKeyframe, SetClipProperty,
+    SetLayerProperty,
 };
 pub use structure_commands::{
     AddMarker, AddTrack, MoveTrack, RemoveMarker, RemoveTrack, SetClipBlendMode,
@@ -81,6 +88,10 @@ pub enum CommandError {
     TrackNotFound(TrackId),
     #[error("clip {0} not found")]
     ClipNotFound(ClipId),
+    #[error("composition {0} not found")]
+    CompositionNotFound(CompositionId),
+    #[error("layer {0} not found")]
+    LayerNotFound(LayerId),
     #[error("nothing to undo")]
     NothingToUndo,
     #[error("nothing to redo")]
@@ -132,6 +143,8 @@ impl From<CoreError> for CommandError {
             CoreError::ClipNotFound(id) => CommandError::ClipNotFound(id),
             CoreError::TrackNotFound(id) => CommandError::TrackNotFound(id),
             CoreError::SequenceNotFound(id) => CommandError::SequenceNotFound(id),
+            CoreError::CompositionNotFound(id) => CommandError::CompositionNotFound(id),
+            CoreError::LayerNotFound(id) => CommandError::LayerNotFound(id),
             other => CommandError::Core(other),
         }
     }

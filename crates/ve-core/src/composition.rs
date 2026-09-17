@@ -42,6 +42,7 @@ use crate::effect::{AudioProperties, Effect, Transform};
 use crate::geometry::{Rgba, Size};
 use crate::id::{CompositionId, LayerId};
 use crate::source::Source;
+use crate::CoreError;
 
 /// The canvas a composition renders onto.
 ///
@@ -169,6 +170,57 @@ impl CompositionLayer {
     #[inline]
     pub fn local_time_at(&self, at: Ticks) -> Ticks {
         at - self.start
+    }
+
+    /// Moves the layer along the composition's timeline without changing which
+    /// frames it shows.
+    pub fn move_to(&mut self, start: Ticks) {
+        self.start = start.clamp_non_negative();
+    }
+
+    /// Trims the head to a new start, rolling the source window to match so the
+    /// visible frames stay pinned where they were.
+    ///
+    /// The same rule as a clip's head trim. What a layer does *not* have is a
+    /// neighbour to answer to: nothing on a layer stack has to stay adjacent to
+    /// anything, so the only bounds are the minimum length and the start of the
+    /// source.
+    pub fn trim_start(
+        &mut self,
+        new_start: Ticks,
+        min_duration: Ticks,
+    ) -> Result<(), CoreError> {
+        let delta = new_start - self.start;
+        let new_duration = self.duration - delta;
+        if new_duration < min_duration {
+            return Err(CoreError::TrimTooShort);
+        }
+        let new_source_in = self.source_in + self.speed.timeline_to_source(delta);
+        if new_source_in.is_negative() {
+            return Err(CoreError::TrimBeyondSource);
+        }
+        self.start = new_start;
+        self.source_in = new_source_in;
+        self.duration = new_duration;
+        Ok(())
+    }
+
+    /// Trims the tail to a new end. The source in-point is unaffected.
+    pub fn trim_end(
+        &mut self,
+        new_end: Ticks,
+        min_duration: Ticks,
+        available_source: Ticks,
+    ) -> Result<(), CoreError> {
+        let new_duration = new_end - self.start;
+        if new_duration < min_duration {
+            return Err(CoreError::TrimTooShort);
+        }
+        if self.source_in + self.speed.timeline_to_source(new_duration) > available_source {
+            return Err(CoreError::TrimBeyondSource);
+        }
+        self.duration = new_duration;
+        Ok(())
     }
 
     pub fn is_animated(&self) -> bool {
