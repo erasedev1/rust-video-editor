@@ -50,6 +50,10 @@ jobs:
     name: Build ${{ matrix.name }}
     needs: prepare
     runs-on: ${{ matrix.os }}
+    # A cold build takes under ten minutes on every platform. This is headroom,
+    # not a target: its job is to turn a hung step into a failure someone can
+    # read, rather than something that sits there looking busy.
+    timeout-minutes: 45
     strategy:
       # Every platform is attempted, so one failure reports the others too
       # rather than masking them.
@@ -60,10 +64,14 @@ jobs:
             name: linux-x86_64
           - os: windows-2022
             name: windows-x86_64
+          # Apple silicon only. GitHub has retired its Intel macOS runners, so a
+          # `macos-13` job is never assigned one: it queues until something
+          # cancels it rather than failing, which is the worst way to break.
+          # Cross-compiling x86_64 from this runner is not a small change —
+          # FFmpeg is linked dynamically, so it would need x86_64 FFmpeg dylibs
+          # as well as the Rust target. Intel Mac users build from source.
           - os: macos-14
             name: macos-aarch64
-          - os: macos-13
-            name: macos-x86_64
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-ffmpeg
@@ -195,8 +203,7 @@ jobs:
             **Windows** — download the `windows-x86_64` zip, extract it, run
             `verge.exe`. The FFmpeg DLLs are bundled; nothing else is needed.
 
-            **macOS** — download the archive for your chip (`macos-aarch64` for
-            Apple silicon, `macos-x86_64` for Intel), then:
+            **macOS (Apple silicon)** — download `macos-aarch64`, then:
 
             ```sh
             brew install ffmpeg@6
@@ -213,6 +220,9 @@ jobs:
 
             Built on Ubuntu 24.04; other distributions need FFmpeg 6 runtime
             libraries under whatever names they use.
+
+            There is no Intel Mac build: GitHub no longer offers Intel macOS
+            runners. Building from source on an Intel Mac works — see the README.
 
             Verify a download against `SHA256SUMS`.
 

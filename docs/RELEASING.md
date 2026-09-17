@@ -29,12 +29,21 @@ tag for real.
 
 ## What gets built
 
-| Platform | Runner        | Archive                             |
-|----------|---------------|-------------------------------------|
-| Linux    | `ubuntu-24.04`| `verge-<version>-linux-x86_64.tar.gz`   |
-| Windows  | `windows-2022`| `verge-<version>-windows-x86_64.zip`    |
-| macOS    | `macos-14`    | `verge-<version>-macos-aarch64.tar.gz`  |
-| macOS    | `macos-13`    | `verge-<version>-macos-x86_64.tar.gz`   |
+| Platform              | Runner         | Archive                                |
+|-----------------------|----------------|----------------------------------------|
+| Linux x86-64          | `ubuntu-24.04` | `verge-<version>-linux-x86_64.tar.gz`  |
+| Windows x86-64        | `windows-2022` | `verge-<version>-windows-x86_64.zip`   |
+| macOS (Apple silicon) | `macos-14`     | `verge-<version>-macos-aarch64.tar.gz` |
+
+There is no Intel Mac build. GitHub has retired its Intel macOS runners, and a
+`macos-13` job is not rejected — it simply queues until something cancels it,
+which is how this was found: the first rehearsal sat for 47 minutes without ever
+being assigned a runner while the other three finished in under seven.
+
+Adding Intel back would mean cross-compiling from the Apple silicon runner.
+Because FFmpeg is linked dynamically, that needs x86-64 FFmpeg dylibs on an
+arm64 host as well as the Rust target, so it is real work rather than an extra
+matrix row. Intel Mac users can build from source in the meantime.
 
 Every platform is attempted even when one fails, so a single run reports the
 state of all four. The publish step runs only if all of them succeeded: a

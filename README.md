@@ -46,7 +46,8 @@ the workflow in `.github/workflows/release.yml`.
 
 - **Windows** — extract the zip and run `verge.exe`. The FFmpeg DLLs are
   bundled, so there is nothing to install.
-- **macOS** — `brew install ffmpeg@6`, then extract and run `./verge`.
+- **macOS (Apple silicon)** — `brew install ffmpeg@6`, then extract and run
+  `./verge`. There is no Intel build; build from source instead.
 - **Linux** — install the FFmpeg 6 runtime libraries, then extract and run
   `./verge`. The exact package names are in the archive's `INSTALL.txt`.
 
