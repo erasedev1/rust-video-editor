@@ -403,6 +403,7 @@ fn composition_settings_change_and_undo_as_one() {
         rate: Rate::FPS_24,
         duration: Ticks::from_seconds(30),
         background: ve_core::Rgba::WHITE,
+        color_space: ve_core::ColorSpace::Linear,
     };
     h.execute(&mut f.project, Box::new(SetCompositionSettings::new(comp, settings.clone())))
         .unwrap();

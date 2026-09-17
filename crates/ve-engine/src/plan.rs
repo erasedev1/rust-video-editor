@@ -28,8 +28,8 @@
 //! indices instead of matching down a chain of boxes.
 
 use ve_core::{
-    AssetId, BlendMode, ClipId, Composition, CompositionId, LayerId, Project, Rgba, Sequence,
-    Size, Source, TrackKind, TransformState,
+    AssetId, BlendMode, ClipId, ColorSpace, Composition, CompositionId, LayerId, Project, Rgba,
+    Sequence, Size, Source, TrackKind, TransformState,
 };
 use ve_time::Ticks;
 
@@ -99,6 +99,10 @@ pub struct PlanNode {
     pub composition: Option<CompositionId>,
     pub size: Size,
     pub background: Rgba,
+    /// How this node's own layers are combined. Per node rather than per plan:
+    /// a composition renders to its own target, so it can be authored in linear
+    /// light and still be laid into a perceptual sequence.
+    pub color_space: ColorSpace,
     /// The instant *this node's* own timeline is at, which for a nested node is
     /// its layer's source time rather than the playhead.
     pub time: Ticks,
@@ -142,6 +146,7 @@ impl RenderPlan {
                 composition: None,
                 size,
                 background,
+                color_space: ColorSpace::default(),
                 time,
                 items: Vec::new(),
             }],
@@ -310,6 +315,7 @@ impl Evaluator<'_> {
             composition: None,
             size: sequence.settings.resolution,
             background: sequence.settings.background,
+            color_space: sequence.settings.color_space,
             time: at,
             items,
         });
@@ -405,6 +411,7 @@ impl Evaluator<'_> {
             composition: Some(composition.id),
             size: composition.settings.resolution,
             background: composition.settings.background,
+            color_space: composition.settings.color_space,
             time: at,
             items,
         });

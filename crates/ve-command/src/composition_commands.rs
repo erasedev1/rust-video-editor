@@ -813,6 +813,11 @@ impl Command for NestClips {
                 // Opaque, unlike a composition made from scratch: this one stands
                 // in for a stretch of the edit, and the edit was opaque.
                 background: s.settings.background,
+                // Inherited for the same reason. Pre-composing is meant to be a
+                // reorganisation, not an edit: taking clips out of a linear
+                // sequence into a perceptual composition would change how they
+                // blend with each other and quietly alter the picture.
+                color_space: s.settings.color_space,
             })
             .ok_or(CommandError::SequenceNotFound(self.sequence))?;
 

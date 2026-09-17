@@ -8,7 +8,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::hint::black_box;
 use std::sync::Arc;
-use ve_core::{BlendMode, Rgba, Size, TransformState, Vec2};
+use ve_core::{BlendMode, ColorSpace, Rgba, Size, TransformState, Vec2};
 use ve_media::{PixelFormat, VideoFrame};
 use ve_render::{CompositeCache, CompositeKey, GpuContext, Layer, RenderTarget, Renderer};
 use ve_time::Ticks;
@@ -62,6 +62,7 @@ fn composite(c: &mut Criterion) {
                     &gpu.queue,
                     &target,
                     Rgba::BLACK,
+                    ColorSpace::Perceptual,
                     black_box(&list),
                 );
                 // Waiting for the GPU is what makes this a measurement of the
@@ -111,6 +112,7 @@ fn blend_modes(c: &mut Criterion) {
                     &gpu.queue,
                     &target,
                     Rgba::BLACK,
+                    ColorSpace::Perceptual,
                     black_box(&list),
                 );
                 let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
@@ -144,9 +146,16 @@ fn render_cache(c: &mut Criterion) {
 
     group.bench_function("hit", |b| {
         let mut cache = CompositeCache::with_budget_mb(256);
-        let key = CompositeKey::of(size, Rgba::BLACK, &layers);
+        let key = CompositeKey::of(size, Rgba::BLACK, ColorSpace::Perceptual, &layers);
         let target = cache.take_target(&gpu.device, size);
-        renderer.render(&gpu.device, &gpu.queue, &target, Rgba::BLACK, &layers);
+        renderer.render(
+            &gpu.device,
+            &gpu.queue,
+            &target,
+            Rgba::BLACK,
+            ColorSpace::Perceptual,
+            &layers,
+        );
         cache.insert(key, target);
 
         b.iter(|| {
@@ -173,9 +182,16 @@ fn render_cache(c: &mut Criterion) {
                     })
                 })
                 .collect();
-            let key = CompositeKey::of(size, Rgba::BLACK, &moved);
+            let key = CompositeKey::of(size, Rgba::BLACK, ColorSpace::Perceptual, &moved);
             let target = cache.take_target(&gpu.device, size);
-            renderer.render(&gpu.device, &gpu.queue, &target, Rgba::BLACK, &moved);
+            renderer.render(
+                &gpu.device,
+                &gpu.queue,
+                &target,
+                Rgba::BLACK,
+                ColorSpace::Perceptual,
+                &moved,
+            );
             present.blit_from(&gpu.device, &gpu.queue, &target);
             cache.insert(key, target);
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
@@ -183,9 +199,57 @@ fn render_cache(c: &mut Criterion) {
     });
 
     group.bench_function("key", |b| {
-        b.iter(|| black_box(CompositeKey::of(size, Rgba::BLACK, black_box(&layers))));
+        b.iter(|| {
+            black_box(CompositeKey::of(
+                size,
+                Rgba::BLACK,
+                ColorSpace::Perceptual,
+                black_box(&layers),
+            ))
+        });
     });
 
+    group.finish();
+}
+
+/// Perceptual against linear at the same layer count.
+///
+/// Linear compositing adds no shader work and no passes — the conversion
+/// belongs to the sampler and the attachment. That makes it free on hardware,
+/// where both are fixed-function, and decidedly not free on a software
+/// rasteriser, which has to execute the transfer function per texel and per
+/// pixel. Measured at roughly +48% on llvmpipe; see docs/BENCHMARKS.md.
+fn color_space(c: &mut Criterion) {
+    let Ok(gpu) = GpuContext::headless() else { return };
+    let mut renderer = Renderer::new(&gpu.device);
+    let size = Size::new(1920, 1080);
+    let target = RenderTarget::new(&gpu.device, size);
+    let frame = solid_frame(size);
+
+    let textures: Vec<_> =
+        (0..4).map(|_| renderer.upload(&gpu.device, &gpu.queue, &frame)).collect();
+    let list: Vec<Layer> = textures.iter().map(Layer::new).collect();
+
+    let mut group = c.benchmark_group("composite_1080p_4_layers");
+    for space in ColorSpace::ALL {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(space.label()),
+            &space,
+            |b, &space| {
+                b.iter(|| {
+                    renderer.render(
+                        &gpu.device,
+                        &gpu.queue,
+                        &target,
+                        Rgba::BLACK,
+                        black_box(space),
+                        black_box(&list),
+                    );
+                    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                });
+            },
+        );
+    }
     group.finish();
 }
 
@@ -204,5 +268,13 @@ fn transform_math(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, upload, composite, blend_modes, render_cache, transform_math);
+criterion_group!(
+    benches,
+    upload,
+    composite,
+    blend_modes,
+    render_cache,
+    transform_math,
+    color_space
+);
 criterion_main!(benches);

@@ -702,3 +702,40 @@ fn a_file_whose_compositions_form_a_cycle_opens_with_the_cycle_broken() {
         "and the hand-written id was counted, so a new layer cannot collide"
     );
 }
+
+#[test]
+fn a_project_without_a_colour_space_loads_as_perceptual() {
+    // The field was added after version 2 shipped, additively. A project
+    // authored before it existed has to keep compositing the way it was
+    // authored against — defaulting to linear would silently change every
+    // dissolve in every old project.
+    use ve_core::ColorSpace;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.verge");
+
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&store::to_json(&Project::with_default_sequence("Old")).unwrap())
+            .unwrap();
+    let settings = doc["project"]["sequences"][0]["settings"].as_object_mut().unwrap();
+    assert!(settings.remove("color_space").is_some(), "the field should be written");
+    fs::write(&path, doc.to_string()).unwrap();
+
+    let loaded = store::load(&path).unwrap();
+    assert_eq!(loaded.project.active().unwrap().settings.color_space, ColorSpace::Perceptual);
+}
+
+#[test]
+fn a_colour_space_survives_a_round_trip() {
+    use ve_core::ColorSpace;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("linear.verge");
+
+    let mut project = Project::with_default_sequence("Linear");
+    project.active_mut().unwrap().settings.color_space = ColorSpace::Linear;
+    store::save(&project, &path).unwrap();
+
+    let loaded = store::load(&path).unwrap();
+    assert_eq!(loaded.project.active().unwrap().settings.color_space, ColorSpace::Linear);
+}

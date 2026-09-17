@@ -3,19 +3,41 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use ve_core::Size;
+use ve_core::{ColorSpace, Size};
 use ve_media::{CacheKey, VideoFrame};
 use ve_metrics::{counters, Metrics};
 
-/// The texture format decoded frames are uploaded as.
+/// The format decoded frames are *stored* as.
 ///
-/// Deliberately **not** the `Srgb` variant. Video is composited non-linearly
-/// here, matching the default behaviour of the professional editors this is
-/// measured against: an 8-bit source blended in linear light shifts every
-/// crossfade and opacity ramp away from what an editor coming from those tools
-/// expects. A linear-light compositing mode belongs in the colour-management
-/// work later, as an explicit project setting, not as a silent default.
+/// Always the non-sRGB variant, because this is about storage, not
+/// interpretation. The same bytes are read back either literally or as sRGB
+/// depending on the composition's [`ColorSpace`], and which of those happens is
+/// chosen by the *view*, not the texture — see [`SRGB_FRAME_FORMAT`].
 pub const FRAME_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// The sRGB reinterpretation of [`FRAME_FORMAT`].
+///
+/// Every texture and target is created able to be viewed as either. Sampling
+/// through this view makes the hardware decode sRGB to linear on the way in,
+/// and rendering through it makes the hardware encode on the way out — so
+/// linear-light compositing costs a different view rather than any shader
+/// arithmetic. On hardware both conversions are fixed-function and effectively
+/// free; on a software rasteriser they are real per-texel work, which the
+/// `composite_1080p_4_layers` benchmark measures rather than assumes.
+///
+/// Doing the conversion this way, instead of in the shader, is what keeps
+/// 8 bits usable: the values *stored* stay gamma-encoded, where the codes are
+/// distributed the way the eye needs them. Blending linear light into a plain
+/// `Rgba8Unorm` target would band visibly in the shadows.
+pub const SRGB_FRAME_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// The storage format paired with the view format a colour space asks for.
+pub fn view_format_for(color_space: ColorSpace) -> wgpu::TextureFormat {
+    match color_space {
+        ColorSpace::Perceptual => FRAME_FORMAT,
+        ColorSpace::Linear => SRGB_FRAME_FORMAT,
+    }
+}
 
 /// A process-unique identity for an uploaded texture.
 ///
@@ -62,7 +84,10 @@ impl TextureId {
 pub struct GpuTexture {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
-    pub(crate) bind_group: wgpu::BindGroup,
+    /// One bind group per colour space, built at upload. They are a handful of
+    /// descriptors over the same pixels, so holding both costs nothing next to
+    /// the texture itself and removes any per-frame branch on the hot path.
+    bind_groups: [wgpu::BindGroup; ColorSpace::ALL.len()],
     size: Size,
     bytes: usize,
     id: TextureId,
@@ -100,11 +125,47 @@ impl GpuTexture {
     pub(crate) fn new(
         texture: wgpu::Texture,
         view: wgpu::TextureView,
-        bind_group: wgpu::BindGroup,
+        bind_groups: [wgpu::BindGroup; ColorSpace::ALL.len()],
         size: Size,
     ) -> Self {
         let bytes = size.pixel_count() as usize * 4;
-        GpuTexture { texture, view, bind_group, size, bytes, id: TextureId::next() }
+        GpuTexture { texture, view, bind_groups, size, bytes, id: TextureId::next() }
+    }
+
+    /// The bind group that samples this texture for a given colour space.
+    pub(crate) fn bind_group(&self, color_space: ColorSpace) -> &wgpu::BindGroup {
+        &self.bind_groups[color_space as usize]
+    }
+
+    /// Builds a sampling bind group per colour space over one texture.
+    pub(crate) fn bind_groups_for(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        texture: &wgpu::Texture,
+        label: &str,
+    ) -> [wgpu::BindGroup; ColorSpace::ALL.len()] {
+        ColorSpace::ALL.map(|space| {
+            let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(label),
+                format: Some(view_format_for(space)),
+                ..Default::default()
+            });
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                ],
+            })
+        })
     }
 
     /// Uploads a decoded frame into a new texture.
@@ -134,7 +195,10 @@ impl GpuTexture {
             dimension: wgpu::TextureDimension::D2,
             format: FRAME_FORMAT,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
+            // Declared so the same pixels can be sampled either literally or as
+            // sRGB, which is what makes the colour space a per-composition
+            // choice rather than a property baked in at upload.
+            view_formats: &[SRGB_FRAME_FORMAT],
         });
 
         const ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -191,22 +255,15 @@ impl GpuTexture {
         }
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("verge-frame-bind-group"),
+        let bind_groups = GpuTexture::bind_groups_for(
+            device,
             layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(sampler),
-                },
-            ],
-        });
+            sampler,
+            &texture,
+            "verge-frame-bind-group",
+        );
 
-        GpuTexture::new(texture, view, bind_group, size)
+        GpuTexture::new(texture, view, bind_groups, size)
     }
 }
 
@@ -225,25 +282,21 @@ impl GpuTexture {
     ) -> GpuTexture {
         let texture = target.texture().clone();
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("verge-nested-bind-group"),
+        // Both views again, so the level above can sample a nested composition
+        // in whichever space *it* composites in. The nested picture is stored
+        // encoded either way, so the two levels' choices stay independent.
+        let bind_groups = GpuTexture::bind_groups_for(
+            device,
             layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(sampler),
-                },
-            ],
-        });
+            sampler,
+            &texture,
+            "verge-nested-bind-group",
+        );
         let size = target.size();
         GpuTexture {
             texture,
             view,
-            bind_group,
+            bind_groups,
             size,
             bytes: 0,
             id: TextureId::from_content(content.raw()),

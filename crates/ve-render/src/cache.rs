@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use ve_core::{Rgba, Size, TransformState};
+use ve_core::{ColorSpace, Rgba, Size, TransformState};
 use ve_metrics::{counters, Metrics};
 
 use crate::renderer::Layer;
@@ -59,10 +59,19 @@ impl CompositeKey {
     /// Takes exactly what [`crate::Renderer::render`] takes, so the key cannot
     /// drift away from what is actually drawn: any new input the compositor
     /// starts reading has to be threaded through here to reach the shader.
-    pub fn of(size: Size, background: Rgba, layers: &[Layer<'_>]) -> Self {
+    pub fn of(
+        size: Size,
+        background: Rgba,
+        color_space: ColorSpace,
+        layers: &[Layer<'_>],
+    ) -> Self {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         size.hash(&mut hasher);
         hash_colour(background, &mut hasher);
+        // The same layers composited in the other space are a different
+        // picture. Leaving this out would make switching the setting a no-op
+        // on screen until something else happened to change the key.
+        color_space.hash(&mut hasher);
         // The count is hashed as well as each layer, so a trailing transparent
         // layer cannot hash the same as no layer at all.
         layers.len().hash(&mut hasher);

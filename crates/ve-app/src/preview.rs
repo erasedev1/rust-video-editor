@@ -197,7 +197,7 @@ impl Preview {
             });
         }
 
-        let key = CompositeKey::of(plan.size, plan.background, &layers);
+        let key = CompositeKey::of(plan.size, plan.background, plan.color_space, &layers);
 
         // Already composited: nothing to draw, and whoever needs it can sample
         // the cached target.
@@ -206,7 +206,14 @@ impl Preview {
         }
 
         let scratch = self.composites.take_target(device, plan.size);
-        self.renderer.render(device, queue, &scratch, plan.background, &layers);
+        self.renderer.render(
+            device,
+            queue,
+            &scratch,
+            plan.background,
+            plan.color_space,
+            &layers,
+        );
         // Cached even when something in it was still decoding. The key describes
         // exactly the layers that were drawn, so a hit on it is the same picture
         // rather than a stale one; the frames still arriving change the key, and

@@ -1,8 +1,8 @@
 //! Offscreen render targets.
 
-use ve_core::Size;
+use ve_core::{ColorSpace, Size};
 
-use crate::texture::FRAME_FORMAT;
+use crate::texture::{view_format_for, FRAME_FORMAT, SRGB_FRAME_FORMAT};
 
 /// A texture the compositor draws into.
 ///
@@ -12,6 +12,10 @@ use crate::texture::FRAME_FORMAT;
 pub struct RenderTarget {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    /// One attachment view per colour space. Which one a pass attaches decides
+    /// whether the hardware encodes on store, and so whether blending happens
+    /// in linear light.
+    views: [wgpu::TextureView; ColorSpace::ALL.len()],
     size: Size,
     format: wgpu::TextureFormat,
 }
@@ -43,10 +47,24 @@ impl RenderTarget {
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
+            // Rendering through the sRGB view makes the hardware encode on
+            // store, which is what lets linear blending land in 8 bits without
+            // banding.
+            view_formats: &[SRGB_FRAME_FORMAT],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        RenderTarget { texture, view, size, format }
+        // A target created with an explicitly non-default format — the readback
+        // tests use one — cannot be reinterpreted, so it keeps its own format
+        // for both entries rather than claiming an sRGB view it never declared.
+        let reinterpretable = format == FRAME_FORMAT;
+        let views = ColorSpace::ALL.map(|space| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("verge-target-view"),
+                format: Some(if reinterpretable { view_format_for(space) } else { format }),
+                ..Default::default()
+            })
+        });
+        RenderTarget { texture, view, views, size, format }
     }
 
     pub fn size(&self) -> Size {
@@ -59,6 +77,11 @@ impl RenderTarget {
 
     pub fn view(&self) -> &wgpu::TextureView {
         &self.view
+    }
+
+    /// The attachment view for a colour space.
+    pub fn view_for(&self, color_space: ColorSpace) -> &wgpu::TextureView {
+        &self.views[color_space as usize]
     }
 
     /// GPU memory this target occupies, for a cache budget.

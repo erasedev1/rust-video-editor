@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use ve_time::{Rate, SampleRate, Ticks, TimeRange, Timecode};
 
 use crate::clip::Clip;
-use crate::geometry::{Rgba, Size};
+use crate::geometry::{ColorSpace, Rgba, Size};
 use crate::id::{ClipId, MarkerId, SequenceId, TrackId};
 use crate::track::{Track, TrackKind};
 use crate::CoreError;
@@ -53,6 +53,11 @@ pub struct SequenceSettings {
     /// start at 01:00:00:00 rather than zero.
     #[serde(default)]
     pub start_timecode: Ticks,
+    /// Whether layers are combined in linear light. Defaulted on read, so a
+    /// project written before this existed keeps the behaviour it was authored
+    /// against rather than silently changing every dissolve in it.
+    #[serde(default)]
+    pub color_space: ColorSpace,
 }
 
 impl Default for SequenceSettings {
@@ -64,6 +69,7 @@ impl Default for SequenceSettings {
             channels: 2,
             background: Rgba::BLACK,
             start_timecode: Ticks::ZERO,
+            color_space: ColorSpace::default(),
         }
     }
 }

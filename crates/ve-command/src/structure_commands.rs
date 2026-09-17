@@ -520,3 +520,53 @@ impl Command for SetSequenceFormat {
         self
     }
 }
+
+/// Changes how a sequence combines its layers.
+///
+/// Its own command rather than a field on [`SetSequenceFormat`], because that
+/// one exists to adopt a clip's format on first drop and runs without anyone
+/// asking. Colour space is always a deliberate choice, and it changes every
+/// dissolve and every semi-transparent layer in the sequence at once, so it
+/// deserves its own entry in the undo menu.
+#[derive(Debug)]
+pub struct SetSequenceColorSpace {
+    sequence: SequenceId,
+    color_space: ve_core::ColorSpace,
+    previous: Option<ve_core::ColorSpace>,
+}
+
+impl SetSequenceColorSpace {
+    pub fn new(sequence: SequenceId, color_space: ve_core::ColorSpace) -> Self {
+        SetSequenceColorSpace { sequence, color_space, previous: None }
+    }
+}
+
+impl Command for SetSequenceColorSpace {
+    fn name(&self) -> &str {
+        "Set Colour Space"
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let seq = project
+            .sequence_mut(self.sequence)
+            .ok_or(CommandError::SequenceNotFound(self.sequence))?;
+        self.previous.get_or_insert(seq.settings.color_space);
+        seq.settings.color_space = self.color_space;
+        Ok(())
+    }
+
+    fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let previous =
+            self.previous.ok_or_else(|| CommandError::Rejected("never applied".into()))?;
+        project
+            .sequence_mut(self.sequence)
+            .ok_or(CommandError::SequenceNotFound(self.sequence))?
+            .settings
+            .color_space = previous;
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}

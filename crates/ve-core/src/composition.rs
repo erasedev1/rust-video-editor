@@ -39,7 +39,7 @@ use ve_time::{Rate, Ticks, TimeRange, Timecode};
 use crate::blend::BlendMode;
 use crate::clip::Speed;
 use crate::effect::{AudioProperties, Effect, Transform};
-use crate::geometry::{Rgba, Size};
+use crate::geometry::{ColorSpace, Rgba, Size};
 use crate::id::{CompositionId, LayerId};
 use crate::source::Source;
 use crate::CoreError;
@@ -59,6 +59,11 @@ pub struct CompositionSettings {
     /// opposite default from a sequence, which is what the viewer sees directly.
     #[serde(default)]
     pub background: Rgba,
+    /// Independent of the sequence's: a composition is rendered to a texture
+    /// that something else then samples, so it can be authored in linear light
+    /// and still be laid into a perceptual sequence.
+    #[serde(default)]
+    pub color_space: ColorSpace,
 }
 
 impl Default for CompositionSettings {
@@ -68,6 +73,7 @@ impl Default for CompositionSettings {
             rate: Rate::FPS_30,
             duration: Ticks::from_seconds(10),
             background: Rgba::TRANSPARENT,
+            color_space: ColorSpace::default(),
         }
     }
 }

@@ -2,7 +2,7 @@
 
 use egui::{DragValue, RichText, Ui};
 use ve_command::{ClipProperty, PropertyValue};
-use ve_core::{BlendMode, Vec2};
+use ve_core::{BlendMode, ColorSpace, Vec2};
 
 use crate::actions::Action;
 use crate::state::EditorState;
@@ -33,6 +33,10 @@ pub fn show(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
                 );
             }
         });
+        // Nothing selected is the natural place for the canvas's own settings:
+        // the panel is otherwise empty, and they describe what the preview is
+        // showing.
+        canvas_section(ui, state, actions);
         return;
     };
 
@@ -297,4 +301,53 @@ fn property_label(ui: &mut Ui, label: &str, animated: bool) {
     };
     ui.add_sized([72.0, 18.0], egui::Label::new(text).halign(egui::Align::LEFT))
         .on_hover_text(if animated { "animated" } else { "" });
+}
+
+/// Settings belonging to the canvas being viewed, rather than to any clip.
+fn canvas_section(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
+    let (title, current) = match state.viewing() {
+        Some(ve_engine::Viewing::Composition(id)) => match state.project.composition(id) {
+            Some(composition) => (
+                format!("COMPOSITION — {}", composition.name),
+                composition.settings.color_space,
+            ),
+            None => return,
+        },
+        _ => match state.active_sequence() {
+            Some(sequence) => {
+                (format!("SEQUENCE — {}", sequence.name), sequence.settings.color_space)
+            }
+            None => return,
+        },
+    };
+
+    ui.add_space(14.0);
+    ui.separator();
+    ui.label(RichText::new(title).small().color(theme::TEXT_FAINT));
+    ui.add_space(4.0);
+
+    ui.label(RichText::new("Compositing").small().color(theme::TEXT_DIM));
+    egui::Frame::new()
+        .fill(theme::PANEL_RAISED)
+        .corner_radius(theme::RADIUS)
+        .inner_margin(egui::Margin::symmetric(6, 5))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            for space in ColorSpace::ALL {
+                let selected = space == current;
+                if ui
+                    .selectable_label(selected, space.label())
+                    .on_hover_text(space.description())
+                    .clicked()
+                    && !selected
+                {
+                    actions.push(Action::SetColorSpace(space));
+                }
+            }
+        });
+    ui.label(
+        RichText::new("Changes every dissolve and semi-transparent layer on this canvas.")
+            .small()
+            .color(theme::TEXT_FAINT),
+    );
 }

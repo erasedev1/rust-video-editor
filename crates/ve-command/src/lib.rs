@@ -39,7 +39,7 @@ pub use property_commands::{
 };
 pub use structure_commands::{
     AddMarker, AddTrack, MoveTrack, RemoveMarker, RemoveTrack, SetClipBlendMode,
-    SetClipEnabled, SetSequenceFormat, SetTrackFlag, TrackFlag,
+    SetClipEnabled, SetSequenceColorSpace, SetSequenceFormat, SetTrackFlag, TrackFlag,
 };
 
 /// An undoable edit.

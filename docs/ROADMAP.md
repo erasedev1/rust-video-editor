@@ -31,8 +31,8 @@ that belongs with the playback work rather than with cutting.
   not recomposited ✅
 - Incremental invalidation: change one clip, recompute only what depends on it ✅
 - Blend modes as pipeline variants ✅ — normal, add, multiply and screen
-- Nested compositions as layers
-- Colour management, with linear-light compositing as an explicit setting
+- Nested compositions as layers ✅
+- Colour management, with linear-light compositing as an explicit setting ✅
 
 The four blend modes are the ones the fixed-function blender can evaluate from a
 premultiplied source, so each costs a pipeline variant and nothing else. Overlay,
@@ -40,6 +40,14 @@ soft light and the rest need the backdrop as a *texture* rather than as a blend
 factor, which means compositing into an intermediate target and reading a copy of
 it — the machinery nested compositions introduce, so they wait for it rather than
 arriving as a special case.
+
+Linear-light compositing is a per-canvas setting rather than a constant because
+both answers are defensible: blending encoded values makes a dissolve feel even
+and matches the established editors, and blending light is how light actually
+behaves. Sequences and compositions each carry their own, so a composition can
+be authored in linear and laid into a perceptual sequence. It defaults to
+perceptual, and a project written before the setting existed loads as perceptual
+rather than silently changing every dissolve in it.
 
 The cache is content-addressed — a picture is keyed on a hash of the textures,
 transforms, size and background that produced it — so invalidation is a

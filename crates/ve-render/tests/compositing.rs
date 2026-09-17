@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use ve_core::{BlendMode, Rgba, Size, TransformState, Vec2};
+use ve_core::{BlendMode, ColorSpace, Rgba, Size, TransformState, Vec2};
 use ve_media::{PixelFormat, VideoFrame};
 use ve_metrics::Metrics;
 use ve_render::{GpuContext, Layer, RenderTarget, Renderer};
@@ -72,8 +72,24 @@ impl Harness {
     }
 
     fn render(&mut self, background: Rgba, layers: &[Layer<'_>]) -> Vec<u8> {
+        self.render_in(ColorSpace::Perceptual, background, layers)
+    }
+
+    fn render_in(
+        &mut self,
+        color_space: ColorSpace,
+        background: Rgba,
+        layers: &[Layer<'_>],
+    ) -> Vec<u8> {
         let gpu = gpu();
-        self.renderer.render(&gpu.device, &gpu.queue, &self.target, background, layers);
+        self.renderer.render(
+            &gpu.device,
+            &gpu.queue,
+            &self.target,
+            background,
+            color_space,
+            layers,
+        );
         self.target.read_pixels(&gpu.device, &gpu.queue)
     }
 
@@ -340,7 +356,14 @@ fn readback_returns_tightly_packed_rows() {
     let size = Size::new(33, 5);
     let mut renderer = Renderer::new(&gpu.device);
     let target = RenderTarget::new(&gpu.device, size);
-    renderer.render(&gpu.device, &gpu.queue, &target, Rgba::new(1.0, 0.0, 0.0, 1.0), &[]);
+    renderer.render(
+        &gpu.device,
+        &gpu.queue,
+        &target,
+        Rgba::new(1.0, 0.0, 0.0, 1.0),
+        ColorSpace::Perceptual,
+        &[],
+    );
 
     let pixels = target.read_pixels(&gpu.device, &gpu.queue);
     assert_eq!(pixels.len(), (size.width * size.height * 4) as usize);
@@ -366,7 +389,14 @@ fn rendering_records_metrics() {
     let frame = solid_frame(Size::new(32, 32), RED);
 
     let texture = renderer.upload(&gpu.device, &gpu.queue, &frame);
-    renderer.render(&gpu.device, &gpu.queue, &target, OPAQUE_BLACK, &[Layer::new(&texture)]);
+    renderer.render(
+        &gpu.device,
+        &gpu.queue,
+        &target,
+        OPAQUE_BLACK,
+        ColorSpace::Perceptual,
+        &[Layer::new(&texture)],
+    );
 
     assert!(metrics.span_stats(ve_metrics::spans::UPLOAD).is_some());
     assert!(metrics.span_stats(ve_metrics::spans::COMPOSITE).is_some());
@@ -577,4 +607,149 @@ fn modes_can_be_mixed_within_one_composition() {
         ],
     );
     assert_colour(h.pixel(&pixels, 8, 8), [192, 192, 192, 255], "three modes in one pass");
+}
+
+// ---- linear-light compositing -----------------------------------------
+
+/// The sRGB transfer function, as the hardware applies it. Duplicated here on
+/// purpose: a test that reuses the renderer's own conversion would agree with
+/// it even if both were wrong.
+fn srgb_to_linear(encoded: f64) -> f64 {
+    if encoded <= 0.040_45 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(linear: f64) -> f64 {
+    if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Half of `value` in linear light, returned as an 8-bit encoded level.
+fn half_in_linear(value: u8) -> u8 {
+    let linear = srgb_to_linear(value as f64 / 255.0);
+    (linear_to_srgb(linear * 0.5) * 255.0).round() as u8
+}
+
+#[test]
+fn a_half_opaque_layer_over_black_differs_between_the_two_spaces() {
+    let size = Size::new(32, 32);
+    let mut h = Harness::new(size);
+    let texture = h.upload(&solid_frame(size, [255, 255, 255, 255]));
+    let fade = TransformState { opacity: 0.5, ..Default::default() };
+    let layer = [Layer::new(&texture).with_transform(fade)];
+
+    // Perceptual: the encoded values are halved, so white becomes 128.
+    let perceptual = h.render_in(ColorSpace::Perceptual, OPAQUE_BLACK, &layer);
+    assert_colour(h.pixel(&perceptual, 16, 16), [128, 128, 128, 255], "perceptual half");
+
+    // Linear: half the *light*, which re-encodes to about 188 — visibly
+    // brighter, and the whole reason this is a setting rather than a constant.
+    let expected = half_in_linear(255);
+    let linear = h.render_in(ColorSpace::Linear, OPAQUE_BLACK, &layer);
+    assert_colour(h.pixel(&linear, 16, 16), [expected, expected, expected, 255], "linear half");
+    assert!(expected > 180, "half of white in linear light should be near 188, got {expected}");
+}
+
+#[test]
+fn a_dissolve_between_two_pictures_lands_where_each_space_says_it_should() {
+    let size = Size::new(32, 32);
+    let mut h = Harness::new(size);
+    let bottom = h.upload(&solid_frame(size, [0, 0, 0, 255]));
+    let top = h.upload(&solid_frame(size, [255, 255, 255, 255]));
+    let fade = TransformState { opacity: 0.5, ..Default::default() };
+    let layers = [Layer::new(&bottom), Layer::new(&top).with_transform(fade)];
+
+    let perceptual = h.render_in(ColorSpace::Perceptual, OPAQUE_BLACK, &layers);
+    assert_colour(h.pixel(&perceptual, 16, 16), [128, 128, 128, 255], "perceptual midpoint");
+
+    let expected = half_in_linear(255);
+    let linear = h.render_in(ColorSpace::Linear, OPAQUE_BLACK, &layers);
+    assert_colour(
+        h.pixel(&linear, 16, 16),
+        [expected, expected, expected, 255],
+        "linear midpoint",
+    );
+}
+
+#[test]
+fn an_opaque_layer_is_identical_in_both_spaces() {
+    // Nothing is blended, so nothing depends on the space. If this ever
+    // differs, the conversion is being applied where it should not be — which
+    // would mean every untouched clip in a linear sequence shifted colour.
+    let size = Size::new(32, 32);
+    let mut h = Harness::new(size);
+
+    for colour in [[255u8, 0, 0, 255], [64, 128, 192, 255], [0, 0, 0, 255]] {
+        let texture = h.upload(&solid_frame(size, colour));
+        let layer = [Layer::new(&texture)];
+        let perceptual = h.render_in(ColorSpace::Perceptual, OPAQUE_BLACK, &layer);
+        let linear = h.render_in(ColorSpace::Linear, OPAQUE_BLACK, &layer);
+        assert_colour(h.pixel(&perceptual, 16, 16), colour, "perceptual passthrough");
+        assert_colour(h.pixel(&linear, 16, 16), colour, "linear passthrough");
+    }
+}
+
+#[test]
+fn additive_highlights_clip_later_in_linear_light() {
+    let size = Size::new(32, 32);
+    let mut h = Harness::new(size);
+    // Two mid-grey layers added together.
+    let texture = h.upload(&solid_frame(size, [128, 128, 128, 255]));
+    let layers =
+        [Layer::new(&texture), Layer::new(&texture).with_blend(ve_core::BlendMode::Add)];
+
+    // Perceptual adds the codes: 128 + 128 saturates at 255.
+    let perceptual = h.render_in(ColorSpace::Perceptual, OPAQUE_BLACK, &layers);
+    assert_colour(h.pixel(&perceptual, 16, 16), [255, 255, 255, 255], "perceptual add");
+
+    // Linear adds the light: 0.216 + 0.216 is 0.432, which encodes to about
+    // 188 — still plenty of headroom.
+    let doubled = srgb_to_linear(128.0 / 255.0) * 2.0;
+    let expected = (linear_to_srgb(doubled) * 255.0).round() as u8;
+    let linear = h.render_in(ColorSpace::Linear, OPAQUE_BLACK, &layers);
+    assert_colour(h.pixel(&linear, 16, 16), [expected, expected, expected, 255], "linear add");
+    assert!(expected < 255, "linear add should not have clipped, got {expected}");
+}
+
+#[test]
+fn a_background_keeps_its_colour_in_linear_light() {
+    // The clear value bypasses the attachment's encode, so it has to be encoded
+    // by hand. Getting that wrong turns a mid-grey background near-black.
+    let size = Size::new(16, 16);
+    let mut h = Harness::new(size);
+    let grey = Rgba::new(0.5, 0.5, 0.5, 1.0);
+
+    let perceptual = h.render_in(ColorSpace::Perceptual, grey, &[]);
+    let linear = h.render_in(ColorSpace::Linear, grey, &[]);
+    assert_colour(h.pixel(&linear, 8, 8), h.pixel(&perceptual, 8, 8), "background colour");
+}
+
+#[test]
+fn the_composite_key_separates_the_two_spaces() {
+    // The cache is content-addressed, so the space has to be part of the
+    // content. Without this, switching the setting would leave the previous
+    // picture on screen until some other input happened to change.
+    use ve_render::CompositeKey;
+
+    let gpu = gpu();
+    let renderer = Renderer::new(&gpu.device);
+    let size = Size::new(16, 16);
+    let texture = renderer.upload(&gpu.device, &gpu.queue, &solid_frame(size, RED));
+    let layers = [Layer::new(&texture)];
+
+    let perceptual = CompositeKey::of(size, OPAQUE_BLACK, ColorSpace::Perceptual, &layers);
+    let linear = CompositeKey::of(size, OPAQUE_BLACK, ColorSpace::Linear, &layers);
+    assert_ne!(perceptual, linear, "the same layers in two spaces are two pictures");
+
+    // And the key is still stable for the same inputs.
+    assert_eq!(
+        perceptual,
+        CompositeKey::of(size, OPAQUE_BLACK, ColorSpace::Perceptual, &layers)
+    );
 }

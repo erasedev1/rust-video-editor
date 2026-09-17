@@ -32,7 +32,7 @@ pub use blend::BlendMode;
 pub use clip::{Clip, Speed};
 pub use composition::{Composition, CompositionLayer, CompositionSettings};
 pub use effect::{AudioProperties, Effect, ParamValue, Transform, TransformState};
-pub use geometry::{Rgba, Size, Vec2};
+pub use geometry::{ColorSpace, Rgba, Size, Vec2};
 pub use id::{
     AssetId, ClipId, CompositionId, EffectId, Id, IdAllocator, LayerId, MarkerId, SequenceId,
     TrackId,

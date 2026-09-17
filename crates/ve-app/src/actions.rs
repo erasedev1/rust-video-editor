@@ -11,11 +11,13 @@ use std::path::PathBuf;
 use ve_command::{
     AddClip, AddMarker, AddTrack, ClipProperty, Command, Compound, MoveClip, MoveTrack,
     PropertyValue, RemoveClip, RemoveMarker, RemoveTrack, RollEdit, SetClipBlendMode,
-    SetClipEnabled, SetClipProperty, SetClipSpeed, SetSequenceFormat, SetTrackFlag, ShiftClips,
-    SlideClip, SlipClip, SplitClip, TrackFlag, TrimClip, TrimEdge,
+    SetClipEnabled, SetClipProperty, SetClipSpeed, SetCompositionSettings,
+    SetSequenceColorSpace, SetSequenceFormat, SetTrackFlag, ShiftClips, SlideClip, SlipClip,
+    SplitClip, TrackFlag, TrimClip, TrimEdge,
 };
 use ve_core::{
-    AssetId, BlendMode, Clip, ClipId, MarkerId, Project, SequenceId, Speed, TrackId, TrackKind,
+    AssetId, BlendMode, Clip, ClipId, ColorSpace, MarkerId, Project, SequenceId, Speed,
+    TrackId, TrackKind,
 };
 use ve_engine::PlaybackEngine;
 use ve_project::{autosave, store};
@@ -48,26 +50,54 @@ pub enum Action {
     // Places the clipboard at the playhead, on the selected track.
     Paste,
     SplitAtPlayhead,
-    SelectClip { clip: ClipId, track: TrackId, additive: bool },
+    SelectClip {
+        clip: ClipId,
+        track: TrackId,
+        additive: bool,
+    },
     SelectAll,
     // Takes every clip inside a rectangle swept across the timeline.
-    SelectClipsIn { range: ve_time::TimeRange, tracks: Vec<TrackId>, additive: bool },
+    SelectClipsIn {
+        range: ve_time::TimeRange,
+        tracks: Vec<TrackId>,
+        additive: bool,
+    },
     ClearSelection,
     ToggleSelectedEnabled,
-    SetClipProperty { clip: ClipId, property: ClipProperty, value: PropertyValue },
+    SetClipProperty {
+        clip: ClipId,
+        property: ClipProperty,
+        value: PropertyValue,
+    },
     // Keeps the clip's frames and changes how long it takes to play them, so
     // the clip's length on the timeline changes with it.
-    SetClipSpeed { clip: ClipId, speed: Speed },
+    SetClipSpeed {
+        clip: ClipId,
+        speed: Speed,
+    },
     // How the clip's picture combines with the layers beneath it.
-    SetClipBlendMode { clip: ClipId, blend: BlendMode },
+    SetClipBlendMode {
+        clip: ClipId,
+        blend: BlendMode,
+    },
+    /// Applies to whatever canvas is being viewed: the sequence, or a
+    /// composition when one is open.
+    SetColorSpace(ColorSpace),
 
     // Tracks
     AddTrack(TrackKind),
     RemoveTrack(TrackId),
     // Swaps a track with its neighbour of the same kind. `toward_top` is the
     // direction the timeline draws, not the order tracks are stored in.
-    MoveTrack { track: TrackId, toward_top: bool },
-    SetTrackFlag { track: TrackId, flag: TrackFlag, value: bool },
+    MoveTrack {
+        track: TrackId,
+        toward_top: bool,
+    },
+    SetTrackFlag {
+        track: TrackId,
+        flag: TrackFlag,
+        value: bool,
+    },
 
     // Markers
     AddMarkerAtPlayhead,
@@ -76,12 +106,43 @@ pub enum Action {
     GoToMarker(i32),
 
     // Timeline
-    AddAssetToTimeline { asset: AssetId, track: TrackId, at: Ticks },
-    MoveClipTo { clip: ClipId, track: TrackId, to: Ticks, coalesce: bool },
-    TrimClipTo { clip: ClipId, track: TrackId, edge: TrimEdge, to: Ticks, coalesce: bool },
-    RollEditTo { left: ClipId, right: ClipId, track: TrackId, to: Ticks, coalesce: bool },
-    SlipClipTo { clip: ClipId, track: TrackId, to_source_in: Ticks, coalesce: bool },
-    SlideClipTo { clip: ClipId, track: TrackId, to: Ticks, coalesce: bool },
+    AddAssetToTimeline {
+        asset: AssetId,
+        track: TrackId,
+        at: Ticks,
+    },
+    MoveClipTo {
+        clip: ClipId,
+        track: TrackId,
+        to: Ticks,
+        coalesce: bool,
+    },
+    TrimClipTo {
+        clip: ClipId,
+        track: TrackId,
+        edge: TrimEdge,
+        to: Ticks,
+        coalesce: bool,
+    },
+    RollEditTo {
+        left: ClipId,
+        right: ClipId,
+        track: TrackId,
+        to: Ticks,
+        coalesce: bool,
+    },
+    SlipClipTo {
+        clip: ClipId,
+        track: TrackId,
+        to_source_in: Ticks,
+        coalesce: bool,
+    },
+    SlideClipTo {
+        clip: ClipId,
+        track: TrackId,
+        to: Ticks,
+        coalesce: bool,
+    },
     EndGesture,
     SetTool(TimelineTool),
 
@@ -480,6 +541,40 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
                 Ok(()) => {
                     state.mark_edited();
                     state.set_status(Status::info(format!("speed {:.2}×", speed.as_f64())));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetColorSpace(color_space) => {
+            // Whichever canvas is on screen is the one being configured, so the
+            // control in the inspector always means what is in the preview.
+            let command: Box<dyn ve_command::Command> = match state.viewing() {
+                Some(ve_engine::Viewing::Composition(id)) => {
+                    let Some(composition) = state.project.composition(id) else { return };
+                    if composition.settings.color_space == color_space {
+                        return;
+                    }
+                    let mut settings = composition.settings.clone();
+                    settings.color_space = color_space;
+                    Box::new(SetCompositionSettings::new(id, settings))
+                }
+                _ => {
+                    let current =
+                        state.project.sequence(sequence_id).map(|s| s.settings.color_space);
+                    if current == Some(color_space) {
+                        return;
+                    }
+                    Box::new(SetSequenceColorSpace::new(sequence_id, color_space))
+                }
+            };
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.set_status(Status::info(format!(
+                        "compositing in {}",
+                        color_space.label().to_lowercase()
+                    )));
                 }
                 Err(e) => state.set_status(Status::warning(e.to_string())),
             }

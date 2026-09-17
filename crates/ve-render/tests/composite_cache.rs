@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use ve_core::{BlendMode, Rgba, Size, TransformState, Vec2};
+use ve_core::{BlendMode, ColorSpace, Rgba, Size, TransformState, Vec2};
 use ve_media::{PixelFormat, VideoFrame};
 use ve_metrics::{counters, Metrics};
 use ve_render::{
@@ -73,13 +73,20 @@ impl Harness {
     /// otherwise composite and store. Returns whether it was a hit.
     fn present(&mut self, background: Rgba, layers: &[Layer<'_>]) -> bool {
         let gpu = gpu();
-        let key = CompositeKey::of(SIZE, background, layers);
+        let key = CompositeKey::of(SIZE, background, ColorSpace::Perceptual, layers);
         if let Some(cached) = self.cache.get(&key) {
             assert!(self.present.blit_from(&gpu.device, &gpu.queue, cached));
             return true;
         }
         let scratch = self.cache.take_target(&gpu.device, SIZE);
-        self.renderer.render(&gpu.device, &gpu.queue, &scratch, background, layers);
+        self.renderer.render(
+            &gpu.device,
+            &gpu.queue,
+            &scratch,
+            background,
+            ColorSpace::Perceptual,
+            layers,
+        );
         assert!(self.present.blit_from(&gpu.device, &gpu.queue, &scratch));
         self.cache.insert(key, scratch);
         false
@@ -105,8 +112,8 @@ fn the_same_composition_hashes_the_same_way_twice() {
     let texture = h.upload(RED);
     let layers = [Layer::new(&texture)];
 
-    let first = CompositeKey::of(SIZE, BLACK, &layers);
-    let second = CompositeKey::of(SIZE, BLACK, &layers);
+    let first = CompositeKey::of(SIZE, BLACK, ColorSpace::Perceptual, &layers);
+    let second = CompositeKey::of(SIZE, BLACK, ColorSpace::Perceptual, &layers);
     assert_eq!(first, second, "a composition must be its own cache key");
 }
 
@@ -116,30 +123,64 @@ fn every_input_the_compositor_reads_is_part_of_the_key() {
     let red = h.upload(RED);
     let green = h.upload(GREEN);
 
-    let base = CompositeKey::of(SIZE, BLACK, &[Layer::new(&red)]);
+    let base = CompositeKey::of(SIZE, BLACK, ColorSpace::Perceptual, &[Layer::new(&red)]);
 
     let moved = TransformState { position: Vec2::new(4.0, 0.0), ..Default::default() };
     let faded = TransformState { opacity: 0.5, ..Default::default() };
 
     let cases: [(&str, CompositeKey); 7] = [
-        ("a different source", CompositeKey::of(SIZE, BLACK, &[Layer::new(&green)])),
+        (
+            "a different source",
+            CompositeKey::of(SIZE, BLACK, ColorSpace::Perceptual, &[Layer::new(&green)]),
+        ),
         (
             "a moved layer",
-            CompositeKey::of(SIZE, BLACK, &[Layer::new(&red).with_transform(moved)]),
+            CompositeKey::of(
+                SIZE,
+                BLACK,
+                ColorSpace::Perceptual,
+                &[Layer::new(&red).with_transform(moved)],
+            ),
         ),
         (
             "a faded layer",
-            CompositeKey::of(SIZE, BLACK, &[Layer::new(&red).with_transform(faded)]),
+            CompositeKey::of(
+                SIZE,
+                BLACK,
+                ColorSpace::Perceptual,
+                &[Layer::new(&red).with_transform(faded)],
+            ),
         ),
-        ("another background", CompositeKey::of(SIZE, Rgba::WHITE, &[Layer::new(&red)])),
-        ("another size", CompositeKey::of(Size::new(64, 64), BLACK, &[Layer::new(&red)])),
+        (
+            "another background",
+            CompositeKey::of(SIZE, Rgba::WHITE, ColorSpace::Perceptual, &[Layer::new(&red)]),
+        ),
+        (
+            "another size",
+            CompositeKey::of(
+                Size::new(64, 64),
+                BLACK,
+                ColorSpace::Perceptual,
+                &[Layer::new(&red)],
+            ),
+        ),
         (
             "an extra layer",
-            CompositeKey::of(SIZE, BLACK, &[Layer::new(&red), Layer::new(&green)]),
+            CompositeKey::of(
+                SIZE,
+                BLACK,
+                ColorSpace::Perceptual,
+                &[Layer::new(&red), Layer::new(&green)],
+            ),
         ),
         (
             "another blend mode",
-            CompositeKey::of(SIZE, BLACK, &[Layer::new(&red).with_blend(BlendMode::Screen)]),
+            CompositeKey::of(
+                SIZE,
+                BLACK,
+                ColorSpace::Perceptual,
+                &[Layer::new(&red).with_blend(BlendMode::Screen)],
+            ),
         ),
     ];
     for (what, key) in cases {
@@ -155,8 +196,18 @@ fn layer_order_is_part_of_the_key() {
 
     // Swapping two layers changes which one is on top, so it has to change the
     // key even though the set of layers is identical.
-    let bottom_red = CompositeKey::of(SIZE, BLACK, &[Layer::new(&red), Layer::new(&green)]);
-    let bottom_green = CompositeKey::of(SIZE, BLACK, &[Layer::new(&green), Layer::new(&red)]);
+    let bottom_red = CompositeKey::of(
+        SIZE,
+        BLACK,
+        ColorSpace::Perceptual,
+        &[Layer::new(&red), Layer::new(&green)],
+    );
+    let bottom_green = CompositeKey::of(
+        SIZE,
+        BLACK,
+        ColorSpace::Perceptual,
+        &[Layer::new(&green), Layer::new(&red)],
+    );
     assert_ne!(bottom_red, bottom_green);
 }
 
@@ -170,8 +221,18 @@ fn an_opacity_above_one_hashes_as_fully_opaque() {
     let opaque = TransformState { opacity: 1.0, ..Default::default() };
     let louder = TransformState { opacity: 4.0, ..Default::default() };
     assert_eq!(
-        CompositeKey::of(SIZE, BLACK, &[Layer::new(&texture).with_transform(opaque)]),
-        CompositeKey::of(SIZE, BLACK, &[Layer::new(&texture).with_transform(louder)]),
+        CompositeKey::of(
+            SIZE,
+            BLACK,
+            ColorSpace::Perceptual,
+            &[Layer::new(&texture).with_transform(opaque)]
+        ),
+        CompositeKey::of(
+            SIZE,
+            BLACK,
+            ColorSpace::Perceptual,
+            &[Layer::new(&texture).with_transform(louder)]
+        ),
     );
 }
 
@@ -320,7 +381,7 @@ fn pictures_of_different_sizes_coexist() {
     assert_eq!(bigger.size(), Size::new(64, 64));
     assert_eq!(h.cache.len(), 1, "the smaller picture is still cached");
 
-    let key = CompositeKey::of(Size::new(64, 64), BLACK, &[]);
+    let key = CompositeKey::of(Size::new(64, 64), BLACK, ColorSpace::Perceptual, &[]);
     h.cache.insert(key, bigger);
     assert_eq!(h.cache.len(), 2);
     assert!(h.cache.get(&key).is_some());
@@ -378,7 +439,7 @@ fn hits_and_misses_are_reported_to_the_metrics() {
     let texture = renderer.upload(&gpu.device, &gpu.queue, &solid_frame(SIZE, RED));
 
     let layers = [Layer::new(&texture)];
-    let key = CompositeKey::of(SIZE, BLACK, &layers);
+    let key = CompositeKey::of(SIZE, BLACK, ColorSpace::Perceptual, &layers);
 
     assert!(cache.get(&key).is_none());
     let target = cache.take_target(&gpu.device, SIZE);
@@ -455,12 +516,19 @@ impl Harness {
     /// the preview does for a nested composition.
     fn render_nested(&mut self, background: Rgba, layers: &[Layer<'_>]) -> CompositeKey {
         let gpu = gpu();
-        let key = CompositeKey::of(SIZE, background, layers);
+        let key = CompositeKey::of(SIZE, background, ColorSpace::Perceptual, layers);
         if self.cache.touch(&key) {
             return key;
         }
         let target = self.cache.take_target(&gpu.device, SIZE);
-        self.renderer.render(&gpu.device, &gpu.queue, &target, background, layers);
+        self.renderer.render(
+            &gpu.device,
+            &gpu.queue,
+            &target,
+            background,
+            ColorSpace::Perceptual,
+            layers,
+        );
         self.cache.insert(key, target);
         key
     }
@@ -564,14 +632,19 @@ fn a_nested_composite_can_be_a_different_size_from_its_parent() {
     // then drawn into the larger one. Both live in the cache at once.
     let frame = solid_frame(small, RED);
     let texture = renderer.upload(&gpu.device, &gpu.queue, &frame);
-    let nested_key = CompositeKey::of(small, Rgba::TRANSPARENT, &[Layer::new(&texture)]);
+    let nested_key = CompositeKey::of(
+        small,
+        Rgba::TRANSPARENT,
+        ColorSpace::Perceptual,
+        &[Layer::new(&texture)],
+    );
     let nested_target = cache.take_target(&gpu.device, small);
     assert_eq!(nested_target.size(), small);
     cache.insert(nested_key, nested_target);
 
     let root_target = cache.take_target(&gpu.device, SIZE);
     assert_eq!(root_target.size(), SIZE);
-    let root_key = CompositeKey::of(SIZE, BLACK, &[]);
+    let root_key = CompositeKey::of(SIZE, BLACK, ColorSpace::Perceptual, &[]);
     cache.insert(root_key, root_target);
 
     assert_eq!(cache.len(), 2);

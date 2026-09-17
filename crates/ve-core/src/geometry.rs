@@ -82,3 +82,51 @@ impl Default for Size {
         Size::new(1920, 1080)
     }
 }
+
+/// How colour is treated when layers are combined.
+///
+/// Video arrives gamma-encoded: an 8-bit `128` is roughly half of *perceived*
+/// brightness, not half the light. Which of those two a compositor blends is a
+/// real choice, and both answers are defensible, so it is a project setting
+/// rather than a constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorSpace {
+    /// Blend the encoded values directly, as the established editors do by
+    /// default. A 50% dissolve lands halfway between the two pictures *as they
+    /// look*, which is what an editor coming from those tools expects, and what
+    /// makes a fade feel even from end to end.
+    #[default]
+    Perceptual,
+    /// Convert to linear light before blending and back on store, which is how
+    /// light actually adds. Physically correct, and visibly different: a 50%
+    /// dissolve sits brighter than the perceptual midpoint, and additive
+    /// compositing of highlights stops clipping early.
+    Linear,
+}
+
+impl ColorSpace {
+    pub const ALL: [ColorSpace; 2] = [ColorSpace::Perceptual, ColorSpace::Linear];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ColorSpace::Perceptual => "Perceptual",
+            ColorSpace::Linear => "Linear light",
+        }
+    }
+
+    /// What the control's tooltip says, so the difference is discoverable
+    /// rather than folklore.
+    pub fn description(self) -> &'static str {
+        match self {
+            ColorSpace::Perceptual => {
+                "Blend encoded values. Matches the established editors; fades \
+                 feel even."
+            }
+            ColorSpace::Linear => {
+                "Blend in linear light. Physically correct; dissolves and \
+                 additive highlights come out brighter."
+            }
+        }
+    }
+}

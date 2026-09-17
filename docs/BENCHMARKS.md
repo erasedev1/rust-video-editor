@@ -144,6 +144,27 @@ Three things worth reading off this:
 The cheapest case is not in the table: when the composition is unchanged the
 preview does no GPU work at all, so there is nothing to measure but the key.
 
+### Colour space
+
+Perceptual against linear light, four 1080p layers, same scene:
+
+| Colour space | Time     |
+|--------------|---------:|
+| Perceptual   | 16.80 ms |
+| Linear light | 25.00 ms |
+
+**Linear costs about 48% more here, and that number is about the rasteriser
+rather than about the design.** Linear compositing adds no shader work, no extra
+pass and no copy: the conversion belongs to the texture unit on sample and the
+output merger on store. Both are fixed-function on a GPU and effectively free.
+llvmpipe has no such hardware, so it executes the sRGB transfer function per
+texel and per pixel in software, and that is what this measures.
+
+What the figure is good for is catching a regression that moves the conversion
+somewhere it does not belong — into the shader, or into an extra pass. What it
+should not be read as is the cost on real hardware, which is not measured here
+because this machine has no GPU.
+
 ## Live measurements
 
 The editor's own overlay reports what it is doing, measured the same way. From

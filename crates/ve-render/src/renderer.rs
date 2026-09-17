@@ -1,12 +1,12 @@
 //! The compositor.
 
 use bytemuck::{Pod, Zeroable};
-use ve_core::{BlendMode, Rgba, TransformState};
+use ve_core::{BlendMode, ColorSpace, Rgba, TransformState};
 use ve_media::VideoFrame;
 use ve_metrics::{spans, Metrics};
 
 use crate::target::RenderTarget;
-use crate::texture::{GpuTexture, FRAME_FORMAT};
+use crate::texture::{view_format_for, GpuTexture, FRAME_FORMAT};
 use crate::transform::{layer_matrix, Matrix4};
 
 /// Per-layer data handed to the shader.
@@ -54,12 +54,17 @@ impl<'a> Layer<'a> {
 /// between the layer draws, and a nested composition becomes a layer whose
 /// texture is another target's output.
 pub struct Renderer {
-    /// One pipeline per blend mode, in [`BlendMode::ALL`] order.
+    /// One pipeline per (colour space, blend mode) pair, in [`ColorSpace::ALL`]
+    /// then [`BlendMode::ALL`] order.
     ///
-    /// Built up front rather than on demand: they share a shader module and
-    /// differ only in blend state, so the whole set costs a few milliseconds
-    /// once, and a mode chosen mid-drag never stalls a frame compiling.
-    pipelines: [wgpu::RenderPipeline; BlendMode::ALL.len()],
+    /// The colour space is an axis here rather than a uniform because it is a
+    /// property of the *attachment*: blending in linear light means rendering
+    /// through an sRGB view, and a pipeline's target format has to match the
+    /// view the pass attaches. Built up front rather than on demand — they
+    /// share a shader module and differ only in blend state and target format,
+    /// so the whole set costs a few milliseconds once, and a mode or space
+    /// chosen mid-drag never stalls a frame compiling.
+    pipelines: [wgpu::RenderPipeline; ColorSpace::ALL.len() * BlendMode::ALL.len()],
     uniform_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -186,51 +191,62 @@ impl Renderer {
             immediate_size: 0,
         });
 
-        // One pipeline per mode. Everything but the blend state is identical,
+        // Everything but the blend state and the target format is identical,
         // and the shader module is shared, so the driver compiles the same
         // program once and varies the fixed-function state around it.
-        let pipelines = BlendMode::ALL.map(|mode| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("verge-composite-pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    // No vertex buffers: the quad comes from the vertex index.
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        // Premultiplied throughout: the shader already
-                        // multiplied colour by alpha, so every mode's source
-                        // factor works on a premultiplied value. See
-                        // [`blend_state`].
-                        blend: Some(blend_state(mode)),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    // Layers are routinely mirrored by a negative scale, and a
-                    // mirrored layer must not disappear.
-                    cull_mode: None,
-                    unclipped_depth: false,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    conservative: false,
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        });
+        //
+        // A target created with some other format — the readback tests use one
+        // — cannot be reinterpreted as sRGB, so its pipelines keep that format
+        // for both spaces and the linear pair simply never gets used.
+        let reinterpretable = format == FRAME_FORMAT;
+        let mut built = Vec::with_capacity(ColorSpace::ALL.len() * BlendMode::ALL.len());
+        for space in ColorSpace::ALL {
+            let target_format = if reinterpretable { view_format_for(space) } else { format };
+            for mode in BlendMode::ALL {
+                built.push(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("verge-composite-pipeline"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        // No vertex buffers: the quad comes from the vertex index.
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: target_format,
+                            // Premultiplied throughout: the shader already
+                            // multiplied colour by alpha, so every mode's source
+                            // factor works on a premultiplied value. See
+                            // [`blend_state`].
+                            blend: Some(blend_state(mode)),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        // Layers are routinely mirrored by a negative scale, and a
+                        // mirrored layer must not disappear.
+                        cull_mode: None,
+                        unclipped_depth: false,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        conservative: false,
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                }));
+            }
+        }
+        let pipelines: [wgpu::RenderPipeline; ColorSpace::ALL.len() * BlendMode::ALL.len()] =
+            built.try_into().expect("one pipeline per colour space and blend mode");
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("verge-frame-sampler"),
@@ -315,6 +331,7 @@ impl Renderer {
         queue: &wgpu::Queue,
         target: &RenderTarget,
         background: Rgba,
+        color_space: ColorSpace,
         layers: &[Layer<'_>],
     ) {
         let _span = self.metrics.as_ref().map(|m| m.span(spans::COMPOSITE));
@@ -346,18 +363,22 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("verge-composite-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target.view(),
+                    // Attaching the sRGB view is what puts the blender in
+                    // linear light: the hardware decodes the destination and
+                    // encodes the result, so the arithmetic in between is on
+                    // light rather than on codes.
+                    view: target.view_for(color_space),
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         // Clearing to a premultiplied background keeps the
                         // target consistent with what the layers write.
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: background.r * background.a,
-                            g: background.g * background.a,
-                            b: background.b * background.a,
-                            a: background.a,
-                        }),
+                        // A clear value is written without the sRGB encode the
+                        // attachment applies to shader output, so it has to be
+                        // supplied in the space the target stores. Encoding it
+                        // here keeps a linear composition's background the
+                        // colour the user picked.
+                        load: wgpu::LoadOp::Clear(clear_colour(background, color_space)),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -375,22 +396,22 @@ impl Renderer {
             let mut bound: Option<BlendMode> = None;
             for (i, layer) in layers.iter().enumerate() {
                 if bound != Some(layer.blend) {
-                    pass.set_pipeline(self.pipeline_for(layer.blend));
+                    pass.set_pipeline(self.pipeline_for(color_space, layer.blend));
                     bound = Some(layer.blend);
                 }
                 let offset = (i as u32) * self.uniform_stride;
                 pass.set_bind_group(0, &self.uniform_bind_group, &[offset]);
-                pass.set_bind_group(1, &layer.texture.bind_group, &[]);
+                pass.set_bind_group(1, layer.texture.bind_group(color_space), &[]);
                 pass.draw(0..4, 0..1);
             }
         }
         queue.submit(Some(encoder.finish()));
     }
 
-    /// The pipeline that implements a blend mode.
-    fn pipeline_for(&self, mode: BlendMode) -> &wgpu::RenderPipeline {
-        let index = BlendMode::ALL.iter().position(|m| *m == mode).unwrap_or(0);
-        &self.pipelines[index]
+    /// The pipeline that implements a blend mode in a colour space.
+    fn pipeline_for(&self, space: ColorSpace, mode: BlendMode) -> &wgpu::RenderPipeline {
+        let mode_index = BlendMode::ALL.iter().position(|m| *m == mode).unwrap_or(0);
+        &self.pipelines[space as usize * BlendMode::ALL.len() + mode_index]
     }
 
     /// The uniform buffer's per-layer stride, which must satisfy the device's
@@ -442,5 +463,41 @@ impl Renderer {
         self.uniform_bind_group = bind_group;
         self.uniform_capacity = capacity;
         log::debug!("layer uniform buffer grown to {capacity} layers");
+    }
+}
+
+/// The clear colour to hand a pass, in the space the attachment expects.
+///
+/// A clear value for an sRGB attachment is specified in **linear** light and
+/// encoded by the hardware, exactly as shader output is. The background stored
+/// on a sequence is a colour someone picked in a colour well, so it is an
+/// encoded value like `#808080`; handing that straight to a linear pass would
+/// have the hardware encode it a second time and wash it out.
+///
+/// So the conversion here decodes rather than encodes, which is what makes the
+/// same background swatch look the same in both spaces. Alpha is applied after
+/// the decode, because premultiplication has to happen in whichever space the
+/// blending will.
+fn clear_colour(background: Rgba, color_space: ColorSpace) -> wgpu::Color {
+    let channel = |value: f64| match color_space {
+        ColorSpace::Perceptual => value * background.a,
+        ColorSpace::Linear => srgb_to_linear(value) * background.a,
+    };
+    wgpu::Color {
+        r: channel(background.r),
+        g: channel(background.g),
+        b: channel(background.b),
+        a: background.a,
+    }
+}
+
+/// The inverse sRGB transfer function, matching what the hardware applies when
+/// it samples an sRGB view.
+fn srgb_to_linear(channel: f64) -> f64 {
+    let c = channel.clamp(0.0, 1.0);
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
     }
 }

@@ -282,11 +282,43 @@ colour management all multiply what a hit is worth.
 Output is **premultiplied**, paired with a `One / OneMinusSrcAlpha` blend. That
 is what stops a nested composition double-applying its own alpha at every level.
 
-Frames are uploaded as non-sRGB `Rgba8Unorm` and composited **non-linearly**,
-matching the default behaviour of the established professional tools. An 8-bit
-source blended in linear light shifts every crossfade and opacity ramp away from
-what an editor coming from those tools expects. A linear-light mode belongs with
-colour management, as an explicit project setting, not as a silent default.
+Frames are **stored** as non-sRGB `Rgba8Unorm`. How they are *interpreted* when
+combined is a per-canvas setting, `ColorSpace`:
+
+- **Perceptual** (the default) blends the encoded values directly, as the
+  established editors do. A 50% dissolve lands halfway between the two pictures
+  as they look, which is what makes a fade feel even end to end.
+- **Linear** converts to linear light before blending and back on store. A 50%
+  dissolve of white over black comes out at 188 rather than 128, and additive
+  highlights stop clipping early.
+
+Neither is wrong, which is exactly why it is a setting rather than a constant.
+It defaults to perceptual, and a project written before the setting existed
+loads as perceptual, so no existing edit changes underneath anyone.
+
+The conversion is the **hardware's**, not the shader's. Every texture and target
+is created able to be viewed as either `Rgba8Unorm` or `Rgba8UnormSrgb`; linear
+mode samples and renders through the sRGB views, so the texture unit decodes on
+the way in and the output merger encodes on the way out. That keeps the stored
+values gamma-encoded, where 8 bits are distributed the way the eye needs them —
+blending linear light into a plain `Rgba8Unorm` target would band visibly in the
+shadows.
+
+Because the target's format has to match the pipeline's, colour space is an axis
+of the pipeline set rather than a uniform: four blend modes times two spaces,
+all sharing one shader module.
+
+Two details are easy to get wrong and are pinned by tests. A clear value is
+specified in linear light and encoded by the hardware, unlike shader output, so
+a background picked as `#808080` has to be *decoded* before it is handed to a
+linear pass — encoding it instead washes it out, which is what the first
+implementation here did. And the colour space is part of the composite cache
+key: the cache is content-addressed, so a space left out of the key would leave
+the previous picture on screen until some other input happened to change.
+
+Sequences and compositions carry the setting independently, since a composition
+renders to its own target. Pre-composing inherits the sequence's, because
+pre-composing is meant to be a reorganisation rather than an edit.
 
 ## Playback
 
