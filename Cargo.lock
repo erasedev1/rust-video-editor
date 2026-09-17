@@ -3743,6 +3743,7 @@ dependencies = [
 name = "ve-media"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "crossbeam-channel",
  "ffmpeg-next",
  "log",

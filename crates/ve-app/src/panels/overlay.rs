@@ -6,7 +6,7 @@
 //! being discovered in a benchmark weeks later.
 
 use egui::{Color32, Context, RichText};
-use ve_media::CacheStats;
+use ve_media::{CacheStats, WaveformStats};
 use ve_metrics::{counters, spans, Metrics};
 use ve_render::CompositeCacheStats;
 
@@ -14,6 +14,7 @@ use ve_render::CompositeCacheStats;
 pub struct OverlayInput<'a> {
     pub metrics: &'a Metrics,
     pub frame_cache: CacheStats,
+    pub waveform_cache: WaveformStats,
     pub composite_cache: CompositeCacheStats,
     pub gpu_texture_bytes: usize,
     pub gpu_texture_count: usize,
@@ -122,6 +123,24 @@ pub fn show(ctx: &Context, input: &OverlayInput<'_>) {
                     "  cached {:>5.0} MB   unchanged {}",
                     composites.bytes as f64 / 1048576.0,
                     snapshot.counters.get(counters::COMPOSITE_UNCHANGED).copied().unwrap_or(0)
+                ))
+                .monospace()
+                .size(10.5)
+                .color(crate::theme::TEXT_DIM),
+            );
+            // Audio analysis is background work with no visible stage in the
+            // frame breakdown, so this is the only place a project stuck
+            // analysing a long file would show up.
+            let peaks = input.waveform_cache;
+            ui.label(
+                RichText::new(format!(
+                    "peaks    {:>6}  {:>5.1} MB{}",
+                    peaks.entries,
+                    peaks.bytes as f64 / 1048576.0,
+                    match peaks.queued + peaks.running {
+                        0 => String::new(),
+                        n => format!("  {n} pending"),
+                    }
                 ))
                 .monospace()
                 .size(10.5)

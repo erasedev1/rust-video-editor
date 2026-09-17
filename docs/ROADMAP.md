@@ -57,10 +57,21 @@ costs against a composite.
 
 ## Phase 4 — Audio
 
-- Waveform generation and display, cached like frames
+- Waveform generation and display, cached like frames ✅
 - Fades and audio transitions
 - Track-level volume, pan and meters
 - Verified device output across platforms
+
+Waveforms are analysed on background workers and published as they are produced,
+so a long file fills in from the left while it is already being cut with, rather
+than appearing all at once some minutes later. Peaks live on a fixed grid of 200
+buckets a second under a byte budget of their own, evicted least-recently-used
+like frames; coarser summaries above that grid keep the cost of drawing
+proportional to the columns on screen rather than to the length of the file,
+which is what makes an hour-long clip zoomed all the way out cost 308 µs instead
+of 3.3 ms. A clip's evaluated volume scales what is drawn, so the fades in the
+next item will be visible in the waveform the moment they exist rather than
+needing display work of their own.
 
 ## Phase 5 — Animation
 

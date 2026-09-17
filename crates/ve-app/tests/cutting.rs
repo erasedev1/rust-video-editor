@@ -12,7 +12,7 @@ use ve_app::state::EditorState;
 use ve_command::TrackFlag;
 use ve_core::{AssetId, ClipId, Project, TrackId, TrackKind};
 use ve_engine::{ManualTime, PlaybackClock, PlaybackEngine};
-use ve_media::DecodeService;
+use ve_media::{DecodeService, WaveformService};
 use ve_metrics::Metrics;
 use ve_time::Ticks;
 
@@ -30,6 +30,7 @@ fn secs(n: i64) -> Ticks {
 struct Editor {
     state: EditorState,
     engine: PlaybackEngine,
+    waveforms: WaveformService,
     _scratch: tempfile::TempDir,
 }
 
@@ -39,12 +40,13 @@ impl Editor {
         let metrics = Metrics::new();
         let decode = Arc::new(DecodeService::new(64, metrics.clone()));
         let engine =
-            PlaybackEngine::new(PlaybackClock::new(ManualTime::new()), decode, metrics);
+            PlaybackEngine::new(PlaybackClock::new(ManualTime::new()), decode, metrics.clone());
+        let waveforms = WaveformService::new(4, metrics);
         let state = EditorState::new(
             Project::with_default_sequence("Untitled"),
             scratch.path().to_path_buf(),
         );
-        Editor { state, engine, _scratch: scratch }
+        Editor { state, engine, waveforms, _scratch: scratch }
     }
 
     /// An editor with `n` back-to-back video clips on V1, starting at zero.
@@ -82,7 +84,7 @@ impl Editor {
     }
 
     fn act(&mut self, action: Action) {
-        dispatch(&mut self.state, &mut self.engine, action);
+        dispatch(&mut self.state, &mut self.engine, &self.waveforms, action);
     }
 
     fn status(&self) -> String {

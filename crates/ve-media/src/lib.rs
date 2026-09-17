@@ -18,6 +18,8 @@
 //! * [`DecodeService`] owns the decoder threads and turns the whole thing into
 //!   a non-blocking request/response interface, which is what keeps decoding
 //!   off the UI thread.
+//! * [`Waveform`] reduces audio to peaks, and [`WaveformService`] produces them
+//!   on background workers under a budget of their own.
 
 use std::path::{Path, PathBuf};
 use std::sync::Once;
@@ -29,6 +31,8 @@ mod decoder;
 mod frame;
 mod probe;
 mod service;
+mod waveform;
+mod waveform_service;
 
 pub use cache::{CacheKey, CacheStats, FrameCache};
 pub use decoder::{AudioDecoder, VideoDecoder};
@@ -38,6 +42,11 @@ pub use service::{
     budget, DecodeEvent, DecodeFailure, DecodeService, FrameReady, FrameRequest,
     RequestPriority,
 };
+pub use waveform::{
+    analyse, analyse_file, Peak, Waveform, WaveformBuilder, ANALYSIS_CHANNELS, BUCKET_TICKS,
+    PEAKS_PER_SECOND,
+};
+pub use waveform_service::{WaveformEvent, WaveformService, WaveformState, WaveformStats};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {

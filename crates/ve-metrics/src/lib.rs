@@ -222,6 +222,8 @@ pub mod spans {
     pub const PROJECT_SAVE: &str = "project_save";
     pub const PROBE: &str = "probe";
     pub const SEEK: &str = "seek";
+    /// One file's whole waveform analysis, on a background worker.
+    pub const WAVEFORM: &str = "waveform";
 }
 
 /// Standard counter and gauge names.
@@ -245,6 +247,12 @@ pub mod counters {
     pub const GPU_TEXTURE_BYTES: &str = "gpu_texture_bytes";
     pub const COMPOSITE_CACHE_BYTES: &str = "composite_cache_bytes";
     pub const COMPOSITE_CACHE_ENTRIES: &str = "composite_cache_entries";
+
+    /// Waveform buckets produced, which is analysis throughput: divided by the
+    /// `waveform` span it says how much audio a second of analysis covers.
+    pub const WAVEFORM_BUCKETS: &str = "waveform_buckets";
+    pub const WAVEFORM_BYTES: &str = "waveform_bytes";
+    pub const WAVEFORM_ENTRIES: &str = "waveform_entries";
 }
 
 #[cfg(test)]

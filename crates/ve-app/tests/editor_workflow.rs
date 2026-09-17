@@ -15,7 +15,7 @@ use ve_app::state::EditorState;
 use ve_command::{ClipProperty, PropertyValue, TrimEdge};
 use ve_core::{Project, TrackKind};
 use ve_engine::{ManualTime, PlaybackClock, PlaybackEngine};
-use ve_media::DecodeService;
+use ve_media::{DecodeService, WaveformService};
 use ve_metrics::Metrics;
 use ve_time::{Rate, Ticks};
 
@@ -26,6 +26,7 @@ fn testdata(name: &str) -> PathBuf {
 struct Editor {
     state: EditorState,
     engine: PlaybackEngine,
+    waveforms: WaveformService,
     time: Arc<ManualTime>,
     _scratch: tempfile::TempDir,
 }
@@ -36,16 +37,18 @@ impl Editor {
         let metrics = Metrics::new();
         let decode = Arc::new(DecodeService::new(64, metrics.clone()));
         let time = ManualTime::new();
-        let engine = PlaybackEngine::new(PlaybackClock::new(time.clone()), decode, metrics);
+        let engine =
+            PlaybackEngine::new(PlaybackClock::new(time.clone()), decode, metrics.clone());
+        let waveforms = WaveformService::new(4, metrics);
         let state = EditorState::new(
             Project::with_default_sequence("Untitled"),
             scratch.path().to_path_buf(),
         );
-        Editor { state, engine, time, _scratch: scratch }
+        Editor { state, engine, waveforms, time, _scratch: scratch }
     }
 
     fn act(&mut self, action: Action) {
-        dispatch(&mut self.state, &mut self.engine, action);
+        dispatch(&mut self.state, &mut self.engine, &self.waveforms, action);
     }
 
     fn status(&self) -> String {
@@ -662,4 +665,89 @@ fn undoing_the_first_add_restores_the_sequence_format_too() {
     editor.act(Action::Undo);
     assert_eq!(editor.state.project.clip_count(), 0);
     assert_eq!(editor.sequence().settings, original, "the format must come back too");
+}
+
+// ---- waveforms ---------------------------------------------------------
+
+/// Waits for background analysis to finish, failing rather than hanging.
+fn wait_for_analysis(editor: &Editor) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !editor.waveforms.is_idle() {
+        assert!(std::time::Instant::now() < deadline, "analysis did not finish in time");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn importing_audio_starts_its_analysis() {
+    let mut editor = Editor::new();
+    editor.act(Action::ImportMedia(vec![testdata("tone_48k.wav")]));
+    let asset = editor.state.project.assets[0].id;
+
+    wait_for_analysis(&editor);
+    assert_eq!(editor.waveforms.state(asset), ve_media::WaveformState::Ready);
+
+    // And the peaks describe the fixture's tone rather than being empty.
+    let columns = editor
+        .waveforms
+        .envelope(asset, ve_time::TimeRange::new(Ticks::ZERO, Ticks::from_seconds(1)), 4)
+        .expect("the waveform is present");
+    assert!(columns.iter().all(|c| c.is_some_and(|p| p.amplitude() > 0.5)));
+}
+
+#[test]
+fn importing_a_file_with_no_audio_asks_for_no_waveform() {
+    let mut editor = Editor::new();
+    editor.act(Action::ImportMedia(vec![testdata("counter_30fps.mp4")]));
+    let asset = editor.state.project.assets[0].id;
+    wait_for_analysis(&editor);
+    assert!(
+        editor.waveforms.state(asset).is_missing(),
+        "a silent file must not be queued for analysis"
+    );
+}
+
+#[test]
+fn a_file_with_both_streams_gets_a_decoder_and_a_waveform() {
+    let mut editor = Editor::new();
+    editor.act(Action::ImportMedia(vec![testdata("av_30fps.mp4")]));
+    let asset = editor.state.project.assets[0].id;
+
+    assert!(editor.engine.decode_service().is_open(asset), "{}", editor.status());
+    wait_for_analysis(&editor);
+    assert_eq!(editor.waveforms.state(asset), ve_media::WaveformState::Ready);
+}
+
+#[test]
+fn starting_a_new_project_drops_the_previous_waveforms() {
+    // Asset ids restart with each project, so peaks kept across a project
+    // change would be read as belonging to whatever asset inherits the id.
+    let mut editor = Editor::new();
+    editor.act(Action::ImportMedia(vec![testdata("tone_48k.wav")]));
+    wait_for_analysis(&editor);
+    assert_eq!(editor.waveforms.stats().entries, 1);
+
+    editor.act(Action::NewProject);
+    assert_eq!(editor.waveforms.stats().entries, 0);
+    assert_eq!(editor.waveforms.stats().bytes, 0);
+}
+
+#[test]
+fn opening_a_project_drops_the_previous_waveforms() {
+    let mut editor = Editor::new();
+    editor.act(Action::ImportMedia(vec![testdata("tone_48k.wav")]));
+    wait_for_analysis(&editor);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("project.verge");
+    editor.act(Action::SaveProjectAs(path.clone()));
+    assert!(path.exists(), "{}", editor.status());
+
+    editor.act(Action::OpenProject(path));
+    assert_eq!(
+        editor.waveforms.stats().entries,
+        0,
+        "opening a project must start from no peaks: {}",
+        editor.status()
+    );
 }

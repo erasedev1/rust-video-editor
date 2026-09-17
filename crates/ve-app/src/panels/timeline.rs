@@ -10,9 +10,11 @@
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, Ui};
 use ve_command::TrimEdge;
 use ve_core::{Sequence, TrackKind};
+use ve_media::WaveformService;
 use ve_time::{Rate, Ticks, TimeRange};
 
 use crate::actions::Action;
+use crate::panels::waveform;
 use crate::state::{EditorState, TimelineDrag, TimelineTool, TrimEdgeKind};
 use crate::theme;
 
@@ -23,7 +25,13 @@ const SNAP_RADIUS_PX: f32 = 8.0;
 /// Side of a mute/solo/lock button in a track header.
 const SWITCH_PX: f32 = 15.0;
 
-pub fn show(ui: &mut Ui, state: &mut EditorState, playhead: Ticks, actions: &mut Vec<Action>) {
+pub fn show(
+    ui: &mut Ui,
+    state: &mut EditorState,
+    waveforms: &WaveformService,
+    playhead: Ticks,
+    actions: &mut Vec<Action>,
+) {
     let Some(sequence) = state.active_sequence().cloned() else { return };
 
     toolbar(ui, state, actions);
@@ -51,8 +59,16 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, playhead: Ticks, actions: &mut
 
     draw_ruler(&painter, ruler_rect, state, &sequence, lanes_left);
     let hover = response.hover_pos();
-    let (lanes, content_height) =
-        draw_tracks(&painter, lane_area, state, &sequence, header_width, full.left(), hover);
+    let (lanes, content_height) = draw_tracks(
+        &painter,
+        lane_area,
+        state,
+        &sequence,
+        waveforms,
+        header_width,
+        full.left(),
+        hover,
+    );
     state.timeline.clamp_scroll_y(content_height, lane_area.height());
     draw_vertical_scrollbar(&painter, lane_area, state, content_height);
     draw_markers(&painter, lane_area, ruler_rect, state, &sequence, lanes_left);
@@ -238,11 +254,13 @@ fn tick_step(pixels_per_second: f32, rate: Rate) -> Ticks {
     Ticks::from_secs_f64(*LADDER.last().unwrap())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_tracks(
     painter: &egui::Painter,
     area: Rect,
     state: &EditorState,
     sequence: &Sequence,
+    waveforms: &WaveformService,
     header_width: f32,
     left: f32,
     hover: Option<Pos2>,
@@ -301,7 +319,9 @@ fn draw_tracks(
         // The culling that makes a big timeline cheap: only clips actually
         // overlapping the visible range are drawn.
         for clip in track.clips_in_range(visible) {
-            draw_clip(painter, lane_rect, state, sequence, clip, track.kind, lanes_left);
+            draw_clip(
+                painter, lane_rect, state, sequence, waveforms, clip, track.kind, lanes_left,
+            );
         }
 
         lanes.push(Lane { track: track.id, rect: lane_rect, switches, locked: track.locked });
@@ -431,11 +451,13 @@ fn draw_grid(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_clip(
     painter: &egui::Painter,
     lane: Rect,
     state: &EditorState,
     sequence: &Sequence,
+    waveforms: &WaveformService,
     clip: &ve_core::Clip,
     kind: TrackKind,
     lanes_left: f32,
@@ -488,9 +510,32 @@ fn draw_clip(
         painter.rect_filled(rect, CornerRadius::same(3), theme::OFFLINE.gamma_multiply(0.45));
     }
 
+    // Labels are drawn after the waveform and would be unreadable over it, so
+    // the waveform is given the body between them rather than the whole clip.
+    let labelled = rect.width() > 34.0;
+    let timecoded = rect.width() > 90.0 && rect.height() > 34.0;
+    if kind == TrackKind::Audio && !offline && clip.enabled {
+        if let ve_core::Source::Asset(id) = clip.source {
+            if let Some(asset) = state.project.asset(id) {
+                let body = Rect::from_min_max(
+                    Pos2::new(
+                        rect.left() + 1.0,
+                        rect.top() + if labelled { 12.0 } else { 2.0 },
+                    ),
+                    Pos2::new(
+                        rect.right() - 1.0,
+                        rect.bottom() - if timecoded { 12.0 } else { 2.0 },
+                    ),
+                );
+                let area = waveform_area(state, clip, body, x0..x1, left..right, lanes_left);
+                waveform::draw(painter, &area, clip, asset, waveforms);
+            }
+        }
+    }
+
     // Only label a clip wide enough to read, so a dense timeline does not turn
     // into overlapping text.
-    if rect.width() > 34.0 {
+    if labelled {
         let label = if offline { format!("⚠ {}", clip.name) } else { clip.name.clone() };
         painter.text(
             Pos2::new(rect.left() + 5.0, rect.top() + 6.0),
@@ -500,7 +545,7 @@ fn draw_clip(
             if clip.enabled { theme::TEXT } else { theme::TEXT_FAINT },
         );
     }
-    if rect.width() > 90.0 && rect.height() > 34.0 {
+    if timecoded {
         painter.text(
             Pos2::new(rect.left() + 5.0, rect.bottom() - 5.0),
             Align2::LEFT_BOTTOM,
@@ -529,6 +574,43 @@ fn draw_clip(
             FontId::proportional(9.0),
             theme::ACCENT,
         );
+    }
+}
+
+/// Works out which part of the source file a clip's visible body shows.
+///
+/// `whole` is where the clip's two edges fall, off screen included; `visible`
+/// is the part of that the lane actually shows.
+///
+/// A clip stretching off both edges of the screen is clamped to the lane before
+/// it is drawn, so the waveform has to be asked for the source range that the
+/// *clamped* rectangle covers rather than the whole clip's. Interpolating
+/// between the unclamped edges is what makes that exact at any scroll position,
+/// and it carries clip speed for free: a clip playing at half rate covers half
+/// as much source in the same width, and this says so without knowing about
+/// speed at all.
+fn waveform_area(
+    state: &EditorState,
+    clip: &ve_core::Clip,
+    body: Rect,
+    whole: std::ops::Range<f32>,
+    visible: std::ops::Range<f32>,
+    lanes_left: f32,
+) -> waveform::Area {
+    let span = (whole.end - whole.start).max(f32::EPSILON);
+    let from = ((visible.start - whole.start) / span) as f64;
+    let to = ((visible.end - whole.start) / span) as f64;
+    let source = clip.source_duration().as_secs_f64();
+    waveform::Area {
+        rect: body,
+        source: TimeRange::from_bounds(
+            clip.source_in + Ticks::from_secs_f64(source * from),
+            clip.source_in + Ticks::from_secs_f64(source * to),
+        ),
+        timeline: TimeRange::from_bounds(
+            state.timeline.time_at(visible.start - lanes_left),
+            state.timeline.time_at(visible.end - lanes_left),
+        ),
     }
 }
 

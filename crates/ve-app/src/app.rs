@@ -6,7 +6,7 @@ use std::sync::Arc;
 use eframe::CreationContext;
 use ve_core::{Project, Size};
 use ve_engine::{EngineUpdate, PlaybackClock, PlaybackEngine};
-use ve_media::DecodeService;
+use ve_media::{DecodeService, WaveformService};
 use ve_metrics::{spans, Metrics};
 
 use crate::actions::{self, Action};
@@ -18,9 +18,20 @@ use crate::theme;
 /// Frames cached on the CPU, in megabytes.
 const FRAME_CACHE_MB: usize = 512;
 
+/// Waveform peaks held in memory, in megabytes.
+///
+/// Peaks are two orders of magnitude smaller than the frames they sit beside —
+/// about 8.6 MB an hour of audio — so this holds a working day of sound for a
+/// sixteenth of the frame cache's budget.
+const WAVEFORM_CACHE_MB: usize = 32;
+
 pub struct VergeApp {
     state: EditorState,
     engine: PlaybackEngine,
+    /// Audio peaks for the timeline. Owned here rather than by the engine:
+    /// nothing about playback needs them, and the one thing that does is the
+    /// interface.
+    waveforms: Arc<WaveformService>,
     preview: Option<Preview>,
     metrics: Metrics,
     adapter_name: String,
@@ -40,6 +51,7 @@ impl VergeApp {
         let decode = Arc::new(DecodeService::new(FRAME_CACHE_MB, metrics.clone()));
         let engine =
             PlaybackEngine::new(PlaybackClock::with_system_time(), decode, metrics.clone());
+        let waveforms = Arc::new(WaveformService::new(WAVEFORM_CACHE_MB, metrics.clone()));
 
         let scratch = std::env::temp_dir().join("verge-autosave");
         let state = EditorState::new(Project::with_default_sequence("Untitled"), scratch);
@@ -67,6 +79,7 @@ impl VergeApp {
         let mut app = VergeApp {
             state,
             engine,
+            waveforms,
             preview,
             metrics,
             adapter_name,
@@ -77,7 +90,12 @@ impl VergeApp {
         };
 
         if let Some(path) = open {
-            actions::dispatch(&mut app.state, &mut app.engine, Action::OpenProject(path));
+            actions::dispatch(
+                &mut app.state,
+                &mut app.engine,
+                &app.waveforms,
+                Action::OpenProject(path),
+            );
         } else {
             app.state.set_status(Status::info("new project — import media to begin"));
         }
@@ -485,7 +503,13 @@ impl eframe::App for VergeApp {
             .default_size(260.0)
             .min_size(120.0)
             .show(root, |ui| {
-                panels::timeline::show(ui, &mut self.state, position, &mut pending_actions);
+                panels::timeline::show(
+                    ui,
+                    &mut self.state,
+                    &self.waveforms,
+                    position,
+                    &mut pending_actions,
+                );
             });
 
         egui::Panel::left("project").resizable(true).default_size(236.0).min_size(160.0).show(
@@ -537,6 +561,7 @@ impl eframe::App for VergeApp {
             let input = panels::overlay::OverlayInput {
                 metrics: &self.metrics,
                 frame_cache: self.engine.decode_service().cache_stats(),
+                waveform_cache: self.waveforms.stats(),
                 composite_cache: self
                     .preview
                     .as_ref()
@@ -562,7 +587,7 @@ impl eframe::App for VergeApp {
 
         // 4. Apply everything the frame asked for, in one place.
         for action in pending_actions {
-            actions::dispatch(&mut self.state, &mut self.engine, action);
+            actions::dispatch(&mut self.state, &mut self.engine, &self.waveforms, action);
         }
 
         // 5. Housekeeping.
@@ -577,10 +602,16 @@ impl eframe::App for VergeApp {
 
         drop(ui_span);
 
+        // A waveform that has grown since the last repaint has to be drawn, and
+        // nothing else will ask: analysis happens on a worker thread with no
+        // input event behind it. Draining rather than polling `is_idle` means
+        // an editor sitting still with no analysis running still sleeps.
+        let waveform_progress = !self.waveforms.drain().is_empty();
+
         // Repaint continuously while playing or while frames are still
         // decoding; otherwise egui sleeps until the next input, which is what
         // keeps an idle editor off the CPU entirely.
-        if playing || pending > 0 {
+        if playing || pending > 0 || waveform_progress {
             ctx.request_repaint();
         }
     }

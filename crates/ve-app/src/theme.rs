@@ -38,6 +38,16 @@ pub const CLIP_AUDIO_TOP: Color32 = Color32::from_rgb(0x38, 0x69, 0x57);
 pub const CLIP_SELECTED: Color32 = Color32::from_rgb(0xf0, 0xf4, 0xf8);
 pub const CLIP_DISABLED: Color32 = Color32::from_rgb(0x30, 0x33, 0x38);
 
+/// The waveform inside an audio clip. Two tones: the peak envelope, and the
+/// RMS body drawn inside it. The pair is the point — an envelope alone makes a
+/// gently loud passage and a spiky quiet one look the same, and it is the
+/// difference between them that tells you where the audio actually is.
+pub const WAVEFORM_PEAK: Color32 = Color32::from_rgb(0x74, 0xc4, 0xa2);
+pub const WAVEFORM_BODY: Color32 = Color32::from_rgb(0xa8, 0xe6, 0xc8);
+/// The centre line, which is what makes silence legible as silence rather than
+/// as a clip that failed to draw.
+pub const WAVEFORM_AXIS: Color32 = Color32::from_rgb(0x4a, 0x7d, 0x68);
+
 /// Timeline furniture.
 pub const RULER_BACKGROUND: Color32 = Color32::from_rgb(0x18, 0x1a, 0x1e);
 pub const TRACK_HEADER: Color32 = Color32::from_rgb(0x1f, 0x22, 0x26);

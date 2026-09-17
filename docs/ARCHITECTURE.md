@@ -364,6 +364,44 @@ centred audio, or that can push a mix into clipping, is the worse surprise.
 
 Clipping is counted and reported rather than swallowed.
 
+### Waveforms
+
+A minute of stereo 48 kHz audio is 5.8 million sample frames and a few hundred
+pixel columns on screen. Reducing the first to the second on every repaint —
+during a scroll, a zoom, a drag — would cost more than compositing the picture
+does, so the samples are reduced **once**, to a fixed grid of 200 buckets a
+second, and every later question is answered from that grid. A bucket keeps the
+envelope (min and max) and the RMS level, both reduced across channels: the
+envelope is what makes a transient visible, where an average would hide a
+single-sample click, and RMS is what the passage actually sounds like.
+
+The grid divides the timebase exactly, so a bucket boundary is a whole number of
+ticks and no bucket drifts against the timeline. Twelve bytes a bucket is 2.4 kB
+per second of audio, about 8.6 MB an hour, held under a byte budget with LRU
+eviction exactly as frames are — peaks for a file nobody is looking at cost a
+re-analysis to lose, not a re-edit.
+
+**Analysis is the opposite problem from decoding, so it has the opposite
+shape.** A picture is random access: the user is at frame 900 and the answer to
+frame 40 is worthless, which is why the decode queue is one slot deep and a new
+request cancels the old one. Audio analysis is a linear pass over a whole file,
+wanted once, and useful the moment its first second exists. So it is a small
+pool of workers over a FIFO, publishing results *as they are produced*. Dropping
+a two-hour podcast on the timeline draws a waveform that fills in from the left
+while you are already cutting with it. A column past what has been analysed
+reports "not known yet" rather than silence, which is what lets the two be drawn
+differently instead of a half-read file looking like a half-silent one.
+
+**Coarse levels above the base grid keep drawing bounded at every zoom.** Drawing
+zoomed in reads a handful of buckets a column. Drawing an hour-long clip zoomed
+all the way out asks a thousand columns to summarise 720,000 buckets, which
+measured 3.3 ms — a fifth of a frame, for one clip, on every repaint of a scroll.
+Each level summarises eight buckets of the one below, a column reads from the
+coarsest level whose buckets still fit inside it, and the same work takes 308 µs.
+The levels are summaries of the base grid rather than a second analysis of the
+audio, so they cannot disagree with it: a transient in the base grid is in the
+envelope of every level above it. See [BENCHMARKS.md](BENCHMARKS.md#waveforms).
+
 ## The project file
 
 See [PROJECT_FORMAT.md](PROJECT_FORMAT.md). In short: pretty-printed JSON behind
@@ -413,7 +451,13 @@ Honest gaps, not oversights:
   exist; no effect implementations do.
 - **No export.** The renderer can already read frames back, which is the hard
   part; the encoder and muxer are not written.
-- **No waveforms, thumbnails, proxies, bins, or ripple editing.**
+- **No thumbnails, proxies or bins.** Waveforms exist; the filmstrip on a video
+  clip does not, and would be the render cache's problem rather than a new one.
+- **Waveforms are a summary, not sample data.** The grid is five milliseconds,
+  finer than the eye can use at ordinary zooms and coarser than the editor's
+  maximum zoom, where the display interpolates between bucket centres rather
+  than storing more. Editing that needs individual samples — repairing a click —
+  would read the file, not the peaks.
 - **`CpalSink` is unverified.** The audio pipeline is tested up to the sink
   boundary, including the ring under concurrent threads, but the machine this
   was built on has no audio device.

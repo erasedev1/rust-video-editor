@@ -26,6 +26,9 @@ The first vertical slice is complete and tested end to end:
 - Add, delete, reorder, mute, solo and lock tracks; set clip speed
 - Create markers and jump between them
 - Play the sequence, scrub, step by frame, stop and resume
+- Audio waveforms on timeline clips, analysed in the background and filling in
+  as they are read, at a cost that follows what is on screen rather than the
+  length of the file
 - GPU compositing with transforms, opacity and alpha blending
 - Blend modes — normal, add, multiply and screen — as pipeline variants
 - A render cache keyed on the composition itself: an unchanged picture is never
@@ -174,7 +177,7 @@ Linux only and reports "unavailable" elsewhere, and audio output goes through
 ## Testing
 
 ```sh
-cargo test --workspace     # 369 tests
+cargo test --workspace     # 510 tests
 cargo bench                # measured, not estimated
 ```
 

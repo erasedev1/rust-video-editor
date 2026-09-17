@@ -9,6 +9,7 @@ cargo bench                                   # everything
 cargo bench -p ve-core --bench timeline       # edit model
 cargo bench -p ve-project --bench project_io  # save and load
 cargo bench -p ve-render --bench compositing  # GPU
+cargo bench -p ve-media  --bench waveforms    # audio analysis and display
 ```
 
 ## The machine these were taken on
@@ -164,6 +165,61 @@ What the figure is good for is catching a regression that moves the conversion
 somewhere it does not belong — into the shader, or into an extra pass. What it
 should not be read as is the cost on real hardware, which is not measured here
 because this machine has no GPU.
+
+## Waveforms
+
+Taken on the same container as the render-cache table, `--measurement-time 3`.
+
+### Analysis
+
+| Benchmark                  |      Time | Against real time |
+|----------------------------|----------:|------------------:|
+| `waveform_reduce/1ch_1s`   |   192 µs  |           5,200×  |
+| `waveform_reduce/2ch_1s`   |   382 µs  |           2,600×  |
+| `waveform_reduce/6ch_1s`   |  1.16 ms  |             860×  |
+| `waveform_analyse_1s_wav`  |  10.0 ms  |             100×  |
+
+`waveform_reduce` is samples to buckets and nothing else; `waveform_analyse` is
+the whole path including opening the file and decoding it. The gap between them
+is the answer to whether the reduction is worth optimising: it is **3.8% of the
+end-to-end cost**, and the other 96% is FFmpeg. So an hour of audio analyses in
+about half a minute, and making the bucketing twice as fast would take a second
+off that.
+
+### Display
+
+This is the per-repaint cost, for one clip, and it is the figure the design is
+built around: reducing peaks to pixel columns has to cost what is on screen
+rather than what is in the file.
+
+| Benchmark                                     |     Time |
+|-----------------------------------------------|---------:|
+| `waveform_envelope/clip_600px_of_1min`        |  22.7 µs |
+| `waveform_envelope/clip_600px_of_60min`       |  22.3 µs |
+| `waveform_envelope/zoomed_past_the_grid_600px`|  13.8 µs |
+| `waveform_envelope/whole_hour_1000px`         |   308 µs |
+
+**The first two are the claim.** Six hundred columns cost the same whether they
+are drawn from a one-minute file or a sixty-minute one — 2.4% apart, which is
+noise. A clip on screen costs what it takes up, not what it references.
+
+### The pyramid this bought
+
+`whole_hour_1000px` is the hard case: an hour-long clip zoomed all the way out,
+a thousand columns summarising 720,000 buckets. Reading every bucket measured
+**3.30 ms**, a fifth of a frame budget for one clip, on every repaint of a
+scroll. Keeping coarser copies of the peaks — each summarising eight buckets of
+the one below — brought it to **308 µs**:
+
+| Zoomed all the way out, 1,000 columns |     Time | Cheaper by |
+|---------------------------------------|---------:|-----------:|
+| Base grid only                         |  3.30 ms |         1× |
+| With the pyramid                       |   308 µs |      10.7× |
+
+The coarse levels add **under 15% to memory** and are summaries of the base grid
+rather than a second pass over the audio, so they cannot disagree with it: a
+transient in the base grid is in the envelope of every level above it. A test
+asserts exactly that, across four zoom levels.
 
 ## Live measurements
 

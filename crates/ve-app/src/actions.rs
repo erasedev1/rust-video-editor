@@ -20,6 +20,7 @@ use ve_core::{
     TrackId, TrackKind,
 };
 use ve_engine::PlaybackEngine;
+use ve_media::WaveformService;
 use ve_project::{autosave, store};
 use ve_time::Ticks;
 
@@ -166,7 +167,12 @@ pub enum Action {
 /// Never panics and never leaves the project half-changed: a rejected edit sets
 /// the status line and returns, because the command layer guarantees a failed
 /// command touched nothing.
-pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Action) {
+pub fn dispatch(
+    state: &mut EditorState,
+    engine: &mut PlaybackEngine,
+    waveforms: &WaveformService,
+    action: Action,
+) {
     let Some(sequence_id) = state.active_sequence_id() else {
         state.set_status(Status::error("this project has no sequence"));
         return;
@@ -181,6 +187,9 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
             state.warnings.clear();
             state.autosave.set_project_path(None);
             engine.clock_mut().seek(Ticks::ZERO);
+            // Asset ids are per project, so peaks from the old one would be
+            // read as belonging to whatever asset inherits the id next.
+            waveforms.clear();
             state.set_status(Status::info("new project"));
         }
 
@@ -193,6 +202,7 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
                 state.path = Some(path.clone());
                 state.autosave.set_project_path(Some(path.clone()));
                 state.autosave.mark_saved();
+                waveforms.clear();
                 engine
                     .clock_mut()
                     .seek(state.active_sequence().map(|s| s.playhead).unwrap_or(Ticks::ZERO));
@@ -221,7 +231,7 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
         Action::ImportMedia(paths) => {
             let mut imported = 0usize;
             for path in paths {
-                match import_one(state, engine, &path) {
+                match import_one(state, engine, waveforms, &path) {
                     Ok(true) => imported += 1,
                     Ok(false) => {}
                     Err(e) => {
@@ -1033,6 +1043,7 @@ fn adopt_format_from(
 fn import_one(
     state: &mut EditorState,
     engine: &PlaybackEngine,
+    waveforms: &WaveformService,
     path: &std::path::Path,
 ) -> Result<bool, ve_media::MediaError> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -1044,11 +1055,21 @@ fn import_one(
 
     let info = ve_media::probe(&path)?;
     let has_video = info.has_video();
+    let audio = info.audio.as_ref().map(|a| a.sample_rate);
     let asset = state.project.add_asset(&path, info);
     if has_video {
         if let Err(e) = engine.decode_service().open(asset, &path, None) {
             log::warn!("imported {} but could not open a decoder: {e}", path.display());
         }
+    }
+    // Analyse on import rather than waiting for the clip to be drawn. The user
+    // has just chosen this file and is about to lay it down, so the analysis
+    // and the decision about where to cut it overlap instead of queueing.
+    // Opening a *project* deliberately does not do this: a hundred assets would
+    // be analysed to draw the few that are on screen, and evict each other
+    // doing it. Those are asked for by the timeline as it paints them.
+    if let Some(sample_rate) = audio {
+        waveforms.request(asset, &path, sample_rate);
     }
     Ok(true)
 }
