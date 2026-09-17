@@ -66,14 +66,14 @@ impl Editor {
 
     /// Pumps the engine until the picture is complete, or gives up.
     fn settle(&mut self) -> ve_engine::EngineUpdate {
-        let sequence = self.sequence().clone();
-        let mut update = self.engine.update(&sequence);
+        let viewing = self.state.viewing().expect("a project always has something to view");
+        let mut update = self.engine.update(&self.state.project, viewing);
         for _ in 0..200 {
             if update.is_complete() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
-            update = self.engine.update(&sequence);
+            update = self.engine.update(&self.state.project, viewing);
         }
         update
     }
@@ -138,7 +138,7 @@ fn the_first_milestone_works_end_to_end() {
     editor.time.advance(Duration::from_millis(500));
     let update = editor.settle();
     assert_eq!(update.position, Rate::FPS_30.snap_round(Ticks::from_millis(500)));
-    assert_eq!(update.layers.len(), 1, "a decoded frame should be ready to draw");
+    assert_eq!(update.root().layers.len(), 1, "a decoded frame should be ready to draw");
     // The tone fixture is one second long, so half a second in is inside it.
     // At exactly one second it would not be: clip ranges are half-open, and
     // the instant a clip ends belongs to whatever comes next.
@@ -147,7 +147,7 @@ fn the_first_milestone_works_end_to_end() {
     editor.time.advance(Duration::from_millis(600));
     let update = editor.settle();
     assert!(update.position > Ticks::from_seconds(1));
-    assert_eq!(update.layers.len(), 1, "the 3s video clip still covers this instant");
+    assert_eq!(update.root().layers.len(), 1, "the 3s video clip still covers this instant");
     assert!(update.plan.audio.is_empty(), "the 1s tone has ended");
 
     // 10. Stop and resume.
@@ -164,7 +164,7 @@ fn the_first_milestone_works_end_to_end() {
     editor.act(Action::ScrubTo(Ticks::from_millis(2_100)));
     let update = editor.settle();
     assert_eq!(update.position, Rate::FPS_30.snap_round(Ticks::from_millis(2_100)));
-    assert_eq!(update.layers.len(), 1, "scrubbing should land on a decoded frame");
+    assert_eq!(update.root().layers.len(), 1, "scrubbing should land on a decoded frame");
 
     // 11. Save the project.
     let dir = tempfile::tempdir().unwrap();
@@ -185,7 +185,7 @@ fn the_first_milestone_works_end_to_end() {
 
     // And it plays from there, which is the real proof the reopen was complete.
     let update = reopened.settle();
-    assert_eq!(update.layers.len(), 1);
+    assert_eq!(update.root().layers.len(), 1);
 }
 
 #[test]

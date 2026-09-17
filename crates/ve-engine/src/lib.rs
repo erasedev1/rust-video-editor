@@ -32,7 +32,13 @@ pub mod ring;
 pub use audio::{AudioError, AudioRenderer, AudioSink};
 pub use clock::{ManualTime, PlaybackClock, SystemTime, TimeSource, TransportState};
 pub use cpal_sink::CpalSink;
-pub use engine::{peek, EngineUpdate, PlaybackEngine, ResolvedLayer};
+pub use engine::{
+    peek, EngineUpdate, LayerContent, PlaybackEngine, ResolvedLayer, ResolvedNode, Timebase,
+    Viewing,
+};
 pub use mixer::{AudioMixer, MixSource, MixStats};
-pub use plan::{evaluate, evaluate_frames, AudibleClip, RenderPlan, VisibleClip};
+pub use plan::{
+    evaluate, evaluate_composition, evaluate_frames, evaluate_project, AudibleItem, Draw,
+    Origin, PlanItem, PlanNode, RenderPlan, MAX_NESTING_DEPTH,
+};
 pub use ring::{AudioRing, Consumer, Producer};

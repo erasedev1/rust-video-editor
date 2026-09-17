@@ -144,11 +144,12 @@ struct Entry {
 
 /// How many freed targets to keep for reuse.
 ///
-/// Playback inserts a new composite every frame and evicts one to pay for it,
-/// so a single spare is enough to make the steady state allocation-free; a
-/// couple absorbs a resolution change without a stall. Any more is VRAM held
-/// against a future that may never come.
-const MAX_SPARE: usize = 2;
+/// Playback inserts a new composite every frame and evicts one to pay for it, so
+/// a couple of spares is enough to make the steady state allocation-free. A
+/// nested composite pushes that a little further — a frame can need one target
+/// per nesting level — so the pool holds a handful and matches by size, since a
+/// 512-pixel title card cannot be drawn into a 4K target.
+const MAX_SPARE: usize = 6;
 
 /// An LRU cache of composited pictures, bounded by GPU memory.
 ///
@@ -163,11 +164,10 @@ pub struct CompositeCache {
     entries: HashMap<CompositeKey, Entry>,
     /// Targets freed by eviction, ready to be drawn into again. Reusing them is
     /// what keeps playback from allocating and freeing a full-resolution
-    /// texture on every single frame.
+    /// texture on every single frame. Mixed sizes, matched on the way out: a
+    /// frame holding nested compositions needs targets of several shapes at
+    /// once.
     spare: Vec<RenderTarget>,
-    /// The size every entry and spare has. A composition that changes
-    /// resolution makes all of them useless at once.
-    size: Option<Size>,
     capacity_bytes: usize,
     bytes: usize,
     clock: u64,
@@ -182,7 +182,6 @@ impl CompositeCache {
         CompositeCache {
             entries: HashMap::new(),
             spare: Vec::new(),
-            size: None,
             capacity_bytes,
             bytes: 0,
             clock: 0,
@@ -209,10 +208,18 @@ impl CompositeCache {
 
     /// Looks up a composited picture, marking it as recently used.
     pub fn get(&mut self, key: &CompositeKey) -> Option<&RenderTarget> {
+        self.touch(key).then(|| &self.entries.get(key).expect("just touched").target)
+    }
+
+    /// Marks an entry as recently used, reporting whether it was there.
+    ///
+    /// Separate from [`CompositeCache::get`] because one frame may need several
+    /// cached targets at once — a composite holding three nested compositions —
+    /// which a single `&mut self` lookup cannot hand out. Callers touch every
+    /// key first, then read them all through [`CompositeCache::peek`].
+    pub fn touch(&mut self, key: &CompositeKey) -> bool {
         self.clock += 1;
         let clock = self.clock;
-        // The stamp is written through a mutable borrow that has to end before
-        // the shared reference to the target can be handed out.
         let found = match self.entries.get_mut(key) {
             Some(entry) => {
                 entry.last_used = clock;
@@ -228,11 +235,15 @@ impl CompositeCache {
         }
         if found {
             self.hits += 1;
-            Some(&self.entries.get(key).expect("just found").target)
         } else {
             self.misses += 1;
-            None
         }
+        found
+    }
+
+    /// Reads an entry without disturbing LRU order or the counters.
+    pub fn peek(&self, key: &CompositeKey) -> Option<&RenderTarget> {
+        self.entries.get(key).map(|e| &e.target)
     }
 
     /// Whether a key is present, without disturbing LRU order or the counters.
@@ -240,19 +251,17 @@ impl CompositeCache {
         self.entries.contains_key(key)
     }
 
-    /// A target of `size` to composite into, reused if one is going spare.
+    /// A target of `size` to composite into, reused if one of that size is going
+    /// spare.
     ///
-    /// Changing size drops everything held: entries of the old size can never
-    /// be hit again, because the size is part of the key.
+    /// Sizes are mixed deliberately. A sequence at 1080p can hold a 512-pixel
+    /// title composition, and both are in flight during the same frame; the size
+    /// is part of every key, so entries of different shapes coexist without ever
+    /// being confused for one another.
     pub fn take_target(&mut self, device: &wgpu::Device, size: Size) -> RenderTarget {
         let size = Size::new(size.width.max(1), size.height.max(1));
-        if self.size != Some(size) {
-            self.clear();
-            self.spare.clear();
-            self.size = Some(size);
-        }
-        match self.spare.pop() {
-            Some(target) => target,
+        match self.spare.iter().position(|t| t.size() == size) {
+            Some(index) => self.spare.swap_remove(index),
             None => RenderTarget::new(device, size),
         }
     }
@@ -316,7 +325,7 @@ impl CompositeCache {
 
     /// Keeps a freed target for reuse, or drops it if enough are already held.
     fn recycle(&mut self, target: RenderTarget) {
-        if self.spare.len() < MAX_SPARE && self.size == Some(target.size()) {
+        if self.spare.len() < MAX_SPARE {
             self.spare.push(target);
         }
     }

@@ -89,13 +89,18 @@ impl VergeApp {
     /// Doing this first means the panels draw a picture that is current for
     /// this frame rather than one frame behind.
     fn render_preview(&mut self, render_state: Option<&egui_wgpu::RenderState>) {
-        let Some(sequence) = self.state.active_sequence().cloned() else { return };
-        let update = self.engine.update(&sequence);
+        let Some(viewing) = self.state.viewing() else { return };
+        let update = self.engine.update(&self.state.project, viewing);
 
         if let (Some(preview), Some(render_state)) = (self.preview.as_mut(), render_state) {
             let decode = self.engine.decode_service().clone();
-            preview.render(render_state, &update, |clip| {
-                decode.key_for(clip.source.asset()?, clip.source_time)
+            preview.render(render_state, &update, |item| match item.draw {
+                ve_engine::Draw::Media { asset, source_time } => {
+                    decode.key_for(asset, source_time)
+                }
+                // A nested composition has no decoded frame to key; the preview
+                // finds its picture in the render cache instead.
+                ve_engine::Draw::Nested { .. } => None,
             });
         }
         self.last_update = Some(update);
@@ -461,7 +466,7 @@ impl eframe::App for VergeApp {
         let position = update.map(|u| u.position).unwrap_or_default();
         let playing = update.map(|u| u.playing).unwrap_or(false);
         let pending = update.map(|u| u.pending).unwrap_or(0);
-        let visible = update.map(|u| u.layers.len()).unwrap_or(0);
+        let visible = update.map(|u| u.layer_count()).unwrap_or(0);
 
         let mut pending_actions = Vec::new();
 

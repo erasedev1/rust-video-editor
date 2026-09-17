@@ -3,13 +3,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use ve_core::{AssetId, Sequence};
+use ve_core::{AssetId, Project, Sequence};
 use ve_media::{AudioDecoder, MediaError};
 use ve_metrics::Metrics;
 use ve_time::{SampleRate, Ticks};
 
 use crate::mixer::{AudioMixer, MixSource, MixStats};
-use crate::plan::evaluate;
+use crate::plan::evaluate_project;
 use crate::ring::Producer;
 
 /// One open audio file plus a window of decoded samples around the playhead.
@@ -141,6 +141,7 @@ impl AudioRenderer {
     /// ahead of the device and there is nothing to do.
     pub fn render_into(
         &mut self,
+        project: &Project,
         sequence: &Sequence,
         producer: &Producer,
         max_frames: usize,
@@ -153,7 +154,10 @@ impl AudioRenderer {
         }
 
         let rate = self.mixer.sample_rate();
-        let plan = evaluate(sequence, self.position);
+        // Through the project rather than the sequence alone, so a nested
+        // composition's sound is in the mix: its layers arrive already flattened,
+        // with their gains multiplied by every layer they pass through.
+        let plan = evaluate_project(project, sequence, self.position);
 
         // Gather each clip's samples first, then mix: the borrow checker will
         // not allow decoding into `self.sources` while the mixer holds slices
@@ -163,9 +167,7 @@ impl AudioRenderer {
             if clip.gain <= 0.0 {
                 continue;
             }
-            // Only media makes sound here. A nested composition's audio is part
-            // of that composition's own plan, which the engine mixes separately.
-            let Some(asset) = clip.source.asset() else { continue };
+            let asset = clip.asset;
             let Some(source) = self.source_for(asset) else { continue };
             if let Err(e) = source.ensure(clip.source_time, frames, rate) {
                 log::warn!("audio decode failed for asset {asset}: {e}");

@@ -456,8 +456,8 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
             };
             match target {
                 Some(to) => {
-                    if let Some(seq) = state.project.sequence(sequence_id) {
-                        engine.scrub_to(seq, to);
+                    if let Some(viewing) = state.viewing() {
+                        engine.scrub_to(&state.project, viewing, to);
                     }
                     sync_playhead(state, engine);
                 }
@@ -550,36 +550,37 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
         }
 
         Action::TogglePlayback => {
-            if let Some(seq) = state.project.sequence(sequence_id) {
-                engine.toggle_playback(seq);
+            if let Some(viewing) = state.viewing() {
+                engine.toggle_playback(&state.project, viewing);
             }
         }
 
         Action::StepFrames(delta) => {
-            if let Some(seq) = state.project.sequence(sequence_id) {
-                engine.step_frames(seq, delta);
+            if let Some(viewing) = state.viewing() {
+                engine.step_frames(&state.project, viewing, delta);
             }
             sync_playhead(state, engine);
         }
 
         Action::ScrubTo(to) => {
-            if let Some(seq) = state.project.sequence(sequence_id) {
-                engine.scrub_to(seq, to);
+            if let Some(viewing) = state.viewing() {
+                engine.scrub_to(&state.project, viewing, to);
             }
             sync_playhead(state, engine);
         }
 
         Action::GoToStart => {
-            if let Some(seq) = state.project.sequence(sequence_id) {
-                engine.scrub_to(seq, Ticks::ZERO);
+            if let Some(viewing) = state.viewing() {
+                engine.scrub_to(&state.project, viewing, Ticks::ZERO);
             }
             sync_playhead(state, engine);
         }
 
         Action::GoToEnd => {
-            let end = state.project.sequence(sequence_id).map(|s| s.duration());
-            if let (Some(seq), Some(end)) = (state.project.sequence(sequence_id), end) {
-                engine.scrub_to(seq, end);
+            if let Some((viewing, end)) =
+                state.viewing().zip(state.timebase().map(|t| t.duration))
+            {
+                engine.scrub_to(&state.project, viewing, end);
             }
             sync_playhead(state, engine);
         }
@@ -868,11 +869,21 @@ fn plan_paste(
         .collect()
 }
 
-/// Stores the playhead on the sequence, so reopening the project restores it.
+/// Stores the playhead on whatever is being viewed, so reopening the project
+/// restores where the user was — in the sequence *and* in each composition.
 fn sync_playhead(state: &mut EditorState, engine: &PlaybackEngine) {
     let position = engine.clock().position();
-    if let Some(seq) = state.project.active_mut() {
-        seq.playhead = position;
+    match state.viewing() {
+        Some(ve_engine::Viewing::Composition(id)) => {
+            if let Some(comp) = state.project.composition_mut(id) {
+                comp.playhead = position;
+            }
+        }
+        _ => {
+            if let Some(seq) = state.project.active_mut() {
+                seq.playhead = position;
+            }
+        }
     }
 }
 

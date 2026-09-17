@@ -306,19 +306,43 @@ fn a_discarded_target_is_kept_without_caching_what_was_drawn() {
 }
 
 #[test]
-fn changing_resolution_drops_every_cached_picture() {
+fn pictures_of_different_sizes_coexist() {
     let mut h = Harness::new(1 << 20);
     let red = h.upload(RED);
     h.present(BLACK, &[Layer::new(&red)]);
     assert_eq!(h.cache.len(), 1);
 
-    // A sequence whose format changed cannot reuse anything: the size is part
-    // of every key, so those entries would only sit there holding memory.
+    // Nesting means several sizes are in flight at once: a 1080p sequence can
+    // hold a 512-pixel title composition, and both are cached during the same
+    // frame. The size is part of every key, so they cannot be confused.
     let gpu = gpu();
     let bigger = h.cache.take_target(&gpu.device, Size::new(64, 64));
     assert_eq!(bigger.size(), Size::new(64, 64));
-    assert_eq!(h.cache.len(), 0);
-    assert_eq!(h.cache.stats().spare, 0, "spares of the old size are useless too");
+    assert_eq!(h.cache.len(), 1, "the smaller picture is still cached");
+
+    let key = CompositeKey::of(Size::new(64, 64), BLACK, &[]);
+    h.cache.insert(key, bigger);
+    assert_eq!(h.cache.len(), 2);
+    assert!(h.cache.get(&key).is_some());
+}
+
+#[test]
+fn a_spare_target_is_only_reused_at_its_own_size() {
+    let mut h = Harness::new(1 << 20);
+    let gpu = gpu();
+
+    // Hand back a small target, then ask for a large one: drawing a 64-pixel
+    // composite into a 32-pixel target would silently crop it.
+    let small = h.cache.take_target(&gpu.device, SIZE);
+    h.cache.discard_target(small);
+    let large = h.cache.take_target(&gpu.device, Size::new(64, 64));
+    assert_eq!(large.size(), Size::new(64, 64));
+    assert_eq!(h.cache.stats().spare, 1, "the small one is still spare");
+
+    // And asking for its size again hands the spare straight back.
+    let small = h.cache.take_target(&gpu.device, SIZE);
+    assert_eq!(small.size(), SIZE);
+    assert_eq!(h.cache.stats().spare, 0);
 }
 
 #[test]
@@ -418,4 +442,139 @@ fn changing_only_the_blend_mode_recomposites_that_instant() {
 
     assert!(h.present(BLACK, &composite(BlendMode::Normal, &under, &grey)), "back to a hit");
     assert_colour(h.centre(), normal, "the first mode's picture, restored");
+}
+
+// ---- nesting ------------------------------------------------------------
+//
+// A nested composition is drawn into a target of its own, which the level above
+// samples as an ordinary layer. These exercise that path the way the preview
+// walks it: child first, then parent, with both cached separately.
+
+impl Harness {
+    /// Composites into a cached target of its own and returns its key, the way
+    /// the preview does for a nested composition.
+    fn render_nested(&mut self, background: Rgba, layers: &[Layer<'_>]) -> CompositeKey {
+        let gpu = gpu();
+        let key = CompositeKey::of(SIZE, background, layers);
+        if self.cache.touch(&key) {
+            return key;
+        }
+        let target = self.cache.take_target(&gpu.device, SIZE);
+        self.renderer.render(&gpu.device, &gpu.queue, &target, background, layers);
+        self.cache.insert(key, target);
+        key
+    }
+
+    /// Binds a cached composite so it can be drawn as a layer.
+    fn bind(&self, key: CompositeKey) -> GpuTexture {
+        let gpu = gpu();
+        let target = self.cache.peek(&key).expect("the nested composite was just rendered");
+        self.renderer.bind_target(&gpu.device, target, key)
+    }
+}
+
+#[test]
+fn a_nested_composite_is_sampled_as_an_ordinary_layer() {
+    let mut h = Harness::new(1 << 20);
+    let red = h.upload(RED);
+
+    // A composition holding red, drawn into its own target…
+    let nested = h.render_nested(Rgba::TRANSPARENT, &[Layer::new(&red)]);
+    // …then used as the only layer of the composition above it.
+    let texture = h.bind(nested);
+    assert!(!h.present(BLACK, &[Layer::new(&texture)]));
+
+    assert_colour(h.centre(), RED, "the nested picture reached the parent");
+}
+
+#[test]
+fn a_nested_composite_blends_into_its_parent() {
+    let mut h = Harness::new(1 << 20);
+    let grey = h.upload([128, 128, 128, 255]);
+    let under = h.upload(GREEN);
+
+    let nested = h.render_nested(Rgba::TRANSPARENT, &[Layer::new(&grey)]);
+    let texture = h.bind(nested);
+
+    // Screened over green: the nested composite is a layer like any other, so
+    // the blend modes apply to it unchanged.
+    h.present(BLACK, &[Layer::new(&under), Layer::new(&texture).with_blend(BlendMode::Screen)]);
+    let got = h.centre();
+    assert!(got[0] > 100, "red channel brightened by the screen: {got:?}");
+    assert_eq!(got[1], 255, "green stays full");
+}
+
+#[test]
+fn an_unchanged_nest_keeps_the_parent_cached() {
+    let mut h = Harness::new(1 << 20);
+    let red = h.upload(RED);
+    let green = h.upload(GREEN);
+
+    // Frame one: composite the nest, then the parent.
+    let nested = h.render_nested(Rgba::TRANSPARENT, &[Layer::new(&red)]);
+    let texture = h.bind(nested);
+    assert!(!h.present(BLACK, &[Layer::new(&texture)]));
+
+    // Frame two, nothing changed: the nest is a hit, and because its key is what
+    // identifies the texture the parent samples, the parent is a hit too.
+    let again = h.render_nested(Rgba::TRANSPARENT, &[Layer::new(&red)]);
+    assert_eq!(again, nested, "the same nested contents hash the same");
+    let texture = h.bind(again);
+    assert!(h.present(BLACK, &[Layer::new(&texture)]), "the parent should not be redrawn");
+
+    // Frame three: change one layer *inside* the nest. The parent has to
+    // recomposite even though nothing about the parent itself changed.
+    let changed = h.render_nested(Rgba::TRANSPARENT, &[Layer::new(&green)]);
+    assert_ne!(changed, nested);
+    let texture = h.bind(changed);
+    assert!(
+        !h.present(BLACK, &[Layer::new(&texture)]),
+        "a changed nest invalidates the parent"
+    );
+    assert_colour(h.centre(), GREEN, "and the new picture is what reaches the screen");
+}
+
+#[test]
+fn a_reused_target_is_not_mistaken_for_an_unchanged_picture() {
+    // The trap this design avoids: nested targets come from a pool, so the same
+    // texture object is drawn into again and again. If the parent's key were
+    // built from the texture's own identity, the parent would hit its cache and
+    // show the previous frame for ever.
+    let picture_bytes = (SIZE.pixel_count() * 4) as usize;
+    let mut h = Harness::new(picture_bytes * 2);
+    let red = h.upload(RED);
+    let green = h.upload(GREEN);
+
+    let first = h.render_nested(Rgba::TRANSPARENT, &[Layer::new(&red)]);
+    let first_texture = h.bind(first).id();
+    let second = h.render_nested(Rgba::TRANSPARENT, &[Layer::new(&green)]);
+    let second_texture = h.bind(second).id();
+
+    assert_ne!(first_texture, second_texture, "two pictures, two identities");
+}
+
+#[test]
+fn a_nested_composite_can_be_a_different_size_from_its_parent() {
+    let gpu = gpu();
+    let mut cache = CompositeCache::new(1 << 22);
+    let renderer = Renderer::new(&gpu.device);
+    let small = Size::new(16, 16);
+
+    // A title card at a quarter of the frame, composited into its own target and
+    // then drawn into the larger one. Both live in the cache at once.
+    let frame = solid_frame(small, RED);
+    let texture = renderer.upload(&gpu.device, &gpu.queue, &frame);
+    let nested_key = CompositeKey::of(small, Rgba::TRANSPARENT, &[Layer::new(&texture)]);
+    let nested_target = cache.take_target(&gpu.device, small);
+    assert_eq!(nested_target.size(), small);
+    cache.insert(nested_key, nested_target);
+
+    let root_target = cache.take_target(&gpu.device, SIZE);
+    assert_eq!(root_target.size(), SIZE);
+    let root_key = CompositeKey::of(SIZE, BLACK, &[]);
+    cache.insert(root_key, root_target);
+
+    assert_eq!(cache.len(), 2);
+    assert!(cache.get(&nested_key).is_some());
+    assert!(cache.get(&root_key).is_some());
 }

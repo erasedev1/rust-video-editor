@@ -2,12 +2,12 @@
 
 use egui_wgpu::RenderState;
 use ve_core::Size;
-use ve_engine::EngineUpdate;
+use ve_engine::{EngineUpdate, LayerContent, PlanItem};
 use ve_media::CacheKey;
 use ve_metrics::{counters, Metrics};
 use ve_render::{
-    CompositeCache, CompositeCacheStats, CompositeKey, Layer, RenderTarget, Renderer,
-    TextureCache,
+    CompositeCache, CompositeCacheStats, CompositeKey, GpuTexture, Layer, RenderTarget,
+    Renderer, TextureCache,
 };
 
 /// How much GPU memory uploaded frames may occupy.
@@ -37,6 +37,15 @@ const COMPOSITE_BUDGET_MB: usize = 256;
 /// * the composition was composited before — the cached picture is copied into
 ///   the target the interface draws from;
 /// * otherwise — upload what is missing, composite, and cache the result.
+///
+/// # Nesting
+///
+/// The engine hands over the instant as a list of nodes in render order, every
+/// node's children before it. The preview walks that list once: each node is
+/// composited into a target of its own, which the node above samples as an
+/// ordinary layer. Each node is keyed and cached separately, so changing one
+/// layer of a deep composite redraws that composition and the ones containing
+/// it, and leaves its siblings alone.
 pub struct Preview {
     renderer: Renderer,
     /// The one texture the interface draws from. Composites are copied into it
@@ -84,15 +93,15 @@ impl Preview {
         &mut self,
         render_state: &RenderState,
         update: &EngineUpdate,
-        key_for: impl Fn(&ve_engine::VisibleClip) -> Option<CacheKey>,
+        key_for: impl Fn(&PlanItem) -> Option<CacheKey>,
     ) {
         let device = &render_state.device;
         let queue = &render_state.queue;
 
-        // The preview always renders at the sequence's own resolution, not the
-        // panel's. Composition geometry then does not depend on window size, so
-        // what is previewed is exactly what will be exported.
-        if self.target.resize(device, update.plan.size) {
+        // The preview always renders at the composition's own resolution, not
+        // the panel's. Geometry then does not depend on window size, so what is
+        // previewed is exactly what will be exported.
+        if self.target.resize(device, update.plan.size()) {
             self.register(render_state);
             // A fresh target holds nothing, so nothing is presented.
             self.presented = None;
@@ -100,77 +109,132 @@ impl Preview {
 
         // Upload anything not already resident. Keyed the same way the frame
         // cache is, so a frame revisited during scrubbing is not re-uploaded.
-        for layer in &update.layers {
-            if let Some(key) = key_for(&layer.clip) {
+        for node in &update.nodes {
+            for layer in &node.layers {
+                let LayerContent::Frame(frame) = &layer.content else { continue };
+                let Some(key) = key_for(&layer.item) else { continue };
                 if !self.textures.contains(&key) {
-                    let texture = self.renderer.upload(device, queue, &layer.frame);
+                    let texture = self.renderer.upload(device, queue, frame);
                     self.textures.insert(key, texture);
                 }
             }
         }
 
-        // Two passes: update LRU order first, then take the shared references
-        // the render pass needs. A single `&mut` lookup per layer could not
-        // hand out several textures at once.
-        let keys: Vec<Option<CacheKey>> = update
-            .layers
+        // Children before parents, so a nested target is finished before
+        // anything samples it. `keys[i]` is what node `i` composited to.
+        let mut keys: Vec<Option<CompositeKey>> = vec![None; update.nodes.len()];
+        for index in 0..update.nodes.len() {
+            keys[index] = self.render_node(device, queue, update, index, &keys, &key_for);
+        }
+
+        let root = keys.get(update.plan.root_index()).copied().flatten();
+        self.present(device, queue, root);
+        self.metrics.set_gauge(counters::GPU_TEXTURE_BYTES, self.textures.bytes() as f64);
+    }
+
+    /// Composites one node, reusing a cached picture where the contents match.
+    ///
+    /// Returns the key the node composited to, which is what the node above
+    /// hashes into its own key — that is how a change deep in a nest reaches the
+    /// top, and how an unchanged nest stops one from going further.
+    fn render_node(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        update: &EngineUpdate,
+        index: usize,
+        keys: &[Option<CompositeKey>],
+        key_for: &impl Fn(&PlanItem) -> Option<CacheKey>,
+    ) -> Option<CompositeKey> {
+        let plan = update.plan.nodes.get(index)?;
+        let resolved = update.nodes.get(index)?;
+
+        // Touch every input first: the render pass needs shared references to
+        // several textures and targets at once, which a lookup per layer taking
+        // `&mut self` could not hand out.
+        let mut bound: Vec<Option<Bound>> = Vec::with_capacity(resolved.layers.len());
+        for layer in &resolved.layers {
+            bound.push(match &layer.content {
+                LayerContent::Frame(_) => key_for(&layer.item)
+                    .filter(|key| self.textures.touch(key))
+                    .map(Bound::Frame),
+                LayerContent::Nested(child) => keys
+                    .get(*child)
+                    .copied()
+                    .flatten()
+                    .filter(|key| self.composites.touch(key))
+                    .map(Bound::Nested),
+            });
+        }
+
+        // A nested target is wrapped as an ordinary layer texture, identified by
+        // what is *in* it rather than by the target object — targets are reused,
+        // so their own identity would tell the cache nothing.
+        let nested: Vec<Option<GpuTexture>> = bound
             .iter()
-            .map(|layer| {
-                let key = key_for(&layer.clip)?;
-                self.textures.touch(&key).then_some(key)
+            .map(|b| match b {
+                Some(Bound::Nested(key)) => {
+                    let target = self.composites.peek(key)?;
+                    Some(self.renderer.bind_target(device, target, *key))
+                }
+                _ => None,
             })
             .collect();
 
         let textures = &self.textures;
-        let mut layers = Vec::with_capacity(update.layers.len());
-        for (layer, key) in update.layers.iter().zip(&keys) {
-            let Some(key) = key else { continue };
-            let Some(texture) = textures.peek(key) else { continue };
+        let mut layers = Vec::with_capacity(resolved.layers.len());
+        for ((layer, bound), nested) in resolved.layers.iter().zip(&bound).zip(&nested) {
+            let texture = match bound {
+                Some(Bound::Frame(key)) => textures.peek(key),
+                Some(Bound::Nested(_)) => nested.as_ref(),
+                None => None,
+            };
+            let Some(texture) = texture else { continue };
             layers.push(Layer {
                 texture,
-                transform: layer.clip.transform,
-                blend: layer.clip.blend,
+                transform: layer.item.transform,
+                blend: layer.item.blend,
             });
         }
 
-        let size = self.target.size();
-        let background = update.plan.background;
-        let key = CompositeKey::of(size, background, &layers);
+        let key = CompositeKey::of(plan.size, plan.background, &layers);
 
-        // 1. Already on screen. Nothing to draw, nothing to copy.
+        // Already composited: nothing to draw, and whoever needs it can sample
+        // the cached target.
+        if self.composites.touch(&key) {
+            return Some(key);
+        }
+
+        let scratch = self.composites.take_target(device, plan.size);
+        self.renderer.render(device, queue, &scratch, plan.background, &layers);
+        // Cached even when something in it was still decoding. The key describes
+        // exactly the layers that were drawn, so a hit on it is the same picture
+        // rather than a stale one; the frames still arriving change the key, and
+        // the transient entry ages out under the same LRU as everything else.
+        self.composites.insert(key, scratch);
+        Some(key)
+    }
+
+    /// Copies a node's picture into the texture the interface draws from.
+    fn present(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: Option<CompositeKey>,
+    ) {
+        let Some(key) = key else { return };
+
+        // Already on screen: nothing to draw, nothing even to copy.
         if self.presented == Some(key) {
             self.metrics.incr(counters::COMPOSITE_UNCHANGED, 1);
-            self.publish_gauges();
             return;
         }
 
-        // 2. Composited before: copy the cached picture into the target the UI
-        //    is already drawing from.
-        let copied = match self.composites.get(&key) {
-            Some(cached) => self.target.blit_from(device, queue, cached),
+        let copied = match self.composites.peek(&key) {
+            Some(target) => self.target.blit_from(device, queue, target),
             None => false,
         };
-        if copied {
-            self.presented = Some(key);
-            self.publish_gauges();
-            return;
-        }
-
-        // 3. Composite it, into a target the cache lends out so that playback
-        //    does not allocate a full-resolution texture every frame.
-        let scratch = self.composites.take_target(device, size);
-        self.renderer.render(device, queue, &scratch, background, &layers);
-        self.presented = self.target.blit_from(device, queue, &scratch).then_some(key);
-
-        if update.pending == 0 {
-            self.composites.insert(key, scratch);
-        } else {
-            // An incomplete picture is not worth a cache entry: the layers
-            // still decoding will change the key as soon as they arrive, and
-            // this composite would then never be asked for again.
-            self.composites.discard_target(scratch);
-        }
-        self.publish_gauges();
+        self.presented = copied.then_some(key);
     }
 
     pub fn texture_bytes(&self) -> usize {
@@ -183,10 +247,6 @@ impl Preview {
 
     pub fn composite_stats(&self) -> CompositeCacheStats {
         self.composites.stats()
-    }
-
-    fn publish_gauges(&self) {
-        self.metrics.set_gauge(counters::GPU_TEXTURE_BYTES, self.textures.bytes() as f64);
     }
 
     /// Points egui's renderer at the current target texture.
@@ -203,4 +263,10 @@ impl Preview {
             wgpu::FilterMode::Linear,
         ));
     }
+}
+
+/// Which cache a layer's picture was found in, once it has been touched.
+enum Bound {
+    Frame(CacheKey),
+    Nested(CompositeKey),
 }

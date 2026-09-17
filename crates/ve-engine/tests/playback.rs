@@ -14,6 +14,38 @@ use ve_media::DecodeService;
 use ve_metrics::Metrics;
 use ve_time::{Rate, Ticks};
 
+/// The root node's items: what is on screen at the top level.
+fn items(plan: &RenderPlan) -> &[PlanItem] {
+    &plan.root().items
+}
+
+/// Which clip an item came from, for asserting on order.
+#[track_caller]
+fn clip_of(item: &PlanItem) -> ClipId {
+    match item.origin {
+        Origin::Clip(id) => id,
+        Origin::Layer(id) => panic!("expected a clip, got layer {id}"),
+    }
+}
+
+/// Where in its source an item reads from.
+#[track_caller]
+fn source_time_of(item: &PlanItem) -> Ticks {
+    match item.draw {
+        Draw::Media { source_time, .. } => source_time,
+        Draw::Nested { .. } => panic!("expected media, got a nested composition"),
+    }
+}
+
+/// The decoded frame behind a resolved layer.
+#[track_caller]
+fn frame_of(layer: &ve_engine::ResolvedLayer) -> &ve_media::VideoFrame {
+    match &layer.content {
+        LayerContent::Frame(frame) => frame,
+        LayerContent::Nested(node) => panic!("expected a frame, got nested node {node}"),
+    }
+}
+
 fn testdata(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(name)
 }
@@ -87,6 +119,10 @@ impl Fixture {
     fn sequence(&self) -> &ve_core::Sequence {
         self.project.sequence(self.sequence).unwrap()
     }
+
+    fn viewing(&self) -> Viewing {
+        Viewing::Sequence(self.sequence)
+    }
 }
 
 // ---- plan evaluation ---------------------------------------------------
@@ -96,7 +132,7 @@ fn an_empty_sequence_evaluates_to_nothing() {
     let f = fixture();
     let c = evaluate(f.sequence(), Ticks::ZERO);
     assert!(c.is_empty());
-    assert_eq!(c.size, Size::new(1920, 1080));
+    assert_eq!(c.size(), Size::new(1920, 1080));
     assert!(c.required_assets().is_empty());
 }
 
@@ -106,11 +142,11 @@ fn only_clips_covering_the_instant_are_included() {
     f.add_clip(f.v1, 0, 2);
     f.add_clip(f.v1, 5, 2);
 
-    assert_eq!(evaluate(f.sequence(), Ticks::from_seconds(1)).video.len(), 1);
-    assert_eq!(evaluate(f.sequence(), Ticks::from_seconds(3)).video.len(), 0, "in the gap");
-    assert_eq!(evaluate(f.sequence(), Ticks::from_seconds(6)).video.len(), 1);
+    assert_eq!(items(&evaluate(f.sequence(), Ticks::from_seconds(1))).len(), 1);
+    assert_eq!(items(&evaluate(f.sequence(), Ticks::from_seconds(3))).len(), 0, "in the gap");
+    assert_eq!(items(&evaluate(f.sequence(), Ticks::from_seconds(6))).len(), 1);
     // Half-open: the instant a clip ends belongs to whatever comes next.
-    assert_eq!(evaluate(f.sequence(), Ticks::from_seconds(2)).video.len(), 0);
+    assert_eq!(items(&evaluate(f.sequence(), Ticks::from_seconds(2))).len(), 0);
 }
 
 #[test]
@@ -120,11 +156,10 @@ fn track_order_is_layer_order_with_v1_at_the_bottom() {
     let top = f.add_clip(f.v2, 0, 5);
 
     let c = evaluate(f.sequence(), Ticks::from_seconds(1));
-    assert_eq!(c.video.len(), 2);
-    assert_eq!(c.video[0].clip, bottom);
-    assert_eq!(c.video[0].layer, 0);
-    assert_eq!(c.video[1].clip, top);
-    assert_eq!(c.video[1].layer, 1);
+    // Order is the draw order: index 0 is the bottom layer.
+    assert_eq!(items(&c).len(), 2);
+    assert_eq!(clip_of(&items(&c)[0]), bottom);
+    assert_eq!(clip_of(&items(&c)[1]), top);
 }
 
 #[test]
@@ -138,10 +173,10 @@ fn a_clips_blend_mode_reaches_the_plan() {
     // Carried per layer rather than per track: two clips on one track can want
     // different modes, and the compositor needs the mode alongside the
     // transform to pick its pipeline.
-    assert_eq!(c.video[0].clip, bottom);
-    assert_eq!(c.video[0].blend, BlendMode::Normal, "the default is untouched");
-    assert_eq!(c.video[1].clip, top);
-    assert_eq!(c.video[1].blend, BlendMode::Screen);
+    assert_eq!(clip_of(&items(&c)[0]), bottom);
+    assert_eq!(items(&c)[0].blend, BlendMode::Normal, "the default is untouched");
+    assert_eq!(clip_of(&items(&c)[1]), top);
+    assert_eq!(items(&c)[1].blend, BlendMode::Screen);
 }
 
 #[test]
@@ -166,7 +201,7 @@ fn source_time_accounts_for_the_clips_position_and_in_point() {
         .unwrap();
 
     let c = evaluate(f.sequence(), Ticks::from_seconds(13));
-    assert_eq!(c.video[0].source_time, Ticks::from_seconds(8));
+    assert_eq!(source_time_of(&items(&c)[0]), Ticks::from_seconds(8));
 }
 
 #[test]
@@ -174,7 +209,7 @@ fn a_muted_track_contributes_nothing() {
     let mut f = fixture();
     f.add_clip(f.v1, 0, 5);
     f.project.sequence_mut(f.sequence).unwrap().track_mut(f.v1).unwrap().muted = true;
-    assert!(evaluate(f.sequence(), Ticks::from_seconds(1)).video.is_empty());
+    assert!(items(&evaluate(f.sequence(), Ticks::from_seconds(1))).is_empty());
 }
 
 #[test]
@@ -182,7 +217,7 @@ fn a_disabled_clip_contributes_nothing() {
     let mut f = fixture();
     let id = f.add_clip(f.v1, 0, 5);
     f.project.sequence_mut(f.sequence).unwrap().find_clip_mut(id).unwrap().1.enabled = false;
-    assert!(evaluate(f.sequence(), Ticks::from_seconds(1)).video.is_empty());
+    assert!(items(&evaluate(f.sequence(), Ticks::from_seconds(1))).is_empty());
 }
 
 #[test]
@@ -195,8 +230,8 @@ fn soloing_a_video_track_excludes_the_others_but_not_the_audio() {
     f.project.sequence_mut(f.sequence).unwrap().track_mut(f.v2).unwrap().solo = true;
     let c = evaluate(f.sequence(), Ticks::from_seconds(1));
 
-    assert_eq!(c.video.len(), 1);
-    assert_eq!(c.video[0].clip, soloed);
+    assert_eq!(items(&c).len(), 1);
+    assert_eq!(clip_of(&items(&c)[0]), soloed);
     assert_eq!(c.audio.len(), 1, "video solo must not silence the mix");
 }
 
@@ -212,7 +247,7 @@ fn a_muted_solo_track_does_not_silence_everything() {
     }
     // A track that is both soloed and muted must not win the solo and then
     // contribute nothing, leaving the plan empty.
-    assert_eq!(evaluate(f.sequence(), Ticks::from_seconds(1)).video.len(), 1);
+    assert_eq!(items(&evaluate(f.sequence(), Ticks::from_seconds(1))).len(), 1);
 }
 
 #[test]
@@ -246,7 +281,7 @@ fn animated_properties_resolve_at_clip_local_time() {
 
     // Timeline 11s is clip-local 1s, which is halfway through the fade.
     let c = evaluate(f.sequence(), Ticks::from_seconds(11));
-    let t = &c.video[0].transform;
+    let t = &items(&c)[0].transform;
     assert!((t.opacity - 0.5).abs() < 1e-9, "opacity {}", t.opacity);
     assert!((t.position.x - 50.0).abs() < 1e-9, "position {:?}", t.position);
 }
@@ -271,7 +306,7 @@ fn audio_gain_and_pan_resolve_from_the_clip() {
     assert_eq!(c.audio.len(), 1);
     assert_eq!(c.audio[0].gain, 0.5);
     assert_eq!(c.audio[0].pan, -0.25);
-    assert!(c.video.is_empty(), "an audio track must not produce picture");
+    assert!(items(&c).is_empty(), "an audio track must not produce picture");
 }
 
 #[test]
@@ -280,7 +315,7 @@ fn required_assets_are_deduplicated() {
     f.add_clip(f.v1, 0, 5);
     f.add_clip(f.v2, 0, 5);
     let c = evaluate(f.sequence(), Ticks::from_seconds(1));
-    assert_eq!(c.video.len(), 2);
+    assert_eq!(items(&c).len(), 2);
     assert_eq!(c.required_assets(), vec![f.asset], "both clips share one asset");
 }
 
@@ -288,11 +323,11 @@ fn required_assets_are_deduplicated() {
 fn evaluating_a_frame_range_walks_the_timeline() {
     let mut f = fixture();
     f.add_clip(f.v1, 0, 1);
-    let comps = evaluate_frames(f.sequence(), 0, 45);
+    let comps = evaluate_frames(&f.project, f.sequence(), 0, 45);
     assert_eq!(comps.len(), 45);
     // The clip covers the first second, i.e. the first 30 frames at 30 fps.
-    assert!(comps[0].video.len() == 1 && comps[29].video.len() == 1);
-    assert!(comps[30].video.is_empty(), "past the end of the clip");
+    assert!(items(&comps[0]).len() == 1 && items(&comps[29]).len() == 1);
+    assert!(items(&comps[30]).is_empty(), "past the end of the clip");
 }
 
 // ---- the playback clock ------------------------------------------------
@@ -462,14 +497,14 @@ fn engine(metrics: &Metrics) -> (PlaybackEngine, Arc<ManualTime>) {
 }
 
 /// Pumps the engine until every layer has its frame, or gives up.
-fn settle(engine: &mut PlaybackEngine, sequence: &ve_core::Sequence) -> EngineUpdate {
-    let mut last = engine.update(sequence);
+fn settle(engine: &mut PlaybackEngine, f: &Fixture) -> EngineUpdate {
+    let mut last = engine.update(&f.project, f.viewing());
     for _ in 0..200 {
         if last.is_complete() {
             return last;
         }
         std::thread::sleep(Duration::from_millis(5));
-        last = engine.update(sequence);
+        last = engine.update(&f.project, f.viewing());
     }
     last
 }
@@ -506,11 +541,11 @@ fn updating_resolves_layers_once_their_frames_decode() {
     let (mut engine, _time) = engine(&metrics);
     engine.open_project_assets(&f.project);
 
-    let update = settle(&mut engine, f.sequence());
-    assert_eq!(update.plan.video.len(), 1);
-    assert_eq!(update.layers.len(), 1, "the frame should have decoded");
+    let update = settle(&mut engine, &f);
+    assert_eq!(items(&update.plan).len(), 1);
+    assert_eq!(update.root().layers.len(), 1, "the frame should have decoded");
     assert_eq!(update.pending, 0);
-    assert_eq!(update.layers[0].frame.size(), Size::new(160, 120));
+    assert_eq!(frame_of(&update.root().layers[0]).size(), Size::new(160, 120));
 }
 
 #[test]
@@ -524,10 +559,10 @@ fn a_frame_that_is_not_ready_is_reported_pending_rather_than_waited_for() {
     // The very first update cannot have a decoded frame yet, and must return
     // immediately rather than blocking on one.
     let start = std::time::Instant::now();
-    let update = engine.update(f.sequence());
+    let update = engine.update(&f.project, f.viewing());
     assert!(start.elapsed() < Duration::from_millis(100), "update blocked on decoding");
     assert_eq!(update.pending, 1);
-    assert!(update.layers.is_empty());
+    assert!(update.root().layers.is_empty());
     assert!(!update.is_complete());
 }
 
@@ -540,14 +575,14 @@ fn scrubbing_moves_the_playhead_and_stops_at_a_frame_boundary() {
     engine.open_project_assets(&f.project);
 
     // A position between frame boundaries must snap onto one.
-    engine.scrub_to(f.sequence(), Ticks::from_millis(1_234));
+    engine.scrub_to(&f.project, f.viewing(), Ticks::from_millis(1_234));
     let rate = f.sequence().rate();
     let position = engine.clock().position();
     assert_eq!(position, rate.snap_round(position));
 
-    let update = settle(&mut engine, f.sequence());
+    let update = settle(&mut engine, &f);
     assert_eq!(update.position, position);
-    assert_eq!(update.layers.len(), 1);
+    assert_eq!(update.root().layers.len(), 1);
 }
 
 #[test]
@@ -558,12 +593,12 @@ fn playback_advances_the_plan_over_time() {
     let (mut engine, time) = engine(&metrics);
     engine.open_project_assets(&f.project);
 
-    engine.play(f.sequence());
+    engine.play(&f.project, f.viewing());
     assert!(engine.is_playing());
-    let first = engine.update(f.sequence()).position;
+    let first = engine.update(&f.project, f.viewing()).position;
 
     time.advance(Duration::from_secs(1));
-    let later = engine.update(f.sequence()).position;
+    let later = engine.update(&f.project, f.viewing()).position;
     assert_eq!(later - first, Ticks::from_seconds(1));
 }
 
@@ -575,9 +610,9 @@ fn playback_stops_at_the_end_of_the_sequence() {
     let (mut engine, time) = engine(&metrics);
     engine.open_project_assets(&f.project);
 
-    engine.play(f.sequence());
+    engine.play(&f.project, f.viewing());
     time.advance(Duration::from_secs(5));
-    let update = engine.update(f.sequence());
+    let update = engine.update(&f.project, f.viewing());
 
     assert!(update.reached_end);
     assert!(!engine.is_playing(), "the transport must stop at the end");
@@ -591,8 +626,8 @@ fn pressing_play_at_the_end_rewinds_to_the_start() {
     let metrics = Metrics::new();
     let (mut engine, _time) = engine(&metrics);
 
-    engine.scrub_to(f.sequence(), Ticks::from_seconds(2));
-    engine.play(f.sequence());
+    engine.scrub_to(&f.project, f.viewing(), Ticks::from_seconds(2));
+    engine.play(&f.project, f.viewing());
     assert_eq!(engine.clock().position(), Ticks::ZERO);
 }
 
@@ -603,7 +638,7 @@ fn stop_and_resume_keep_the_position() {
     let metrics = Metrics::new();
     let (mut engine, time) = engine(&metrics);
 
-    engine.play(f.sequence());
+    engine.play(&f.project, f.viewing());
     time.advance(Duration::from_secs(1));
     let stopped = engine.stop();
     assert_eq!(stopped, Ticks::from_seconds(1));
@@ -611,7 +646,7 @@ fn stop_and_resume_keep_the_position() {
     time.advance(Duration::from_secs(10));
     assert_eq!(engine.clock().position(), Ticks::from_seconds(1));
 
-    engine.toggle_playback(f.sequence());
+    engine.toggle_playback(&f.project, f.viewing());
     assert!(engine.is_playing());
     time.advance(Duration::from_secs(1));
     assert_eq!(engine.clock().position(), Ticks::from_seconds(2));
@@ -625,17 +660,17 @@ fn stepping_moves_exactly_one_frame_and_stops_playback() {
     let (mut engine, _time) = engine(&metrics);
     engine.open_project_assets(&f.project);
 
-    engine.play(f.sequence());
-    engine.step_frames(f.sequence(), 1);
+    engine.play(&f.project, f.viewing());
+    engine.step_frames(&f.project, f.viewing(), 1);
     assert!(!engine.is_playing(), "stepping must stop the transport");
 
     let rate = f.sequence().rate();
     let after_one = engine.clock().position();
-    engine.step_frames(f.sequence(), 1);
+    engine.step_frames(&f.project, f.viewing(), 1);
     assert_eq!(engine.clock().position() - after_one, rate.frame_duration());
 
     // Stepping back past zero clamps rather than going negative.
-    engine.step_frames(f.sequence(), -100);
+    engine.step_frames(&f.project, f.viewing(), -100);
     assert_eq!(engine.clock().position(), Ticks::ZERO);
 }
 
@@ -647,15 +682,15 @@ fn a_dropped_frame_during_playback_is_counted() {
     let (mut engine, _time) = engine(&metrics);
     engine.open_project_assets(&f.project);
 
-    engine.play(f.sequence());
+    engine.play(&f.project, f.viewing());
     // The first update cannot have a frame ready, so it is a drop.
-    let update = engine.update(f.sequence());
+    let update = engine.update(&f.project, f.viewing());
     assert_eq!(update.pending, 1);
     assert_eq!(metrics.dropped_frames(), 1);
     assert_eq!(metrics.presented_frames(), 0);
 
     // Once the frame lands, later updates present rather than drop.
-    settle(&mut engine, f.sequence());
+    settle(&mut engine, &f);
     assert!(metrics.presented_frames() > 0);
 }
 
@@ -668,10 +703,10 @@ fn multiple_tracks_resolve_to_multiple_layers_in_order() {
     let (mut engine, _time) = engine(&metrics);
     engine.open_project_assets(&f.project);
 
-    let update = settle(&mut engine, f.sequence());
-    assert_eq!(update.layers.len(), 2);
-    assert_eq!(update.layers[0].clip.clip, bottom);
-    assert_eq!(update.layers[1].clip.clip, top);
+    let update = settle(&mut engine, &f);
+    assert_eq!(update.root().layers.len(), 2);
+    assert_eq!(clip_of(&update.root().layers[0].item), bottom);
+    assert_eq!(clip_of(&update.root().layers[1].item), top);
 }
 
 #[test]
@@ -682,9 +717,9 @@ fn an_empty_instant_resolves_to_no_layers_without_requesting_anything() {
     let (mut engine, _time) = engine(&metrics);
     engine.open_project_assets(&f.project);
 
-    engine.scrub_to(f.sequence(), Ticks::from_seconds(1));
-    let update = engine.update(f.sequence());
-    assert!(update.layers.is_empty());
+    engine.scrub_to(&f.project, f.viewing(), Ticks::from_seconds(1));
+    let update = engine.update(&f.project, f.viewing());
+    assert!(update.root().layers.is_empty());
     assert_eq!(update.pending, 0);
     assert!(update.is_complete(), "nothing to show is still a complete frame");
 }
@@ -694,7 +729,7 @@ fn peek_resolves_a_sequence_without_any_decoding() {
     let mut f = fixture();
     f.add_clip(f.v1, 0, 3);
     let c = peek(&f.project, f.sequence, Ticks::from_seconds(1)).unwrap();
-    assert_eq!(c.video.len(), 1);
+    assert_eq!(items(&c).len(), 1);
     assert!(peek(&f.project, SequenceId::from_raw(999), Ticks::ZERO).is_none());
 }
 
@@ -730,7 +765,8 @@ fn the_audio_renderer_mixes_a_clip_into_the_ring() {
     renderer.register_asset(asset, testdata("tone_48k.wav"));
 
     let (producer, consumer) = AudioRing::split(48_000 * 2);
-    let written = renderer.render_into(project.sequence(sequence).unwrap(), &producer, 4800);
+    let written =
+        renderer.render_into(&project, project.sequence(sequence).unwrap(), &producer, 4800);
     assert!(written > 0, "the renderer produced no audio");
 
     let mut out = vec![0.0f32; written * 2];
@@ -754,7 +790,8 @@ fn an_instant_with_no_audio_clips_mixes_silence() {
     let mut renderer = AudioRenderer::new(ve_time::SampleRate::HZ_48000, 2, metrics);
 
     let (producer, consumer) = AudioRing::split(4096);
-    let written = renderer.render_into(project.sequence(sequence).unwrap(), &producer, 512);
+    let written =
+        renderer.render_into(&project, project.sequence(sequence).unwrap(), &producer, 512);
     assert_eq!(written, 512, "silence is still output, not a gap");
 
     let mut out = vec![9.0f32; 1024];
@@ -771,11 +808,15 @@ fn the_audio_renderer_writes_no_more_than_the_ring_has_room_for() {
 
     // Room for 100 stereo frames.
     let (producer, _consumer) = AudioRing::split(200);
-    let written = renderer.render_into(project.sequence(sequence).unwrap(), &producer, 10_000);
+    let written =
+        renderer.render_into(&project, project.sequence(sequence).unwrap(), &producer, 10_000);
     assert_eq!(written, 100);
 
     // A full ring means there is nothing to do, not an error.
-    assert_eq!(renderer.render_into(project.sequence(sequence).unwrap(), &producer, 10_000), 0);
+    assert_eq!(
+        renderer.render_into(&project, project.sequence(sequence).unwrap(), &producer, 10_000),
+        0
+    );
 }
 
 #[test]
@@ -789,6 +830,6 @@ fn seeking_the_audio_renderer_moves_where_it_mixes_from() {
     assert_eq!(renderer.position(), Ticks::from_seconds(5));
 
     let (producer, _c) = AudioRing::split(4096);
-    renderer.render_into(project.sequence(sequence).unwrap(), &producer, 480);
+    renderer.render_into(&project, project.sequence(sequence).unwrap(), &producer, 480);
     assert_eq!(renderer.position(), Ticks::from_seconds(5) + Ticks::from_millis(10));
 }

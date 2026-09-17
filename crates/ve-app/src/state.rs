@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ve_command::History;
-use ve_core::{AssetId, Clip, ClipId, Project, SequenceId, TrackId};
+use ve_core::{AssetId, Clip, ClipId, CompositionId, LayerId, Project, SequenceId, TrackId};
+use ve_engine::{Timebase, Viewing};
 use ve_project::Autosave;
 use ve_time::Ticks;
 
@@ -12,6 +13,10 @@ use ve_time::Ticks;
 #[derive(Debug, Default, Clone)]
 pub struct Selection {
     pub clips: Vec<ClipId>,
+    /// Layers selected inside an open composition. Separate from `clips`
+    /// because the two live in different places and a command has to know which
+    /// it is being handed.
+    pub layers: Vec<LayerId>,
     /// The track most recently interacted with, which is where a paste or an
     /// import-to-timeline lands.
     pub track: Option<TrackId>,
@@ -41,6 +46,32 @@ impl Selection {
 
     pub fn clear(&mut self) {
         self.clips.clear();
+        self.layers.clear();
+    }
+
+    pub fn select_only_layer(&mut self, layer: LayerId) {
+        self.layers.clear();
+        self.layers.push(layer);
+    }
+
+    pub fn toggle_layer(&mut self, layer: LayerId) {
+        match self.layers.iter().position(|l| *l == layer) {
+            Some(i) => {
+                self.layers.remove(i);
+            }
+            None => self.layers.push(layer),
+        }
+    }
+
+    pub fn is_layer_selected(&self, layer: LayerId) -> bool {
+        self.layers.contains(&layer)
+    }
+
+    pub fn only_layer(&self) -> Option<LayerId> {
+        match self.layers.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
     }
 
     pub fn only(&self) -> Option<ClipId> {
@@ -322,6 +353,11 @@ pub struct EditorState {
     /// Non-fatal problems from the last open, shown until dismissed.
     pub warnings: Vec<String>,
     pub show_performance_overlay: bool,
+    /// The composition the user has open, if any. While one is open the
+    /// timeline, the preview and the transport are all about *it* rather than
+    /// about the sequence — which is what "open a composition" has to mean for
+    /// it to be editable at all.
+    pub open_composition: Option<CompositionId>,
 }
 
 impl EditorState {
@@ -341,7 +377,39 @@ impl EditorState {
             drag: TimelineDrag::None,
             warnings: Vec::new(),
             show_performance_overlay: cfg!(debug_assertions),
+            open_composition: None,
         }
+    }
+
+    /// What the transport and the preview are pointed at.
+    ///
+    /// Derived rather than stored, so a composition that is deleted — or undone
+    /// out of existence — falls back to the sequence instead of leaving the
+    /// editor pointed at nothing.
+    pub fn viewing(&self) -> Option<Viewing> {
+        match self.open_composition {
+            Some(id) if self.project.composition(id).is_some() => {
+                Some(Viewing::Composition(id))
+            }
+            _ => self.active_sequence_id().map(Viewing::Sequence),
+        }
+    }
+
+    /// The frame grid, length and canvas of whatever is being viewed.
+    pub fn timebase(&self) -> Option<Timebase> {
+        self.viewing().and_then(|v| v.timebase(&self.project))
+    }
+
+    /// The composition the user has open, if it still exists.
+    pub fn open_composition(&self) -> Option<&ve_core::Composition> {
+        self.open_composition.and_then(|id| self.project.composition(id))
+    }
+
+    /// Opens a composition for editing, or returns to the sequence with `None`.
+    pub fn open(&mut self, composition: Option<CompositionId>) {
+        self.open_composition = composition;
+        self.selection.clear();
+        self.drag = TimelineDrag::None;
     }
 
     pub fn active_sequence_id(&self) -> Option<SequenceId> {

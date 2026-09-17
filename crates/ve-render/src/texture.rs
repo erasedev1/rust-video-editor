@@ -27,11 +27,27 @@ pub const FRAME_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub struct TextureId(u64);
 
 impl TextureId {
+    /// The top bit separates the two ways an identity is minted, so a content
+    /// hash can never collide with an upload counter.
+    const CONTENT_BIT: u64 = 1 << 63;
+
     fn next() -> Self {
         // Relaxed is enough: the only requirement is that no two uploads ever
         // get the same number, which a fetch_add guarantees on its own.
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        TextureId(NEXT.fetch_add(1, Ordering::Relaxed))
+        TextureId(NEXT.fetch_add(1, Ordering::Relaxed) & !Self::CONTENT_BIT)
+    }
+
+    /// An identity for a texture whose *contents* are already identified by a
+    /// hash — a composited picture held in the render cache.
+    ///
+    /// A nested composition is drawn into a target that is reused from frame to
+    /// frame, so the object's identity says nothing about its pixels. Its
+    /// composite key does, and using that here is what lets a parent composite
+    /// be cached: two frames whose nested composition came out the same share an
+    /// identity, and one whose nested composition changed does not.
+    pub fn from_content(hash: u64) -> Self {
+        TextureId(hash | Self::CONTENT_BIT)
     }
 
     pub fn raw(self) -> u64 {
@@ -73,6 +89,10 @@ impl GpuTexture {
     }
 
     /// GPU memory this texture occupies, for the budget.
+    ///
+    /// Zero for a texture that only borrows a render target's memory: the target
+    /// is accounted for by the cache that owns it, and counting it twice would
+    /// evict twice as much as it should.
     pub fn byte_size(&self) -> usize {
         self.bytes
     }
@@ -187,6 +207,47 @@ impl GpuTexture {
         });
 
         GpuTexture::new(texture, view, bind_group, size)
+    }
+}
+
+impl GpuTexture {
+    /// Builds a bindable texture over a render target's own texture.
+    ///
+    /// Shares the target's texture rather than copying it — `wgpu::Texture` is a
+    /// handle — so a nested composition is sampled straight out of the target it
+    /// was drawn into, with no intermediate copy.
+    pub(crate) fn wrap_target(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        target: &crate::target::RenderTarget,
+        content: crate::cache::CompositeKey,
+    ) -> GpuTexture {
+        let texture = target.texture().clone();
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("verge-nested-bind-group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+        let size = target.size();
+        GpuTexture {
+            texture,
+            view,
+            bind_group,
+            size,
+            bytes: 0,
+            id: TextureId::from_content(content.raw()),
+        }
     }
 }
 

@@ -287,6 +287,23 @@ impl Renderer {
         GpuTexture::upload(device, queue, &self.texture_layout, &self.sampler, frame)
     }
 
+    /// Wraps a render target so it can be drawn as a layer.
+    ///
+    /// This is what makes a nested composition a layer like any other: the
+    /// target it was drawn into is bound with the same layout and sampler a
+    /// decoded frame gets, and the compositor cannot tell the difference.
+    ///
+    /// `content` identifies what is *in* the target — a target is reused from
+    /// frame to frame, so its own identity would tell the render cache nothing.
+    pub fn bind_target(
+        &self,
+        device: &wgpu::Device,
+        target: &RenderTarget,
+        content: crate::cache::CompositeKey,
+    ) -> GpuTexture {
+        GpuTexture::wrap_target(device, &self.texture_layout, &self.sampler, target, content)
+    }
+
     /// Composites `layers` into `target`, back to front, over `background`.
     ///
     /// The whole composition is one render pass and one submit. Every layer
