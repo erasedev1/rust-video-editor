@@ -18,6 +18,13 @@
 //! passes between layer draws, masks are extra bindings, and a nested
 //! composition is a layer whose texture is another target's output.
 //!
+//! # Caching
+//!
+//! A composited picture is cached on a hash of everything that produced it, so
+//! an unchanged composition is never drawn twice and changing one clip only
+//! recomputes the instants that clip appears in. See [`cache`] for why the
+//! cache is content-addressed rather than tracking dependencies.
+//!
 //! # Colour
 //!
 //! Frames are uploaded as non-sRGB `Rgba8Unorm` and composited non-linearly,
@@ -25,16 +32,18 @@
 //! See [`texture::FRAME_FORMAT`] for the reasoning and for what a linear-light
 //! mode would need.
 
+pub mod cache;
 mod gpu;
 mod renderer;
 mod target;
 pub mod texture;
 pub mod transform;
 
+pub use cache::{CompositeCache, CompositeCacheStats, CompositeKey};
 pub use gpu::GpuContext;
 pub use renderer::{Layer, Renderer};
 pub use target::RenderTarget;
-pub use texture::{GpuTexture, TextureCache, FRAME_FORMAT};
+pub use texture::{GpuTexture, TextureCache, TextureId, FRAME_FORMAT};
 pub use transform::{fit_scale, layer_matrix};
 
 #[derive(Debug, thiserror::Error)]

@@ -5,10 +5,20 @@ use ve_core::Size;
 use ve_engine::EngineUpdate;
 use ve_media::CacheKey;
 use ve_metrics::{counters, Metrics};
-use ve_render::{Layer, RenderTarget, Renderer, TextureCache};
+use ve_render::{
+    CompositeCache, CompositeCacheStats, CompositeKey, Layer, RenderTarget, Renderer,
+    TextureCache,
+};
 
 /// How much GPU memory uploaded frames may occupy.
 const TEXTURE_BUDGET_MB: usize = 384;
+
+/// How much GPU memory composited pictures may occupy.
+///
+/// Smaller than the frame budget on purpose: a composite is only worth keeping
+/// while the edit that produced it stands, whereas a decoded frame stays useful
+/// across every change that does not touch its clip.
+const COMPOSITE_BUDGET_MB: usize = 256;
 
 /// Composites the timeline into a texture the interface can draw.
 ///
@@ -16,10 +26,27 @@ const TEXTURE_BUDGET_MB: usize = 384;
 /// a decoded frame is uploaded once and both the compositor and the UI draw
 /// from the same texture. A separate device would mean a copy across the PCIe
 /// bus for every frame.
+///
+/// # Three costs, not one
+///
+/// A repaint takes the cheapest path that is correct:
+///
+/// * the composition is unchanged — nothing happens at all, because the picture
+///   already on screen is still the right one. This is the usual case while
+///   editing, where most repaints come from the pointer moving over a panel;
+/// * the composition was composited before — the cached picture is copied into
+///   the target the interface draws from;
+/// * otherwise — upload what is missing, composite, and cache the result.
 pub struct Preview {
     renderer: Renderer,
+    /// The one texture the interface draws from. Composites are copied into it
+    /// rather than handed to egui directly, so the handle registered with the UI
+    /// stays valid for as long as the resolution does.
     target: RenderTarget,
     textures: TextureCache,
+    composites: CompositeCache,
+    /// Which composite the target currently holds, if it is still current.
+    presented: Option<CompositeKey>,
     /// The handle egui draws with, re-registered whenever the target is rebuilt.
     texture_id: Option<egui::TextureId>,
     metrics: Metrics,
@@ -34,6 +61,9 @@ impl Preview {
             target,
             textures: TextureCache::with_budget_mb(TEXTURE_BUDGET_MB)
                 .with_metrics(metrics.clone()),
+            composites: CompositeCache::with_budget_mb(COMPOSITE_BUDGET_MB)
+                .with_metrics(metrics.clone()),
+            presented: None,
             texture_id: None,
             metrics,
         };
@@ -64,6 +94,8 @@ impl Preview {
         // what is previewed is exactly what will be exported.
         if self.target.resize(device, update.composition.size) {
             self.register(render_state);
+            // A fresh target holds nothing, so nothing is presented.
+            self.presented = None;
         }
 
         // Upload anything not already resident. Keyed the same way the frame
@@ -97,14 +129,44 @@ impl Preview {
             layers.push(Layer { texture, transform: layer.clip.transform });
         }
 
-        self.renderer.render(
-            device,
-            queue,
-            &self.target,
-            update.composition.background,
-            &layers,
-        );
-        self.metrics.set_gauge(counters::GPU_TEXTURE_BYTES, self.textures.bytes() as f64);
+        let size = self.target.size();
+        let background = update.composition.background;
+        let key = CompositeKey::of(size, background, &layers);
+
+        // 1. Already on screen. Nothing to draw, nothing to copy.
+        if self.presented == Some(key) {
+            self.metrics.incr(counters::COMPOSITE_UNCHANGED, 1);
+            self.publish_gauges();
+            return;
+        }
+
+        // 2. Composited before: copy the cached picture into the target the UI
+        //    is already drawing from.
+        let copied = match self.composites.get(&key) {
+            Some(cached) => self.target.blit_from(device, queue, cached),
+            None => false,
+        };
+        if copied {
+            self.presented = Some(key);
+            self.publish_gauges();
+            return;
+        }
+
+        // 3. Composite it, into a target the cache lends out so that playback
+        //    does not allocate a full-resolution texture every frame.
+        let scratch = self.composites.take_target(device, size);
+        self.renderer.render(device, queue, &scratch, background, &layers);
+        self.presented = self.target.blit_from(device, queue, &scratch).then_some(key);
+
+        if update.pending == 0 {
+            self.composites.insert(key, scratch);
+        } else {
+            // An incomplete picture is not worth a cache entry: the layers
+            // still decoding will change the key as soon as they arrive, and
+            // this composite would then never be asked for again.
+            self.composites.discard_target(scratch);
+        }
+        self.publish_gauges();
     }
 
     pub fn texture_bytes(&self) -> usize {
@@ -113,6 +175,14 @@ impl Preview {
 
     pub fn texture_count(&self) -> usize {
         self.textures.len()
+    }
+
+    pub fn composite_stats(&self) -> CompositeCacheStats {
+        self.composites.stats()
+    }
+
+    fn publish_gauges(&self) {
+        self.metrics.set_gauge(counters::GPU_TEXTURE_BYTES, self.textures.bytes() as f64);
     }
 
     /// Points egui's renderer at the current target texture.

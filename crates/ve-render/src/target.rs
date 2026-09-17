@@ -36,10 +36,13 @@ impl RenderTarget {
             format,
             // RENDER_ATTACHMENT to draw into, TEXTURE_BINDING so the UI can
             // display it and a nested composition can sample it, COPY_SRC so
-            // export and the tests can read it back.
+            // export and the tests can read it back, COPY_DST so a composite
+            // kept in the render cache can be copied into the target the
+            // interface is already drawing from.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -58,6 +61,12 @@ impl RenderTarget {
         &self.view
     }
 
+    /// GPU memory this target occupies, for a cache budget.
+    pub fn byte_size(&self) -> usize {
+        let per_pixel = self.format.block_copy_size(None).unwrap_or(4) as usize;
+        self.size.pixel_count() as usize * per_pixel
+    }
+
     pub fn texture(&self) -> &wgpu::Texture {
         &self.texture
     }
@@ -72,6 +81,67 @@ impl RenderTarget {
             return false;
         }
         *self = RenderTarget::with_format(device, size, self.format);
+        true
+    }
+
+    /// Copies another target's image into this one on the GPU.
+    ///
+    /// This is how a composite held in the render cache reaches the screen: the
+    /// interface draws from one long-lived texture, so a cache hit copies into
+    /// that texture rather than re-registering a different one with the UI
+    /// every frame. A same-format copy of the whole image is a single blit with
+    /// no shader, no pass and no host round trip.
+    ///
+    /// Returns whether anything was copied. A size or format mismatch is a
+    /// caller error — the cache keys a composite on its size, so a hit cannot
+    /// be the wrong shape — and is reported rather than silently producing a
+    /// half-copied picture.
+    pub fn blit_from(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        source: &RenderTarget,
+    ) -> bool {
+        // A target already holds its own contents, and wgpu rejects a copy
+        // between overlapping regions of one texture, so this is a no-op rather
+        // than an error.
+        if source.texture == self.texture {
+            return true;
+        }
+        if source.size != self.size || source.format != self.format {
+            log::error!(
+                "refusing to copy a {:?} {:?} target into a {:?} {:?} one",
+                source.size,
+                source.format,
+                self.size,
+                self.format
+            );
+            return false;
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("verge-blit-encoder"),
+        });
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &source.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: self.size.width,
+                height: self.size.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
         true
     }
 

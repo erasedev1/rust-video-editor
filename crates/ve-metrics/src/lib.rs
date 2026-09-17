@@ -232,9 +232,19 @@ pub mod counters {
     pub const DECODE_CANCELLED: &str = "decode_cancelled";
     pub const SEEKS: &str = "seeks";
 
+    /// A composite served from the render cache rather than drawn again.
+    pub const COMPOSITE_CACHE_HIT: &str = "composite_cache_hit";
+    pub const COMPOSITE_CACHE_MISS: &str = "composite_cache_miss";
+    /// A repaint whose composition was unchanged, so nothing was drawn or even
+    /// copied. The cheapest possible frame, and the common one in an editor
+    /// that is being edited rather than played.
+    pub const COMPOSITE_UNCHANGED: &str = "composite_unchanged";
+
     pub const FRAME_CACHE_BYTES: &str = "frame_cache_bytes";
     pub const FRAME_CACHE_ENTRIES: &str = "frame_cache_entries";
     pub const GPU_TEXTURE_BYTES: &str = "gpu_texture_bytes";
+    pub const COMPOSITE_CACHE_BYTES: &str = "composite_cache_bytes";
+    pub const COMPOSITE_CACHE_ENTRIES: &str = "composite_cache_entries";
 }
 
 #[cfg(test)]

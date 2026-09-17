@@ -532,6 +532,11 @@ impl eframe::App for VergeApp {
             let input = panels::overlay::OverlayInput {
                 metrics: &self.metrics,
                 frame_cache: self.engine.decode_service().cache_stats(),
+                composite_cache: self
+                    .preview
+                    .as_ref()
+                    .map(|p| p.composite_stats())
+                    .unwrap_or_default(),
                 gpu_texture_bytes: self
                     .preview
                     .as_ref()

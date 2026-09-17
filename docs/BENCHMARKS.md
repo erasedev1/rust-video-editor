@@ -100,6 +100,36 @@ Compositing scales linearly with layer count, which is what a rasteriser filling
 1080p once per layer should do. On real hardware these are fill-rate bound and
 far cheaper.
 
+### The render cache
+
+Taken in a single run on a later container — also llvmpipe, but a different
+machine from the table above, so the plain composite was re-measured alongside
+the cache rather than compared across runs. Four 1080p layers throughout,
+`--sample-size 20`:
+
+| Benchmark                              |     Time | Cheaper by |
+|----------------------------------------|---------:|-----------:|
+| `composite_1080p/4` (no cache)         | 29.3 ms  |         1× |
+| `render_cache_1080p_4layers/miss`      | 28.7 ms  |      1.02× |
+| `render_cache_1080p_4layers/hit`       | 0.74 ms  |        40× |
+| `render_cache_1080p_4layers/key`       |  254 ns  |   115,000× |
+
+Three things worth reading off this:
+
+- **A hit is 40× cheaper than the composite it replaces** here, because it is one
+  GPU-to-GPU blit instead of four full-frame draws. On real hardware both sides
+  shrink; the ratio is what carries over, and it grows with every pass compositing
+  gains.
+- **A miss costs no more than compositing without a cache at all.** The extra blit
+  and the store are inside the noise of the composite itself, so the cache is not
+  a tax on the frames it fails to serve.
+- **Keying is free.** 254 ns against a 29 ms composite is 0.0009%, which is what
+  makes it reasonable to compute a key on every repaint — including the repaints
+  that then do nothing because the composition has not changed.
+
+The cheapest case is not in the table: when the composition is unchanged the
+preview does no GPU work at all, so there is nothing to measure but the key.
+
 ## Live measurements
 
 The editor's own overlay reports what it is doing, measured the same way. From
@@ -131,7 +161,8 @@ Named because their absence is a gap, not because they are unimportant:
 
 - Seeking through 4K footage (no 4K fixture; the committed fixtures are small
   deliberately)
-- Effect-heavy compositions (no effects yet)
+- Effect-heavy compositions (no effects yet), which is where the render cache
+  starts to matter most
 - Export (not written yet)
 - Thumbnail generation (not written yet)
 - Timeline scrolling and zoom as interactions, as opposed to the queries

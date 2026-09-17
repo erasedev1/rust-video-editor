@@ -1,6 +1,7 @@
 //! GPU textures for decoded frames, and a budget for them.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ve_core::Size;
 use ve_media::{CacheKey, VideoFrame};
@@ -16,6 +17,28 @@ use ve_metrics::{counters, Metrics};
 /// work later, as an explicit project setting, not as a silent default.
 pub const FRAME_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// A process-unique identity for an uploaded texture.
+///
+/// The point of it is the composite cache. A texture's pixels never change
+/// after upload — a new decoded frame means a new upload — so the identity of
+/// the object *is* the identity of its contents, and a cached composite can be
+/// keyed on which textures went into it without hashing a megabyte of pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TextureId(u64);
+
+impl TextureId {
+    fn next() -> Self {
+        // Relaxed is enough: the only requirement is that no two uploads ever
+        // get the same number, which a fetch_add guarantees on its own.
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        TextureId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 /// A decoded frame living in GPU memory.
 ///
 /// Carries its own bind group, built once at upload. Drawing a layer is then
@@ -26,11 +49,17 @@ pub struct GpuTexture {
     pub(crate) bind_group: wgpu::BindGroup,
     size: Size,
     bytes: usize,
+    id: TextureId,
 }
 
 impl GpuTexture {
     pub fn size(&self) -> Size {
         self.size
+    }
+
+    /// This texture's identity, which stands in for its contents.
+    pub fn id(&self) -> TextureId {
+        self.id
     }
 
     /// The underlying texture, for a caller that needs to bind it itself.
@@ -55,7 +84,7 @@ impl GpuTexture {
         size: Size,
     ) -> Self {
         let bytes = size.pixel_count() as usize * 4;
-        GpuTexture { texture, view, bind_group, size, bytes }
+        GpuTexture { texture, view, bind_group, size, bytes, id: TextureId::next() }
     }
 
     /// Uploads a decoded frame into a new texture.

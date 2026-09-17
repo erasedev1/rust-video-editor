@@ -8,9 +8,9 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::hint::black_box;
 use std::sync::Arc;
-use ve_core::{Rgba, Size, TransformState};
+use ve_core::{Rgba, Size, TransformState, Vec2};
 use ve_media::{PixelFormat, VideoFrame};
-use ve_render::{GpuContext, Layer, RenderTarget, Renderer};
+use ve_render::{CompositeCache, CompositeKey, GpuContext, Layer, RenderTarget, Renderer};
 use ve_time::Ticks;
 
 fn solid_frame(size: Size) -> VideoFrame {
@@ -76,6 +76,79 @@ fn composite(c: &mut Criterion) {
     group.finish();
 }
 
+/// The render cache's two paths, against the composite they replace.
+///
+/// `hit` is what a repaint of an unchanged-but-evicted picture costs: a key, a
+/// lookup and a blit. `miss` is the full path — composite, blit, store — so the
+/// difference between the two is what the cache actually saves. A repaint whose
+/// composition has not changed at all costs neither: the preview presents what
+/// is already on screen and does no GPU work, which is why that case is not
+/// benchmarked here.
+fn render_cache(c: &mut Criterion) {
+    let Ok(gpu) = GpuContext::headless() else { return };
+    let mut renderer = Renderer::new(&gpu.device);
+    let size = Size::new(1920, 1080);
+    let present = RenderTarget::new(&gpu.device, size);
+    let frame = solid_frame(size);
+
+    const LAYERS: usize = 4;
+    let textures: Vec<_> =
+        (0..LAYERS).map(|_| renderer.upload(&gpu.device, &gpu.queue, &frame)).collect();
+    let layers: Vec<Layer> = textures
+        .iter()
+        .map(|t| Layer { texture: t, transform: TransformState::default() })
+        .collect();
+
+    let mut group = c.benchmark_group("render_cache_1080p_4layers");
+
+    group.bench_function("hit", |b| {
+        let mut cache = CompositeCache::with_budget_mb(256);
+        let key = CompositeKey::of(size, Rgba::BLACK, &layers);
+        let target = cache.take_target(&gpu.device, size);
+        renderer.render(&gpu.device, &gpu.queue, &target, Rgba::BLACK, &layers);
+        cache.insert(key, target);
+
+        b.iter(|| {
+            let cached = cache.get(black_box(&key)).expect("stored above");
+            present.blit_from(&gpu.device, &gpu.queue, cached);
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        });
+    });
+
+    group.bench_function("miss", |b| {
+        let mut cache = CompositeCache::with_budget_mb(256);
+        // A moving layer, so every iteration is a picture the cache has not
+        // seen — which is also what playing a sequence with an animated
+        // transform looks like.
+        let mut nudge = 0.0f64;
+        b.iter(|| {
+            nudge += 1.0;
+            let moved: Vec<Layer> = textures
+                .iter()
+                .map(|t| Layer {
+                    texture: t,
+                    transform: TransformState {
+                        position: Vec2::new(nudge, 0.0),
+                        ..Default::default()
+                    },
+                })
+                .collect();
+            let key = CompositeKey::of(size, Rgba::BLACK, &moved);
+            let target = cache.take_target(&gpu.device, size);
+            renderer.render(&gpu.device, &gpu.queue, &target, Rgba::BLACK, &moved);
+            present.blit_from(&gpu.device, &gpu.queue, &target);
+            cache.insert(key, target);
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        });
+    });
+
+    group.bench_function("key", |b| {
+        b.iter(|| black_box(CompositeKey::of(size, Rgba::BLACK, black_box(&layers))));
+    });
+
+    group.finish();
+}
+
 fn transform_math(c: &mut Criterion) {
     let source = Size::new(1920, 1080);
     let composition = Size::new(1920, 1080);
@@ -91,5 +164,5 @@ fn transform_math(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, upload, composite, transform_math);
+criterion_group!(benches, upload, composite, render_cache, transform_math);
 criterion_main!(benches);

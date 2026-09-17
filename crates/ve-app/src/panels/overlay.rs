@@ -8,11 +8,13 @@
 use egui::{Color32, Context, RichText};
 use ve_media::CacheStats;
 use ve_metrics::{counters, spans, Metrics};
+use ve_render::CompositeCacheStats;
 
 /// Everything the overlay reports that does not come from [`Metrics`].
 pub struct OverlayInput<'a> {
     pub metrics: &'a Metrics,
     pub frame_cache: CacheStats,
+    pub composite_cache: CompositeCacheStats,
     pub gpu_texture_bytes: usize,
     pub gpu_texture_count: usize,
     pub adapter: &'a str,
@@ -96,6 +98,30 @@ pub fn show(ctx: &Context, input: &OverlayInput<'_>) {
                     "cache    {:>5.0} MB / {:.0} MB",
                     cache.bytes as f64 / 1048576.0,
                     cache.capacity_bytes as f64 / 1048576.0
+                ))
+                .monospace()
+                .size(10.5)
+                .color(crate::theme::TEXT_DIM),
+            );
+            // The render cache's hit rate answers a question the composite
+            // timing cannot: whether the compositor is being asked to redraw
+            // pictures it has already produced.
+            let composites = input.composite_cache;
+            ui.label(
+                RichText::new(format!(
+                    "renders  {:>6}  {:.0}% hit",
+                    composites.entries,
+                    composites.hit_rate() * 100.0
+                ))
+                .monospace()
+                .size(10.5)
+                .color(crate::theme::TEXT_DIM),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "  cached {:>5.0} MB   unchanged {}",
+                    composites.bytes as f64 / 1048576.0,
+                    snapshot.counters.get(counters::COMPOSITE_UNCHANGED).copied().unwrap_or(0)
                 ))
                 .monospace()
                 .size(10.5)

@@ -193,6 +193,48 @@ texture bind group is built once at upload and cached with the texture. A
 ten-layer composite is ten draws, one pass, one submit, and no per-frame
 allocation.
 
+### The render cache
+
+A composited picture is cached on a **hash of everything the compositor read to
+produce it**: target size, background, and per layer the identity of its source
+texture and the transform applied to it. A texture is written once at upload and
+never again, so the identity of the object stands in for its pixels and a key
+costs a couple of hundred nanoseconds rather than a hash of the frame.
+
+The alternative — recording each frame's dependencies and invalidating them when
+an edit touches one — has a failure mode that is very hard to test for: a
+dependency nobody declared. Add a property to the model, forget to list it, and
+the preview shows a stale picture, which looks like the edit did not work.
+Content addressing cannot go stale, because a key is derived from the same values
+the shader is handed.
+
+**Incremental invalidation then falls out rather than being implemented.**
+Changing one clip changes the key of every instant that clip is visible at, so
+those instants are recomposited, while every other cached instant keeps its key
+and is still a hit. Stale entries are not deleted eagerly; they age out under the
+same LRU that bounds the cache.
+
+A repaint takes the cheapest path that is correct:
+
+| Case                                  | Cost                                |
+|---------------------------------------|-------------------------------------|
+| Composition unchanged since last frame | nothing at all                     |
+| Composited before                     | one GPU-to-GPU blit                 |
+| Otherwise                             | upload, composite, blit, store      |
+
+The interface draws from one long-lived texture and cached pictures are blitted
+into it, rather than each cache entry being registered with egui in turn: a
+handle that never changes is cheaper than a handle that changes every frame.
+Evicted targets are kept for reuse, because allocating a full-resolution texture
+per frame during playback would cost more than the composite being saved.
+
+The unchanged-composition case is the one that matters most today, and it is not
+the cache: while editing, most repaints come from the pointer moving over a
+panel, and the picture already on screen is still correct. Cache hits come from
+revisiting instants — scrubbing back over a cut, replaying a short loop — and
+from every extra pass that compositing grows: effects, nested compositions and
+colour management all multiply what a hit is worth.
+
 ### Colour
 
 Output is **premultiplied**, paired with a `One / OneMinusSrcAlpha` blend. That

@@ -28,11 +28,17 @@ that belongs with the playback work rather than with cutting.
 ## Phase 3 — Rendering
 
 - Frame-level render caching keyed on the composition, so an unchanged clip is
-  not recomposited
-- Incremental invalidation: change one clip, recompute only what depends on it
+  not recomposited ✅
+- Incremental invalidation: change one clip, recompute only what depends on it ✅
 - Blend modes as pipeline variants
 - Nested compositions as layers
 - Colour management, with linear-light compositing as an explicit setting
+
+The cache is content-addressed — a picture is keyed on a hash of the textures,
+transforms, size and background that produced it — so invalidation is a
+consequence of the key rather than a list of dependencies that can go out of
+date. See `docs/ARCHITECTURE.md` for why, and `docs/BENCHMARKS.md` for what a hit
+costs against a composite.
 
 ## Phase 4 — Audio
 
