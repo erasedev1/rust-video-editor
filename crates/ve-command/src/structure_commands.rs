@@ -2,9 +2,11 @@
 
 use std::any::Any;
 
-use ve_core::{ClipId, Marker, MarkerId, Project, SequenceId, Track, TrackId, TrackKind};
+use ve_core::{
+    BlendMode, ClipId, Marker, MarkerId, Project, SequenceId, Track, TrackId, TrackKind,
+};
 
-use crate::{Command, CommandError};
+use crate::{clip_mut, Command, CommandError};
 
 /// Appends a video or audio track.
 #[derive(Debug)]
@@ -361,12 +363,7 @@ impl Command for SetClipEnabled {
     }
 
     fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
-        let clip = project
-            .sequence_mut(self.sequence)
-            .ok_or(CommandError::SequenceNotFound(self.sequence))?
-            .find_clip_mut(self.clip)
-            .map(|(_, c)| c)
-            .ok_or(CommandError::ClipNotFound(self.clip))?;
+        let clip = clip_mut(project, self.sequence, self.clip)?;
         self.previous.get_or_insert(clip.enabled);
         clip.enabled = self.enabled;
         Ok(())
@@ -375,14 +372,64 @@ impl Command for SetClipEnabled {
     fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
         let previous =
             self.previous.ok_or_else(|| CommandError::Rejected("never applied".into()))?;
-        let clip = project
-            .sequence_mut(self.sequence)
-            .ok_or(CommandError::SequenceNotFound(self.sequence))?
-            .find_clip_mut(self.clip)
-            .map(|(_, c)| c)
-            .ok_or(CommandError::ClipNotFound(self.clip))?;
-        clip.enabled = previous;
+        clip_mut(project, self.sequence, self.clip)?.enabled = previous;
         Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Sets a clip's blend mode.
+///
+/// Discrete rather than animatable, so it is its own command rather than a
+/// [`crate::SetClipProperty`]: a blend mode has no in-between values to
+/// interpolate, and a keyframe on one would mean nothing.
+#[derive(Debug)]
+pub struct SetClipBlendMode {
+    sequence: SequenceId,
+    clip: ClipId,
+    blend: BlendMode,
+    previous: Option<BlendMode>,
+}
+
+impl SetClipBlendMode {
+    pub fn new(sequence: SequenceId, clip: ClipId, blend: BlendMode) -> Self {
+        SetClipBlendMode { sequence, clip, blend, previous: None }
+    }
+}
+
+impl Command for SetClipBlendMode {
+    fn name(&self) -> &str {
+        "Set Blend Mode"
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let clip = clip_mut(project, self.sequence, self.clip)?;
+        self.previous.get_or_insert(clip.blend);
+        clip.blend = self.blend;
+        Ok(())
+    }
+
+    fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let previous =
+            self.previous.ok_or_else(|| CommandError::Rejected("never applied".into()))?;
+        clip_mut(project, self.sequence, self.clip)?.blend = previous;
+        Ok(())
+    }
+
+    /// Cycling through modes in the inspector is one decision, not one per mode
+    /// tried, so a later change to the same clip absorbs the earlier one and
+    /// keeps the mode it started from.
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        match next.as_any().downcast_ref::<SetClipBlendMode>() {
+            Some(next) if next.clip == self.clip && next.sequence == self.sequence => {
+                self.blend = next.blend;
+                true
+            }
+            _ => false,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {

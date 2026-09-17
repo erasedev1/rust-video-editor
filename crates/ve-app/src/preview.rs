@@ -126,7 +126,11 @@ impl Preview {
         for (layer, key) in update.layers.iter().zip(&keys) {
             let Some(key) = key else { continue };
             let Some(texture) = textures.peek(key) else { continue };
-            layers.push(Layer { texture, transform: layer.clip.transform });
+            layers.push(Layer {
+                texture,
+                transform: layer.clip.transform,
+                blend: layer.clip.blend,
+            });
         }
 
         let size = self.target.size();

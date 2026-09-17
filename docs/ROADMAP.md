@@ -30,9 +30,16 @@ that belongs with the playback work rather than with cutting.
 - Frame-level render caching keyed on the composition, so an unchanged clip is
   not recomposited ✅
 - Incremental invalidation: change one clip, recompute only what depends on it ✅
-- Blend modes as pipeline variants
+- Blend modes as pipeline variants ✅ — normal, add, multiply and screen
 - Nested compositions as layers
 - Colour management, with linear-light compositing as an explicit setting
+
+The four blend modes are the ones the fixed-function blender can evaluate from a
+premultiplied source, so each costs a pipeline variant and nothing else. Overlay,
+soft light and the rest need the backdrop as a *texture* rather than as a blend
+factor, which means compositing into an intermediate target and reading a copy of
+it — the machinery nested compositions introduce, so they wait for it rather than
+arriving as a special case.
 
 The cache is content-addressed — a picture is keyed on a hash of the textures,
 transforms, size and background that produced it — so invalidation is a

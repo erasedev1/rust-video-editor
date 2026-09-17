@@ -31,8 +31,8 @@ pub use property_commands::{
     ClipProperty, PropertyValue, RemoveClipKeyframe, SetClipKeyframe, SetClipProperty,
 };
 pub use structure_commands::{
-    AddMarker, AddTrack, MoveTrack, RemoveMarker, RemoveTrack, SetClipEnabled,
-    SetSequenceFormat, SetTrackFlag, TrackFlag,
+    AddMarker, AddTrack, MoveTrack, RemoveMarker, RemoveTrack, SetClipBlendMode,
+    SetClipEnabled, SetSequenceFormat, SetTrackFlag, TrackFlag,
 };
 
 /// An undoable edit.
@@ -154,6 +154,25 @@ pub(crate) fn clip_of(
         .track(track)
         .ok_or(CommandError::TrackNotFound(track))?
         .clip(clip)
+        .ok_or(CommandError::ClipNotFound(clip))
+}
+
+/// Resolves a clip for mutation without naming its track.
+///
+/// For the commands that change something about a clip in place — a flag, a
+/// blend mode — where which track it sits on is irrelevant. Commands that move
+/// clips between tracks go through [`track_mut`] instead, because they need the
+/// track itself.
+pub(crate) fn clip_mut(
+    project: &mut Project,
+    sequence: SequenceId,
+    clip: ClipId,
+) -> Result<&mut Clip, CommandError> {
+    project
+        .sequence_mut(sequence)
+        .ok_or(CommandError::SequenceNotFound(sequence))?
+        .find_clip_mut(clip)
+        .map(|(_, c)| c)
         .ok_or(CommandError::ClipNotFound(clip))
 }
 

@@ -6,7 +6,7 @@
 //! loud", which makes every question about track ordering, muting, soloing and
 //! animation answerable in a unit test rather than by looking at a preview.
 
-use ve_core::{AssetId, ClipId, Sequence, Size, TrackId, TrackKind, TransformState};
+use ve_core::{AssetId, BlendMode, ClipId, Sequence, Size, TrackId, TrackKind, TransformState};
 use ve_time::Ticks;
 
 /// One clip contributing picture at a given instant.
@@ -19,6 +19,8 @@ pub struct VisibleClip {
     pub source_time: Ticks,
     /// Every animated property resolved at this instant.
     pub transform: TransformState,
+    /// How this clip combines with the layers beneath it.
+    pub blend: BlendMode,
     /// Compositing order: 0 is the bottom layer.
     pub layer: usize,
 }
@@ -113,6 +115,7 @@ pub fn evaluate(sequence: &Sequence, at: Ticks) -> Composition {
                     asset: clip.asset,
                     source_time,
                     transform: clip.transform.evaluate(local),
+                    blend: clip.blend,
                     layer: video.len(),
                 });
             }

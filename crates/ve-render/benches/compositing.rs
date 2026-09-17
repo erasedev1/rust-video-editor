@@ -8,7 +8,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::hint::black_box;
 use std::sync::Arc;
-use ve_core::{Rgba, Size, TransformState, Vec2};
+use ve_core::{BlendMode, Rgba, Size, TransformState, Vec2};
 use ve_media::{PixelFormat, VideoFrame};
 use ve_render::{CompositeCache, CompositeKey, GpuContext, Layer, RenderTarget, Renderer};
 use ve_time::Ticks;
@@ -55,10 +55,7 @@ fn composite(c: &mut Criterion) {
     let mut group = c.benchmark_group("composite_1080p");
     for &layers in &[1usize, 4, 16] {
         group.bench_with_input(BenchmarkId::from_parameter(layers), &layers, |b, &layers| {
-            let list: Vec<Layer> = textures[..layers]
-                .iter()
-                .map(|t| Layer { texture: t, transform: TransformState::default() })
-                .collect();
+            let list: Vec<Layer> = textures[..layers].iter().map(Layer::new).collect();
             b.iter(|| {
                 renderer.render(
                     &gpu.device,
@@ -69,6 +66,53 @@ fn composite(c: &mut Criterion) {
                 );
                 // Waiting for the GPU is what makes this a measurement of the
                 // work rather than of how fast commands can be queued.
+                let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            });
+        });
+    }
+    group.finish();
+}
+
+/// What a blend mode costs.
+///
+/// `one_mode` is sixteen layers that all blend the same way, so the pipeline is
+/// bound once for the pass. `alternating` cycles through the modes, forcing a
+/// rebind before every draw. The gap between them is the price of a pipeline
+/// switch, and the reason the renderer only rebinds when the mode changes rather
+/// than once per layer.
+fn blend_modes(c: &mut Criterion) {
+    let Ok(gpu) = GpuContext::headless() else { return };
+    let mut renderer = Renderer::new(&gpu.device);
+    let size = Size::new(1920, 1080);
+    let target = RenderTarget::new(&gpu.device, size);
+    let frame = solid_frame(size);
+
+    const LAYERS: usize = 16;
+    let textures: Vec<_> =
+        (0..LAYERS).map(|_| renderer.upload(&gpu.device, &gpu.queue, &frame)).collect();
+
+    let mut group = c.benchmark_group("composite_1080p_16layers");
+    for (label, modes) in [
+        ("one_mode", vec![BlendMode::Screen; LAYERS]),
+        (
+            "alternating",
+            (0..LAYERS).map(|i| BlendMode::ALL[i % BlendMode::ALL.len()]).collect(),
+        ),
+    ] {
+        let list: Vec<Layer> = textures
+            .iter()
+            .zip(&modes)
+            .map(|(t, mode)| Layer::new(t).with_blend(*mode))
+            .collect();
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                renderer.render(
+                    &gpu.device,
+                    &gpu.queue,
+                    &target,
+                    Rgba::BLACK,
+                    black_box(&list),
+                );
                 let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
             });
         });
@@ -94,10 +138,7 @@ fn render_cache(c: &mut Criterion) {
     const LAYERS: usize = 4;
     let textures: Vec<_> =
         (0..LAYERS).map(|_| renderer.upload(&gpu.device, &gpu.queue, &frame)).collect();
-    let layers: Vec<Layer> = textures
-        .iter()
-        .map(|t| Layer { texture: t, transform: TransformState::default() })
-        .collect();
+    let layers: Vec<Layer> = textures.iter().map(Layer::new).collect();
 
     let mut group = c.benchmark_group("render_cache_1080p_4layers");
 
@@ -125,12 +166,11 @@ fn render_cache(c: &mut Criterion) {
             nudge += 1.0;
             let moved: Vec<Layer> = textures
                 .iter()
-                .map(|t| Layer {
-                    texture: t,
-                    transform: TransformState {
+                .map(|t| {
+                    Layer::new(t).with_transform(TransformState {
                         position: Vec2::new(nudge, 0.0),
                         ..Default::default()
-                    },
+                    })
                 })
                 .collect();
             let key = CompositeKey::of(size, Rgba::BLACK, &moved);
@@ -164,5 +204,5 @@ fn transform_math(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, upload, composite, render_cache, transform_math);
+criterion_group!(benches, upload, composite, blend_modes, render_cache, transform_math);
 criterion_main!(benches);

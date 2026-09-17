@@ -193,6 +193,48 @@ texture bind group is built once at upload and cached with the texture. A
 ten-layer composite is ten draws, one pass, one submit, and no per-frame
 allocation.
 
+### Blend modes
+
+A blend mode is a **pipeline variant**, not a shader branch: the pipelines share
+one shader module and differ only in their blend state, so the driver compiles
+the program once and the whole set is built at startup rather than on the frame a
+mode is first used.
+
+Writing `Cs` for the premultiplied source colour, `As` for its alpha and `Cd` for
+what is already in the target:
+
+| Mode     | Colour                | Blend state              |
+|----------|-----------------------|--------------------------|
+| Normal   | `Cs + Cd(1 − As)`     | `One / OneMinusSrcAlpha` |
+| Add      | `Cs + Cd`             | `One / One`              |
+| Multiply | `Cs·Cd + Cd(1 − As)`  | `Dst / OneMinusSrcAlpha` |
+| Screen   | `Cs + Cd(1 − Cs)`     | `One / OneMinusSrc`      |
+
+Alpha composites as the union of coverages in every mode, because a blend mode
+describes how colour combines, not how much of the frame the layer covers.
+
+These four are exactly the modes that are a weighted sum of source and
+destination, which is all the fixed-function blender can evaluate. Overlay, soft
+light, colour dodge, difference and the rest depend on the backdrop in ways no
+pair of blend factors expresses; they need it as a *texture*, which means
+compositing into an intermediate target and sampling a copy of it, so they belong
+with nested compositions rather than here. Darken and lighten look like they would
+fit — `min` and `max` are blend operations — but those ignore the blend factors
+and so are only correct for a fully opaque layer, and a mode that misbehaves at
+50% opacity is worse than a mode that is not there yet.
+
+One deviation is deliberate and tested: `Multiply` does not scale by the
+backdrop's alpha, which the Porter-Duff form does, so a multiply layer over a
+*transparent* background comes out black instead of showing itself. The default
+sequence background is opaque, so this is only reachable when rendering for an
+alpha export, and the fully general form needs the same destination read as the
+modes above.
+
+The pipeline is bound only when the mode changes from one layer to the next, so a
+composition that is all one mode — nearly all of them — still binds once per pass.
+Layers keep their back-to-front order rather than being grouped by mode: blending
+does not commute, so reordering to save a bind would change the picture.
+
 ### The render cache
 
 A composited picture is cached on a **hash of everything the compositor read to

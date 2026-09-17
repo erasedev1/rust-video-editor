@@ -11,7 +11,8 @@
 //!
 //! So a cache entry is keyed on a hash of *everything the compositor reads* to
 //! produce it: the target size, the background, and for each layer the identity
-//! of its source texture and the transform applied to it. Two instants that
+//! of its source texture, the transform applied to it and its blend mode. Two
+//! instants that
 //! composite to the same pixels have the same key by construction, and anything
 //! that would change the picture changes the key.
 //!
@@ -70,6 +71,7 @@ impl CompositeKey {
             // written once at upload and never again.
             layer.texture.id().hash(&mut hasher);
             layer.texture.size().hash(&mut hasher);
+            layer.blend.hash(&mut hasher);
             hash_transform(&layer.transform, &mut hasher);
         }
         CompositeKey(hasher.finish())

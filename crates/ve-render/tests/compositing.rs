@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use ve_core::{Rgba, Size, TransformState, Vec2};
+use ve_core::{BlendMode, Rgba, Size, TransformState, Vec2};
 use ve_media::{PixelFormat, VideoFrame};
 use ve_metrics::Metrics;
 use ve_render::{GpuContext, Layer, RenderTarget, Renderer};
@@ -421,4 +421,160 @@ fn the_texture_cache_drops_an_assets_textures_on_request() {
     assert_eq!(cache.len(), 3);
     assert!(cache.get(&CacheKey::new(AssetId::from_raw(2), 0, 16)).is_some());
     assert_eq!(cache.bytes(), 3 * 16 * 16 * 4);
+}
+
+// --- Blend modes -----------------------------------------------------------
+//
+// Each mode is checked against the arithmetic it claims to implement, with an
+// opaque layer over an opaque one so the expected value is a plain function of
+// the two colours. `HALF` is 128/255 = 0.502, near enough to a half that the
+// products below stay well clear of the ±2 tolerance.
+
+const HALF: u8 = 128;
+const GREY: [u8; 4] = [HALF, HALF, HALF, 255];
+
+/// Composites `top` over `bottom` in `mode`, over an opaque black background.
+fn blended(mode: BlendMode, bottom: [u8; 4], top: [u8; 4], top_opacity: f64) -> [u8; 4] {
+    let size = Size::new(16, 16);
+    let mut h = Harness::new(size);
+    let under = h.upload(&solid_frame(size, bottom));
+    let over = h.upload(&solid_frame(size, top));
+
+    let transform = TransformState { opacity: top_opacity, ..Default::default() };
+    let pixels = h.render(
+        OPAQUE_BLACK,
+        &[Layer::new(&under), Layer::new(&over).with_transform(transform).with_blend(mode)],
+    );
+    h.pixel(&pixels, 8, 8)
+}
+
+#[test]
+fn normal_shows_the_top_layer() {
+    assert_colour(blended(BlendMode::Normal, GREY, RED, 1.0), RED, "red over grey");
+}
+
+#[test]
+fn add_sums_the_two_layers() {
+    // Channels chosen so nothing clips: the sum is exactly both contributions.
+    let blue_ish = [0, 0, HALF, 255];
+    let red_ish = [HALF, 0, 0, 255];
+    assert_colour(
+        blended(BlendMode::Add, blue_ish, red_ish, 1.0),
+        [HALF, 0, HALF, 255],
+        "half red added to half blue",
+    );
+}
+
+#[test]
+fn add_clips_rather_than_wrapping() {
+    // Two thirds plus two thirds is more than white. Saturating is the right
+    // answer; wrapping would turn a bright highlight black.
+    let bright = [170, 170, 170, 255];
+    assert_colour(
+        blended(BlendMode::Add, bright, bright, 1.0),
+        [255, 255, 255, 255],
+        "an overflowing sum",
+    );
+}
+
+#[test]
+fn multiply_darkens_by_the_product() {
+    // 0.502 × 0.502 = 0.252, which is 64.
+    assert_colour(
+        blended(BlendMode::Multiply, GREY, GREY, 1.0),
+        [64, 64, 64, 255],
+        "half times half",
+    );
+}
+
+#[test]
+fn multiplying_by_white_leaves_the_backdrop_alone() {
+    // The identity of the mode, and the reason a white matte is how you mask
+    // nothing out.
+    assert_colour(
+        blended(BlendMode::Multiply, GREY, [255, 255, 255, 255], 1.0),
+        GREY,
+        "grey multiplied by white",
+    );
+}
+
+#[test]
+fn screen_brightens_by_the_inverse_product() {
+    // 0.502 + 0.502 × (1 − 0.502) = 0.752, which is 192.
+    assert_colour(
+        blended(BlendMode::Screen, GREY, GREY, 1.0),
+        [192, 192, 192, 255],
+        "half screened onto half",
+    );
+}
+
+#[test]
+fn screening_with_black_leaves_the_backdrop_alone() {
+    assert_colour(
+        blended(BlendMode::Screen, GREY, [0, 0, 0, 255], 1.0),
+        GREY,
+        "grey screened with black",
+    );
+}
+
+#[test]
+fn a_blended_layer_still_obeys_its_opacity() {
+    // Half-opacity halves the layer's contribution before the mode sees it,
+    // because the shader premultiplies. Without that, fading a glow in would
+    // jump straight to full brightness.
+    let blue_ish = [0, 0, HALF, 255];
+    let red_ish = [HALF, 0, 0, 255];
+    assert_colour(
+        blended(BlendMode::Add, blue_ish, red_ish, 0.5),
+        [64, 0, HALF, 255],
+        "half-opacity red added to half blue",
+    );
+}
+
+#[test]
+fn a_blend_mode_leaves_the_frame_opaque_where_the_backdrop_was() {
+    // Alpha is the union of coverages in every mode: a blend mode says how
+    // colour combines, not how much of the frame is covered.
+    let got = blended(BlendMode::Multiply, GREY, GREY, 1.0);
+    assert_eq!(got[3], 255, "compositing over an opaque backdrop must stay opaque");
+}
+
+#[test]
+fn multiply_over_a_transparent_background_has_nothing_to_multiply() {
+    // Documented behaviour, not an accident: the fixed-function blender cannot
+    // scale by the backdrop's alpha, so a multiply layer over emptiness comes
+    // out black rather than showing itself as the Porter-Duff form would. The
+    // default sequence background is opaque, so this is only reachable when
+    // rendering for an alpha export, and the general form needs the destination
+    // as a texture — which arrives with nested compositions.
+    let size = Size::new(16, 16);
+    let mut h = Harness::new(size);
+    let over = h.upload(&solid_frame(size, GREY));
+    let pixels =
+        h.render(Rgba::TRANSPARENT, &[Layer::new(&over).with_blend(BlendMode::Multiply)]);
+
+    let got = h.pixel(&pixels, 8, 8);
+    assert_colour(got, [0, 0, 0, 255], "multiply with no backdrop");
+}
+
+#[test]
+fn modes_can_be_mixed_within_one_composition() {
+    // The pipeline is only rebound when the mode changes, so a composition that
+    // alternates modes has to still draw each layer with its own.
+    let size = Size::new(16, 16);
+    let mut h = Harness::new(size);
+    let grey = h.upload(&solid_frame(size, GREY));
+    let white = h.upload(&solid_frame(size, [255, 255, 255, 255]));
+
+    let pixels = h.render(
+        OPAQUE_BLACK,
+        &[
+            // Grey, then multiplied by white (no change), then screened with
+            // itself: 0.502 → 0.502 → 0.752.
+            Layer::new(&grey),
+            Layer::new(&white).with_blend(BlendMode::Multiply),
+            Layer::new(&grey).with_blend(BlendMode::Screen),
+        ],
+    );
+    assert_colour(h.pixel(&pixels, 8, 8), [192, 192, 192, 255], "three modes in one pass");
 }

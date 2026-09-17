@@ -100,6 +100,20 @@ Compositing scales linearly with layer count, which is what a rasteriser filling
 1080p once per layer should do. On real hardware these are fill-rate bound and
 far cheaper.
 
+### Blend modes
+
+Sixteen 1080p layers, measured in one run:
+
+| Benchmark                              |     Time |
+|----------------------------------------|---------:|
+| `composite_1080p_16layers/one_mode`    |  102 ms  |
+| `composite_1080p_16layers/alternating` |  105 ms  |
+
+Fifteen extra pipeline binds cost **2.6%** here, which is why the renderer binds
+only when the mode changes rather than once per layer — and also why it is not
+worth reordering layers to group them by mode, which would change the picture for
+a saving this size.
+
 ### The render cache
 
 Taken in a single run on a later container — also llvmpipe, but a different

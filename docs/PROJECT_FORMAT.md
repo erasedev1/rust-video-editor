@@ -97,6 +97,13 @@ Version 1 is the first released format, so nothing needs migrating yet. The
 pipeline exists and is tested so that the first real format change is a one-line
 addition rather than new machinery.
 
+An **additive** field does not need a version bump at all: a new field that
+deserialises from a default reads an older file correctly, and an older build
+ignores it when reading a newer one. The clip `blend` field is the worked example,
+with a test that loads a document without it and asserts the mode comes back as
+`normal`. A bump is for a change that would make an older document mean something
+different — a renamed field, a changed unit, a restructured tree.
+
 ## Robustness
 
 The loader treats the file as untrusted. It repairs what it can and reports the

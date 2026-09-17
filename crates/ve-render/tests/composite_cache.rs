@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use ve_core::{Rgba, Size, TransformState, Vec2};
+use ve_core::{BlendMode, Rgba, Size, TransformState, Vec2};
 use ve_media::{PixelFormat, VideoFrame};
 use ve_metrics::{counters, Metrics};
 use ve_render::{
@@ -121,7 +121,7 @@ fn every_input_the_compositor_reads_is_part_of_the_key() {
     let moved = TransformState { position: Vec2::new(4.0, 0.0), ..Default::default() };
     let faded = TransformState { opacity: 0.5, ..Default::default() };
 
-    let cases: [(&str, CompositeKey); 6] = [
+    let cases: [(&str, CompositeKey); 7] = [
         ("a different source", CompositeKey::of(SIZE, BLACK, &[Layer::new(&green)])),
         (
             "a moved layer",
@@ -136,6 +136,10 @@ fn every_input_the_compositor_reads_is_part_of_the_key() {
         (
             "an extra layer",
             CompositeKey::of(SIZE, BLACK, &[Layer::new(&red), Layer::new(&green)]),
+        ),
+        (
+            "another blend mode",
+            CompositeKey::of(SIZE, BLACK, &[Layer::new(&red).with_blend(BlendMode::Screen)]),
         ),
     ];
     for (what, key) in cases {
@@ -386,4 +390,32 @@ fn uploaded_textures_have_distinct_identities() {
     let b = h.upload(RED);
     assert_ne!(a.id(), b.id(), "two uploads are two pictures as far as the cache knows");
     assert_eq!(a.id(), a.id());
+}
+
+#[test]
+fn changing_only_the_blend_mode_recomposites_that_instant() {
+    let mut h = Harness::new(1 << 20);
+    let grey = h.upload([128, 128, 128, 255]);
+    let under = h.upload(GREEN);
+
+    fn composite<'a>(
+        mode: BlendMode,
+        under: &'a GpuTexture,
+        over: &'a GpuTexture,
+    ) -> Vec<Layer<'a>> {
+        vec![Layer::new(under), Layer::new(over).with_blend(mode)]
+    }
+
+    assert!(!h.present(BLACK, &composite(BlendMode::Normal, &under, &grey)));
+    let normal = h.centre();
+
+    // The layers, their transforms and the background are all identical; only
+    // the mode changed. A cache that keyed on the layer set alone would show the
+    // stale picture here.
+    assert!(!h.present(BLACK, &composite(BlendMode::Screen, &under, &grey)));
+    let screened = h.centre();
+    assert_ne!(normal, screened, "the mode has to reach the picture");
+
+    assert!(h.present(BLACK, &composite(BlendMode::Normal, &under, &grey)), "back to a hit");
+    assert_colour(h.centre(), normal, "the first mode's picture, restored");
 }

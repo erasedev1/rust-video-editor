@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ve_core::{
-    Clip, ClipId, Interpolation, MediaInfo, Project, SequenceId, Size, TrackId, TrackKind,
-    Vec2, VideoStreamInfo,
+    BlendMode, Clip, ClipId, Interpolation, MediaInfo, Project, SequenceId, Size, TrackId,
+    TrackKind, Vec2, VideoStreamInfo,
 };
 use ve_engine::*;
 use ve_media::DecodeService;
@@ -74,6 +74,16 @@ impl Fixture {
         id
     }
 
+    fn set_blend(&mut self, clip: ClipId, blend: BlendMode) {
+        self.project
+            .sequence_mut(self.sequence)
+            .unwrap()
+            .find_clip_mut(clip)
+            .unwrap()
+            .1
+            .blend = blend;
+    }
+
     fn sequence(&self) -> &ve_core::Sequence {
         self.project.sequence(self.sequence).unwrap()
     }
@@ -115,6 +125,23 @@ fn track_order_is_layer_order_with_v1_at_the_bottom() {
     assert_eq!(c.video[0].layer, 0);
     assert_eq!(c.video[1].clip, top);
     assert_eq!(c.video[1].layer, 1);
+}
+
+#[test]
+fn a_clips_blend_mode_reaches_the_composition() {
+    let mut f = fixture();
+    let bottom = f.add_clip(f.v1, 0, 5);
+    let top = f.add_clip(f.v2, 0, 5);
+    f.set_blend(top, BlendMode::Screen);
+
+    let c = evaluate(f.sequence(), Ticks::from_seconds(1));
+    // Carried per layer rather than per track: two clips on one track can want
+    // different modes, and the compositor needs the mode alongside the
+    // transform to pick its pipeline.
+    assert_eq!(c.video[0].clip, bottom);
+    assert_eq!(c.video[0].blend, BlendMode::Normal, "the default is untouched");
+    assert_eq!(c.video[1].clip, top);
+    assert_eq!(c.video[1].blend, BlendMode::Screen);
 }
 
 #[test]

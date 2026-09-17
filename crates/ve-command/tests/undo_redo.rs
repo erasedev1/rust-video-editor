@@ -5,8 +5,8 @@
 
 use ve_command::*;
 use ve_core::{
-    Clip, ClipId, Interpolation, Marker, MediaInfo, Project, SequenceId, Size, TrackId,
-    TrackKind, Vec2, VideoStreamInfo,
+    BlendMode, Clip, ClipId, Interpolation, Marker, MediaInfo, Project, SequenceId, Size,
+    TrackId, TrackKind, Vec2, VideoStreamInfo,
 };
 use ve_time::{Rate, Ticks};
 
@@ -942,4 +942,45 @@ fn commands_against_a_missing_object_report_a_typed_error() {
         Err(CommandError::SequenceNotFound(_))
     ));
     assert_eq!(h.undo_depth(), 0);
+}
+
+#[test]
+fn setting_a_blend_mode_undoes_and_redoes_exactly() {
+    let (mut p, seq, track, asset) = fixture();
+    let c = clip(&mut p, asset, 0, 10);
+    let clip_id = c.id;
+    p.sequence_mut(seq).unwrap().track_mut(track).unwrap().insert_clip(c).unwrap();
+    let before = p.clone();
+    let mut h = History::default();
+
+    h.execute(&mut p, Box::new(SetClipBlendMode::new(seq, clip_id, BlendMode::Screen)))
+        .unwrap();
+    assert_eq!(p.sequence(seq).unwrap().find_clip(clip_id).unwrap().1.blend, BlendMode::Screen);
+
+    h.undo(&mut p).unwrap();
+    assert_eq!(p, before, "undo must restore the previous mode exactly");
+
+    h.redo(&mut p).unwrap();
+    assert_eq!(p.sequence(seq).unwrap().find_clip(clip_id).unwrap().1.blend, BlendMode::Screen);
+}
+
+#[test]
+fn trying_several_blend_modes_collapses_into_one_undo_step() {
+    let (mut p, seq, track, asset) = fixture();
+    let c = clip(&mut p, asset, 0, 10);
+    let clip_id = c.id;
+    p.sequence_mut(seq).unwrap().track_mut(track).unwrap().insert_clip(c).unwrap();
+    let before = p.clone();
+    let mut h = History::default();
+
+    // Picking through the dropdown is one decision. Undo must go back to
+    // Normal, not to whichever mode was tried second to last.
+    for mode in [BlendMode::Add, BlendMode::Multiply, BlendMode::Screen] {
+        h.execute_coalesced(&mut p, Box::new(SetClipBlendMode::new(seq, clip_id, mode)))
+            .unwrap();
+    }
+    assert_eq!(h.undo_depth(), 1, "three attempts, one entry");
+
+    h.undo(&mut p).unwrap();
+    assert_eq!(p, before);
 }

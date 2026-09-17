@@ -15,6 +15,7 @@
 
 pub mod animation;
 pub mod asset;
+pub mod blend;
 pub mod clip;
 pub mod effect;
 pub mod geometry;
@@ -25,6 +26,7 @@ pub mod track;
 
 pub use animation::{Animatable, Interpolation, Keyframe, Property};
 pub use asset::{AudioStreamInfo, MediaAsset, MediaInfo, VideoStreamInfo};
+pub use blend::BlendMode;
 pub use clip::{Clip, Speed};
 pub use effect::{AudioProperties, Effect, ParamValue, Transform, TransformState};
 pub use geometry::{Rgba, Size, Vec2};

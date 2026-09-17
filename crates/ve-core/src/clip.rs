@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use ve_time::{Ticks, TimeRange};
 
+use crate::blend::BlendMode;
 use crate::effect::{AudioProperties, Effect, Transform};
 use crate::id::{AssetId, ClipId, EffectId};
 use crate::CoreError;
@@ -109,6 +110,10 @@ pub struct Clip {
 
     #[serde(default)]
     pub transform: Transform,
+    /// How the clip's picture combines with the layers beneath it. Defaulted on
+    /// read, so a project written before blend modes existed loads as `Normal`.
+    #[serde(default)]
+    pub blend: BlendMode,
     #[serde(default)]
     pub audio: AudioProperties,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -134,6 +139,7 @@ impl Clip {
             speed: Speed::NORMAL,
             enabled: true,
             transform: Transform::default(),
+            blend: BlendMode::default(),
             audio: AudioProperties::default(),
             effects: Vec::new(),
         }

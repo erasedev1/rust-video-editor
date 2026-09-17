@@ -27,6 +27,7 @@ The first vertical slice is complete and tested end to end:
 - Create markers and jump between them
 - Play the sequence, scrub, step by frame, stop and resume
 - GPU compositing with transforms, opacity and alpha blending
+- Blend modes — normal, add, multiply and screen — as pipeline variants
 - A render cache keyed on the composition itself: an unchanged picture is never
   drawn twice, and changing one clip only recomposites the instants it appears in
 - Undo and redo on every edit, with drags collapsed into single steps

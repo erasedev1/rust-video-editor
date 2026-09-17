@@ -1,7 +1,7 @@
 //! The compositor.
 
 use bytemuck::{Pod, Zeroable};
-use ve_core::{Rgba, TransformState};
+use ve_core::{BlendMode, Rgba, TransformState};
 use ve_media::VideoFrame;
 use ve_metrics::{spans, Metrics};
 
@@ -25,16 +25,23 @@ struct LayerUniform {
 pub struct Layer<'a> {
     pub texture: &'a GpuTexture,
     pub transform: TransformState,
+    pub blend: BlendMode,
 }
 
 impl<'a> Layer<'a> {
-    /// A layer drawn at its natural size, centred, fully opaque.
+    /// A layer drawn at its natural size, centred, fully opaque, over whatever
+    /// is beneath it.
     pub fn new(texture: &'a GpuTexture) -> Self {
-        Layer { texture, transform: TransformState::default() }
+        Layer { texture, transform: TransformState::default(), blend: BlendMode::Normal }
     }
 
     pub fn with_transform(mut self, transform: TransformState) -> Self {
         self.transform = transform;
+        self
+    }
+
+    pub fn with_blend(mut self, blend: BlendMode) -> Self {
+        self.blend = blend;
         self
     }
 }
@@ -47,7 +54,12 @@ impl<'a> Layer<'a> {
 /// between the layer draws, and a nested composition becomes a layer whose
 /// texture is another target's output.
 pub struct Renderer {
-    pipeline: wgpu::RenderPipeline,
+    /// One pipeline per blend mode, in [`BlendMode::ALL`] order.
+    ///
+    /// Built up front rather than on demand: they share a shader module and
+    /// differ only in blend state, so the whole set costs a few milliseconds
+    /// once, and a mode chosen mid-drag never stalls a frame compiling.
+    pipelines: [wgpu::RenderPipeline; BlendMode::ALL.len()],
     uniform_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -64,6 +76,57 @@ pub struct Renderer {
 /// How many layers the uniform buffer starts out able to hold. Grows on demand;
 /// most compositions never exceed it.
 const INITIAL_LAYER_CAPACITY: usize = 32;
+
+/// The blend state for a mode, against a **premultiplied** source.
+///
+/// Each mode is a weighted sum of source and destination that the fixed-function
+/// blender can evaluate, so a mode costs a pipeline and nothing else. Writing
+/// `Cs` for the premultiplied source colour, `As` for its alpha and `Cd` for what
+/// is already in the target:
+///
+/// * `Normal`: `Cs + Cd(1 - As)` — source over destination.
+/// * `Add`: `Cs + Cd`.
+/// * `Multiply`: `Cs·Cd + Cd(1 - As)`. Exact over an opaque backdrop, which is
+///   what a sequence with an opaque background gives; the general Porter-Duff
+///   form also scales by the backdrop's alpha, which needs the destination as a
+///   texture rather than as a blend factor.
+/// * `Screen`: `Cs + Cd(1 - Cs)`, which is `Cs + Cd - Cs·Cd` — the inverse of
+///   multiplying the inverses.
+///
+/// Alpha is the union of coverages in every mode: a blend mode says how colour
+/// combines, not how much of the frame the layer covers.
+fn blend_state(mode: BlendMode) -> wgpu::BlendState {
+    let colour = match mode {
+        BlendMode::Normal => wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        BlendMode::Add => wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+        BlendMode::Multiply => wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Dst,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        BlendMode::Screen => wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrc,
+            operation: wgpu::BlendOperation::Add,
+        },
+    };
+    wgpu::BlendState {
+        color: colour,
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+    }
+}
 
 impl Renderer {
     pub fn new(device: &wgpu::Device) -> Self {
@@ -123,54 +186,50 @@ impl Renderer {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("verge-composite-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                // No vertex buffers: the quad comes from the vertex index.
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    // Premultiplied "over": the shader already multiplied colour
-                    // by alpha, so the source factor is One rather than SrcAlpha.
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                // Layers are routinely mirrored by a negative scale, and a
-                // mirrored layer must not disappear.
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
+        // One pipeline per mode. Everything but the blend state is identical,
+        // and the shader module is shared, so the driver compiles the same
+        // program once and varies the fixed-function state around it.
+        let pipelines = BlendMode::ALL.map(|mode| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("verge-composite-pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    // No vertex buffers: the quad comes from the vertex index.
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        // Premultiplied throughout: the shader already
+                        // multiplied colour by alpha, so every mode's source
+                        // factor works on a premultiplied value. See
+                        // [`blend_state`].
+                        blend: Some(blend_state(mode)),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    // Layers are routinely mirrored by a negative scale, and a
+                    // mirrored layer must not disappear.
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -195,7 +254,7 @@ impl Renderer {
         );
 
         Renderer {
-            pipeline,
+            pipelines,
             uniform_layout,
             texture_layout,
             sampler,
@@ -291,8 +350,17 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            pass.set_pipeline(&self.pipeline);
+            // The pipeline is set only when the mode changes, so a composition
+            // that is all one mode — nearly all of them — still binds once for
+            // the whole pass. Layers keep their back-to-front order rather than
+            // being grouped by mode: blending is not commutative, so reordering
+            // to save a bind would change the picture.
+            let mut bound: Option<BlendMode> = None;
             for (i, layer) in layers.iter().enumerate() {
+                if bound != Some(layer.blend) {
+                    pass.set_pipeline(self.pipeline_for(layer.blend));
+                    bound = Some(layer.blend);
+                }
                 let offset = (i as u32) * self.uniform_stride;
                 pass.set_bind_group(0, &self.uniform_bind_group, &[offset]);
                 pass.set_bind_group(1, &layer.texture.bind_group, &[]);
@@ -300,6 +368,12 @@ impl Renderer {
             }
         }
         queue.submit(Some(encoder.finish()));
+    }
+
+    /// The pipeline that implements a blend mode.
+    fn pipeline_for(&self, mode: BlendMode) -> &wgpu::RenderPipeline {
+        let index = BlendMode::ALL.iter().position(|m| *m == mode).unwrap_or(0);
+        &self.pipelines[index]
     }
 
     /// The uniform buffer's per-layer stride, which must satisfy the device's

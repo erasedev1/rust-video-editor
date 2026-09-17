@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use ve_core::{Clip, Interpolation, MediaInfo, Project, Size, VideoStreamInfo};
+use ve_core::{BlendMode, Clip, Interpolation, MediaInfo, Project, Size, VideoStreamInfo};
 use ve_project::{autosave, store, Autosave, ProjectError, FORMAT_MAGIC, FORMAT_VERSION};
 use ve_time::{Rate, Ticks};
 
@@ -40,6 +40,7 @@ fn sample_project(media: &Path) -> Project {
         Ticks::ZERO,
         Ticks::from_seconds(10),
     );
+    clip.blend = BlendMode::Screen;
     clip.transform.opacity.set_keyframe(Ticks::ZERO, 0.0, Interpolation::EaseInOut);
     clip.transform.opacity.set_keyframe(Ticks::from_seconds(1), 1.0, Interpolation::Linear);
     p.sequence_mut(seq).unwrap().track_mut(track).unwrap().insert_clip(clip).unwrap();
@@ -465,4 +466,31 @@ fn discarding_removes_the_autosave_and_is_safe_to_repeat() {
     autosave::discard(&path);
     assert!(!target.exists());
     autosave::discard(&path); // must not panic
+}
+
+#[test]
+fn a_project_written_before_blend_modes_existed_loads_as_normal() {
+    // The field was added without a format bump, which is only safe if an older
+    // file still reads. This is that file: a valid version 1 document whose clip
+    // has no `blend` key at all.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.verge");
+    let saved = sample_project(&dir.path().join("a.mp4"));
+    store::save(&saved, &path).unwrap();
+
+    let text = fs::read_to_string(&path).unwrap();
+    let mut tree: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let clips = tree["project"]["sequences"][0]["tracks"][0]["clips"]
+        .as_array_mut()
+        .expect("the fixture has a clip");
+    for clip in clips.iter_mut() {
+        assert!(clip.get("blend").is_some(), "the current format writes the field");
+        clip.as_object_mut().unwrap().remove("blend");
+    }
+    fs::write(&path, serde_json::to_string_pretty(&tree).unwrap()).unwrap();
+
+    let loaded = store::load(&path).unwrap().project;
+    let sequence = loaded.active().unwrap();
+    let clip = &sequence.tracks[0].clips()[0];
+    assert_eq!(clip.blend, BlendMode::Normal, "a missing mode is Normal, not a failure");
 }

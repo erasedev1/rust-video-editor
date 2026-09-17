@@ -10,12 +10,12 @@ use std::path::PathBuf;
 
 use ve_command::{
     AddClip, AddMarker, AddTrack, ClipProperty, Command, Compound, MoveClip, MoveTrack,
-    PropertyValue, RemoveClip, RemoveMarker, RemoveTrack, RollEdit, SetClipEnabled,
-    SetClipProperty, SetClipSpeed, SetSequenceFormat, SetTrackFlag, ShiftClips, SlideClip,
-    SlipClip, SplitClip, TrackFlag, TrimClip, TrimEdge,
+    PropertyValue, RemoveClip, RemoveMarker, RemoveTrack, RollEdit, SetClipBlendMode,
+    SetClipEnabled, SetClipProperty, SetClipSpeed, SetSequenceFormat, SetTrackFlag, ShiftClips,
+    SlideClip, SlipClip, SplitClip, TrackFlag, TrimClip, TrimEdge,
 };
 use ve_core::{
-    AssetId, Clip, ClipId, MarkerId, Project, SequenceId, Speed, TrackId, TrackKind,
+    AssetId, BlendMode, Clip, ClipId, MarkerId, Project, SequenceId, Speed, TrackId, TrackKind,
 };
 use ve_engine::PlaybackEngine;
 use ve_project::{autosave, store};
@@ -58,6 +58,8 @@ pub enum Action {
     // Keeps the clip's frames and changes how long it takes to play them, so
     // the clip's length on the timeline changes with it.
     SetClipSpeed { clip: ClipId, speed: Speed },
+    // How the clip's picture combines with the layers beneath it.
+    SetClipBlendMode { clip: ClipId, blend: BlendMode },
 
     // Tracks
     AddTrack(TrackKind),
@@ -478,6 +480,17 @@ pub fn dispatch(state: &mut EditorState, engine: &mut PlaybackEngine, action: Ac
                 Ok(()) => {
                     state.mark_edited();
                     state.set_status(Status::info(format!("speed {:.2}×", speed.as_f64())));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetClipBlendMode { clip, blend } => {
+            let command = Box::new(SetClipBlendMode::new(sequence_id, clip, blend));
+            match state.history.execute_coalesced(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.set_status(Status::info(format!("blend {}", blend.label())));
                 }
                 Err(e) => state.set_status(Status::warning(e.to_string())),
             }

@@ -2,7 +2,7 @@
 
 use egui::{DragValue, RichText, Ui};
 use ve_command::{ClipProperty, PropertyValue};
-use ve_core::Vec2;
+use ve_core::{BlendMode, Vec2};
 
 use crate::actions::Action;
 use crate::state::EditorState;
@@ -120,6 +120,9 @@ pub fn show(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
                     });
                 },
             );
+            blend_row(ui, clip.blend, |blend| {
+                actions.push(Action::SetClipBlendMode { clip: clip_id, blend });
+            });
         });
 
         section(ui, "Audio", |ui| {
@@ -200,6 +203,30 @@ fn speed_row(ui: &mut Ui, speed: ve_core::Speed, mut on_change: impl FnMut(ve_co
                 on_change(preset);
             }
         }
+    });
+}
+
+/// The blend mode, as a dropdown.
+///
+/// Sits with the transform rather than in a section of its own: opacity and
+/// blend mode are the two halves of one question — how this layer combines with
+/// what is under it — and every editor puts them next to each other for that
+/// reason.
+fn blend_row(ui: &mut Ui, blend: BlendMode, mut on_change: impl FnMut(BlendMode)) {
+    ui.horizontal(|ui| {
+        property_label(ui, "Blend", false);
+        egui::ComboBox::from_id_salt("clip-blend-mode").selected_text(blend.label()).show_ui(
+            ui,
+            |ui| {
+                for mode in BlendMode::ALL {
+                    if ui.selectable_label(mode == blend, mode.label()).clicked()
+                        && mode != blend
+                    {
+                        on_change(mode);
+                    }
+                }
+            },
+        );
     });
 }
 
