@@ -91,11 +91,25 @@ pub struct GpuTexture {
     size: Size,
     bytes: usize,
     id: TextureId,
+    /// Whether the pixels already carry their own alpha.
+    ///
+    /// A decoded frame does not: its colour is independent of its coverage. The
+    /// output of a render pass does, because the shader premultiplies as it
+    /// writes. Sampling the second kind as if it were the first multiplies the
+    /// alpha in twice, which darkens every semi-transparent nested composite
+    /// and every motion blur — so the renderer picks its fragment shader from
+    /// this.
+    premultiplied: bool,
 }
 
 impl GpuTexture {
     pub fn size(&self) -> Size {
         self.size
+    }
+
+    /// Whether this texture's colour already carries its alpha. See the field.
+    pub fn is_premultiplied(&self) -> bool {
+        self.premultiplied
     }
 
     /// This texture's identity, which stands in for its contents.
@@ -129,7 +143,15 @@ impl GpuTexture {
         size: Size,
     ) -> Self {
         let bytes = size.pixel_count() as usize * 4;
-        GpuTexture { texture, view, bind_groups, size, bytes, id: TextureId::next() }
+        GpuTexture {
+            texture,
+            view,
+            bind_groups,
+            size,
+            bytes,
+            id: TextureId::next(),
+            premultiplied: false,
+        }
     }
 
     /// The bind group that samples this texture for a given colour space.
@@ -300,6 +322,9 @@ impl GpuTexture {
             size,
             bytes: 0,
             id: TextureId::from_content(content.raw()),
+            // The output of a pass of this renderer, and so already
+            // premultiplied.
+            premultiplied: true,
         }
     }
 }

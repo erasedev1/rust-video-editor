@@ -298,7 +298,7 @@ impl PlaybackEngine {
                 Draw::Media { asset, source_time } => {
                     match self.decode.cached_frame(asset, source_time) {
                         Some(frame) => layers.push(ResolvedLayer {
-                            item: *item,
+                            item: item.clone(),
                             content: LayerContent::Frame(frame),
                         }),
                         None => {
@@ -315,7 +315,7 @@ impl PlaybackEngine {
                 // than a hole where it should be.
                 Draw::Nested { node: index, .. } => {
                     layers.push(ResolvedLayer {
-                        item: *item,
+                        item: item.clone(),
                         content: LayerContent::Nested(index),
                     });
                 }

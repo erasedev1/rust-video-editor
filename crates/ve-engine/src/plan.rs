@@ -28,10 +28,10 @@
 //! indices instead of matching down a chain of boxes.
 
 use ve_core::{
-    AssetId, BlendMode, ClipId, ColorSpace, Composition, CompositionId, LayerId, Project, Rgba,
-    Sequence, Size, Source, TrackId, TrackKind, TransformState,
+    AssetId, BlendMode, ClipId, ColorSpace, Composition, CompositionId, LayerId, MotionBlur,
+    Project, Rgba, Sequence, Size, Source, TrackId, TrackKind, Transform, TransformState,
 };
-use ve_time::Ticks;
+use ve_time::{Rate, Ticks};
 
 /// How deep nesting may go before the engine stops descending.
 ///
@@ -66,16 +66,30 @@ pub enum Draw {
 }
 
 /// One thing to draw, in back-to-front order within its node.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlanItem {
     pub origin: Origin,
     pub draw: Draw,
     /// Every animated property resolved at this instant.
     pub transform: TransformState,
+    /// The transform resolved again at each instant the shutter is open, when
+    /// this item is motion blurred and actually moves during it. Empty
+    /// otherwise, which is the overwhelmingly common case and the one that
+    /// costs a single draw.
+    ///
+    /// The samples are the *whole* description of the blur: the renderer
+    /// averages what they draw and needs to know nothing about shutters or
+    /// frame rates. See [`ve_core::MotionBlur`].
+    pub samples: Vec<TransformState>,
     pub blend: BlendMode,
 }
 
 impl PlanItem {
+    /// Whether this item is drawn once or averaged over a shutter.
+    pub fn is_blurred(&self) -> bool {
+        self.samples.len() > 1
+    }
+
     /// The media this item needs decoded, if it is media at all.
     pub fn asset(&self) -> Option<AssetId> {
         match self.draw {
@@ -296,11 +310,19 @@ impl Evaluator<'_> {
 
             match track.kind {
                 TrackKind::Video => {
+                    let samples = motion_samples(
+                        &clip.transform,
+                        local,
+                        clip.motion_blur,
+                        sequence.settings.motion_blur,
+                        sequence.rate(),
+                    );
                     if let Some(item) = self.video_item(
                         Origin::Clip(clip.id),
                         clip.source,
                         source_time,
                         clip.transform.evaluate(local),
+                        samples,
                         clip.blend,
                         &mut nodes,
                         &mut audio,
@@ -346,6 +368,7 @@ impl Evaluator<'_> {
         source: Source,
         source_time: Ticks,
         transform: TransformState,
+        samples: Vec<TransformState>,
         blend: BlendMode,
         nodes: &mut Vec<PlanNode>,
         audio: &mut Vec<AudibleItem>,
@@ -370,7 +393,7 @@ impl Evaluator<'_> {
                 Draw::Nested { composition: id, node }
             }
         };
-        Some(PlanItem { origin, draw, transform, blend })
+        Some(PlanItem { origin, draw, transform, samples, blend })
     }
 
     /// Builds the node for a nested composition and returns its index.
@@ -393,12 +416,20 @@ impl Evaluator<'_> {
             let Some(source_time) = layer.source_time_at(at) else { continue };
             let local = layer.local_time_at(at);
             let transform = layer.transform.evaluate(local);
+            let samples = motion_samples(
+                &layer.transform,
+                local,
+                layer.motion_blur,
+                composition.settings.motion_blur,
+                composition.settings.rate,
+            );
 
             if let Some(item) = self.video_item(
                 Origin::Layer(layer.id),
                 layer.source,
                 source_time,
                 transform,
+                samples,
                 layer.blend,
                 nodes,
                 audio,
@@ -485,6 +516,34 @@ impl Evaluator<'_> {
             }
         }
     }
+}
+
+/// The transform resolved at each instant the shutter is open.
+///
+/// Empty unless the item asks to be blurred, the canvas's shutter is open at
+/// all, and the transform **actually differs** across the interval. That last
+/// check is what keeps the cost honest: a clip with keyframes an hour apart is
+/// animated, but during any one frame it is standing still, and a standing
+/// layer drawn sixteen times is sixteen times the cost of the same picture.
+fn motion_samples(
+    transform: &Transform,
+    local: Ticks,
+    wanted: bool,
+    blur: MotionBlur,
+    rate: Rate,
+) -> Vec<TransformState> {
+    if !wanted || !blur.is_active() || !transform.is_animated() {
+        return Vec::new();
+    }
+    let samples: Vec<TransformState> = blur
+        .offsets(rate.frame_duration())
+        .into_iter()
+        .map(|offset| transform.evaluate(local + offset))
+        .collect();
+    if samples.windows(2).all(|pair| pair[0] == pair[1]) {
+        return Vec::new();
+    }
+    samples
 }
 
 /// Folds a track's level into every sound that reached the mix through it, and

@@ -2,7 +2,7 @@
 
 use egui::{DragValue, RichText, Ui};
 use ve_command::{ClipProperty, PropertyValue, TrackLevel};
-use ve_core::{BlendMode, ColorSpace, Fade, FadeCurve, FadeEdge, Vec2};
+use ve_core::{BlendMode, ColorSpace, Fade, FadeCurve, FadeEdge, MotionBlur, Vec2};
 use ve_engine::AudioLevels;
 use ve_time::Ticks;
 
@@ -130,6 +130,9 @@ pub fn show(ui: &mut Ui, state: &EditorState, levels: &AudioLevels, actions: &mu
             );
             blend_row(ui, clip.blend, |blend| {
                 actions.push(Action::SetClipBlendMode { clip: clip_id, blend });
+            });
+            motion_blur_row(ui, clip, |blurred| {
+                actions.push(Action::SetClipMotionBlur { clip: clip_id, blurred });
             });
         });
 
@@ -336,18 +339,21 @@ fn property_label(ui: &mut Ui, label: &str, animated: bool) {
 
 /// Settings belonging to the canvas being viewed, rather than to any clip.
 fn canvas_section(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
-    let (title, current) = match state.viewing() {
+    let (title, current, motion_blur) = match state.viewing() {
         Some(ve_engine::Viewing::Composition(id)) => match state.project.composition(id) {
             Some(composition) => (
                 format!("COMPOSITION — {}", composition.name),
                 composition.settings.color_space,
+                composition.settings.motion_blur,
             ),
             None => return,
         },
         _ => match state.active_sequence() {
-            Some(sequence) => {
-                (format!("SEQUENCE — {}", sequence.name), sequence.settings.color_space)
-            }
+            Some(sequence) => (
+                format!("SEQUENCE — {}", sequence.name),
+                sequence.settings.color_space,
+                sequence.settings.motion_blur,
+            ),
             None => return,
         },
     };
@@ -381,6 +387,97 @@ fn canvas_section(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
             .small()
             .color(theme::TEXT_FAINT),
     );
+
+    shutter_section(ui, motion_blur, actions);
+    ui.label(
+        RichText::new("Only clips with motion blur switched on are exposed through it.")
+            .small()
+            .color(theme::TEXT_FAINT),
+    );
+}
+
+/// The clip's motion blur switch, next to the transform it is a consequence of.
+///
+/// Disabled with a reason when the transform is not animated: a still layer has
+/// nothing to smear, and a switch that can be turned on but does nothing is
+/// worse than one that says why it cannot.
+fn motion_blur_row(ui: &mut Ui, clip: &ve_core::Clip, mut on_change: impl FnMut(bool)) {
+    let animated = clip.transform.is_animated();
+    ui.horizontal(|ui| {
+        property_label(ui, "Blur", clip.motion_blur);
+        let mut blurred = clip.motion_blur;
+        let response = ui
+            .add_enabled(animated, egui::Checkbox::new(&mut blurred, "Motion blur"))
+            .on_hover_text("Expose this clip across the shutter as it moves")
+            .on_disabled_hover_text(
+                "Keyframe the transform first: a still layer has nothing to smear",
+            );
+        if response.changed() {
+            on_change(blurred);
+        }
+    });
+}
+
+/// The canvas's shutter: how long it is open, and how finely it is sampled.
+fn shutter_section(ui: &mut Ui, current: MotionBlur, actions: &mut Vec<Action>) {
+    section(ui, "Shutter", |ui| {
+        ui.horizontal(|ui| {
+            property_label(ui, "Motion blur", current.enabled);
+            let mut enabled = current.enabled;
+            if ui
+                .checkbox(&mut enabled, "Enabled")
+                .on_hover_text(
+                    "Turns blur off for the whole canvas, whatever the clips ask for",
+                )
+                .changed()
+            {
+                actions.push(Action::SetMotionBlur(MotionBlur { enabled, ..current }));
+            }
+        });
+        ui.horizontal(|ui| {
+            property_label(ui, "Angle", false);
+            let mut angle = current.shutter_angle;
+            if ui
+                .add(
+                    DragValue::new(&mut angle)
+                        .speed(1.0)
+                        .range(0.0..=MotionBlur::MAX_ANGLE)
+                        .suffix("°")
+                        .max_decimals(1),
+                )
+                .on_hover_text(
+                    "180° is the film convention: the shutter open for half the frame",
+                )
+                .changed()
+            {
+                actions.push(Action::SetMotionBlur(MotionBlur {
+                    shutter_angle: angle,
+                    ..current
+                }));
+            }
+            ui.label(
+                RichText::new(format!("{:.0}% of a frame", current.shutter_angle / 3.6))
+                    .small()
+                    .monospace()
+                    .color(theme::TEXT_FAINT),
+            );
+        });
+        ui.horizontal(|ui| {
+            property_label(ui, "Samples", false);
+            let mut samples = current.samples;
+            if ui
+                .add(
+                    DragValue::new(&mut samples)
+                        .speed(0.25)
+                        .range(MotionBlur::MIN_SAMPLES..=MotionBlur::MAX_SAMPLES),
+                )
+                .on_hover_text("Each sample is a draw: more is smoother and slower")
+                .changed()
+            {
+                actions.push(Action::SetMotionBlur(MotionBlur { samples, ..current }));
+            }
+        });
+    });
 }
 
 /// One fade: how long it lasts, and what shape it follows.

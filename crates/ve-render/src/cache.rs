@@ -44,6 +44,11 @@ use ve_metrics::{counters, Metrics};
 use crate::renderer::Layer;
 use crate::target::RenderTarget;
 
+/// What kind of pass a key describes, so that two passes reading the same
+/// inputs cannot share a key.
+const COMPOSITE: u8 = 0;
+const AVERAGE: u8 = 1;
+
 /// Identifies a composited picture by its contents.
 ///
 /// A 64-bit hash, so two different compositions could in principle collide and
@@ -65,7 +70,29 @@ impl CompositeKey {
         color_space: ColorSpace,
         layers: &[Layer<'_>],
     ) -> Self {
+        Self::hash_inputs(COMPOSITE, size, background, color_space, layers)
+    }
+
+    /// The key of a motion-blurred layer: the mean of `samples` over
+    /// transparency, which is what [`crate::Renderer::accumulate`] draws.
+    ///
+    /// Tagged differently from a composite of the same layers, because the two
+    /// read the same inputs and produce different pictures — summing weighted
+    /// samples is not stacking them — and a key that could not tell them apart
+    /// would hand one out for the other.
+    pub fn of_average(size: Size, color_space: ColorSpace, samples: &[Layer<'_>]) -> Self {
+        Self::hash_inputs(AVERAGE, size, Rgba::TRANSPARENT, color_space, samples)
+    }
+
+    fn hash_inputs(
+        tag: u8,
+        size: Size,
+        background: Rgba,
+        color_space: ColorSpace,
+        layers: &[Layer<'_>],
+    ) -> Self {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        tag.hash(&mut hasher);
         size.hash(&mut hasher);
         hash_colour(background, &mut hasher);
         // The same layers composited in the other space are a different

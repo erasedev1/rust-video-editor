@@ -64,6 +64,11 @@ pub struct CompositionSettings {
     /// and still be laid into a perceptual sequence.
     #[serde(default)]
     pub color_space: ColorSpace,
+    /// A composition is its own canvas, so it has its own shutter: a nested
+    /// composite can be blurred on its own terms and laid into a sequence that
+    /// is not.
+    #[serde(default)]
+    pub motion_blur: crate::MotionBlur,
 }
 
 impl Default for CompositionSettings {
@@ -74,6 +79,7 @@ impl Default for CompositionSettings {
             duration: Ticks::from_seconds(10),
             background: Rgba::TRANSPARENT,
             color_space: ColorSpace::default(),
+            motion_blur: crate::MotionBlur::default(),
         }
     }
 }
@@ -112,6 +118,10 @@ pub struct CompositionLayer {
     pub solo: bool,
     #[serde(default)]
     pub transform: Transform,
+    /// Whether this layer is smeared across the shutter when it moves. Off by
+    /// default: blur costs a pass per sample, and most layers do not move.
+    #[serde(default)]
+    pub motion_blur: bool,
     #[serde(default)]
     pub blend: BlendMode,
     #[serde(default)]
@@ -139,6 +149,7 @@ impl CompositionLayer {
             enabled: true,
             solo: false,
             transform: Transform::default(),
+            motion_blur: false,
             blend: BlendMode::Normal,
             audio: AudioProperties::default(),
             effects: Vec::new(),

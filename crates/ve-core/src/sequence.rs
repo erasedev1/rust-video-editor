@@ -58,6 +58,11 @@ pub struct SequenceSettings {
     /// against rather than silently changing every dissolve in it.
     #[serde(default)]
     pub color_space: ColorSpace,
+    /// The shutter every blurred clip on this sequence is exposed through.
+    /// Nothing is blurred until a clip asks to be, so defaulting this on
+    /// changes no existing project.
+    #[serde(default)]
+    pub motion_blur: crate::MotionBlur,
 }
 
 impl Default for SequenceSettings {
@@ -70,6 +75,7 @@ impl Default for SequenceSettings {
             background: Rgba::BLACK,
             start_timecode: Ticks::ZERO,
             color_space: ColorSpace::default(),
+            motion_blur: crate::MotionBlur::default(),
         }
     }
 }

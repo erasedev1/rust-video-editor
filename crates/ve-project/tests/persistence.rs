@@ -877,3 +877,123 @@ fn a_hand_edited_track_level_is_clamped_when_it_is_read() {
         assert_eq!(pan, 1.0);
     }
 }
+
+// ---- animation and motion blur ------------------------------------------
+
+#[test]
+fn keyframes_and_their_easing_survive_a_round_trip() {
+    use ve_core::{Interpolation, Vec2};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("animated.verge");
+
+    let mut project = Project::with_default_sequence("Animated");
+    let asset = project.add_asset(
+        "/media/a.mp4",
+        MediaInfo {
+            duration: Ticks::from_seconds(30),
+            video: None,
+            audio: None,
+            container: "mp4".into(),
+        },
+    );
+    let sequence = project.active_sequence.unwrap();
+    let track = project.sequence(sequence).unwrap().tracks[0].id;
+    let clip_id = project.new_clip_id();
+    let mut clip = ve_core::Clip::new(
+        clip_id,
+        asset,
+        "moving",
+        Ticks::ZERO,
+        Ticks::ZERO,
+        Ticks::from_seconds(5),
+    );
+    clip.transform.position.set_keyframe(Ticks::ZERO, Vec2::ZERO, Interpolation::EaseInOut);
+    clip.transform.position.set_keyframe(
+        Ticks::from_seconds(5),
+        Vec2::new(120.0, -40.0),
+        Interpolation::Bezier { x1: 0.1, y1: 0.9, x2: 0.4, y2: 1.2 },
+    );
+    clip.motion_blur = true;
+    project
+        .sequence_mut(sequence)
+        .unwrap()
+        .track_mut(track)
+        .unwrap()
+        .insert_clip(clip)
+        .unwrap();
+    project.active_mut().unwrap().settings.motion_blur = ve_core::MotionBlur::new(144.0, 6);
+
+    store::save(&project, &path).unwrap();
+    let loaded = store::load(&path).unwrap();
+
+    let (_, clip) = loaded.project.active().unwrap().find_clip(clip_id).unwrap();
+    let kfs = clip.transform.position.keyframes();
+    assert_eq!(kfs.len(), 2);
+    assert_eq!(kfs[0].interpolation, Interpolation::EaseInOut);
+    assert_eq!(
+        kfs[1].interpolation,
+        Interpolation::Bezier { x1: 0.1, y1: 0.9, x2: 0.4, y2: 1.2 },
+        "a hand-shaped curve has to come back the shape it was"
+    );
+    assert_eq!(kfs[1].value, Vec2::new(120.0, -40.0));
+    assert!(clip.motion_blur);
+    assert_eq!(
+        loaded.project.active().unwrap().settings.motion_blur,
+        ve_core::MotionBlur::new(144.0, 6)
+    );
+}
+
+#[test]
+fn a_project_written_before_motion_blur_loads_with_it_off() {
+    // Additive, like the colour space before it: an old project has to draw
+    // exactly what it drew, so the clip switch defaults to off even though the
+    // canvas shutter defaults to enabled.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.verge");
+
+    let mut project = Project::with_default_sequence("Old");
+    let asset = project.add_asset(
+        "/media/a.mp4",
+        MediaInfo {
+            duration: Ticks::from_seconds(30),
+            video: None,
+            audio: None,
+            container: "mp4".into(),
+        },
+    );
+    let sequence = project.active_sequence.unwrap();
+    let track = project.sequence(sequence).unwrap().tracks[0].id;
+    let clip_id = project.new_clip_id();
+    project
+        .sequence_mut(sequence)
+        .unwrap()
+        .track_mut(track)
+        .unwrap()
+        .insert_clip(ve_core::Clip::new(
+            clip_id,
+            asset,
+            "clip",
+            Ticks::ZERO,
+            Ticks::ZERO,
+            Ticks::from_seconds(5),
+        ))
+        .unwrap();
+
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&store::to_json(&project).unwrap()).unwrap();
+    let settings = doc["project"]["sequences"][0]["settings"].as_object_mut().unwrap();
+    assert!(settings.remove("motion_blur").is_some(), "the field should be written");
+    let clip = doc["project"]["sequences"][0]["tracks"][0]["clips"][0].as_object_mut().unwrap();
+    assert!(clip.remove("motion_blur").is_some(), "the field should be written");
+    fs::write(&path, doc.to_string()).unwrap();
+
+    let loaded = store::load(&path).unwrap();
+    let sequence = loaded.project.active().unwrap();
+    assert!(!sequence.find_clip(clip_id).unwrap().1.motion_blur, "no clip blurs by default");
+    assert_eq!(
+        sequence.settings.motion_blur,
+        ve_core::MotionBlur::default(),
+        "the shutter comes back at the film convention"
+    );
+}

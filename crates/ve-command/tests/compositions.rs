@@ -404,6 +404,7 @@ fn composition_settings_change_and_undo_as_one() {
         duration: Ticks::from_seconds(30),
         background: ve_core::Rgba::WHITE,
         color_space: ve_core::ColorSpace::Linear,
+        motion_blur: ve_core::MotionBlur::new(90.0, 8),
     };
     h.execute(&mut f.project, Box::new(SetCompositionSettings::new(comp, settings.clone())))
         .unwrap();

@@ -22,6 +22,7 @@ pub mod effect;
 pub mod fade;
 pub mod geometry;
 pub mod id;
+pub mod motion;
 pub mod project;
 pub mod sequence;
 pub mod source;
@@ -39,6 +40,7 @@ pub use id::{
     AssetId, ClipId, CompositionId, EffectId, Id, IdAllocator, LayerId, MarkerId, SequenceId,
     TrackId,
 };
+pub use motion::MotionBlur;
 pub use project::{Project, ProjectSettings};
 pub use sequence::{Marker, Sequence, SequenceSettings};
 pub use source::Source;

@@ -114,6 +114,12 @@ pub struct Clip {
 
     #[serde(default)]
     pub transform: Transform,
+    /// Whether the clip is smeared across the shutter when it moves. Off by
+    /// default: blur costs a pass per sample, and most clips do not move. See
+    /// [`crate::MotionBlur`] for the shutter itself, which belongs to the
+    /// canvas rather than to the clip.
+    #[serde(default)]
+    pub motion_blur: bool,
     /// How the clip's picture combines with the layers beneath it. Defaulted on
     /// read, so a project written before blend modes existed loads as `Normal`.
     #[serde(default)]
@@ -146,6 +152,7 @@ impl Clip {
             speed: Speed::NORMAL,
             enabled: true,
             transform: Transform::default(),
+            motion_blur: false,
             blend: BlendMode::default(),
             audio: AudioProperties::default(),
             effects: Vec::new(),

@@ -181,9 +181,72 @@ impl Preview {
             })
             .collect();
 
+        // A motion-blurred layer is averaged into a target of its own first,
+        // and the node then draws that target once. Done before the node's own
+        // layer list is built, so by the time the pass below runs every blurred
+        // layer is an ordinary texture like any other.
+        let blurred: Vec<Option<GpuTexture>> = resolved
+            .layers
+            .iter()
+            .zip(&bound)
+            .zip(&nested)
+            .map(|((layer, bound), nested)| {
+                if !layer.item.is_blurred() {
+                    return None;
+                }
+                let texture = match bound {
+                    Some(Bound::Frame(key)) => self.textures.peek(key),
+                    Some(Bound::Nested(_)) => nested.as_ref(),
+                    None => None,
+                }?;
+                let samples: Vec<Layer<'_>> = layer
+                    .item
+                    .samples
+                    .iter()
+                    .map(|transform| Layer {
+                        texture,
+                        transform: *transform,
+                        // The samples are averaged, not blended with each
+                        // other; the layer's own blend mode applies once, when
+                        // the average is drawn into the node.
+                        blend: ve_core::BlendMode::Normal,
+                    })
+                    .collect();
+
+                let key = CompositeKey::of_average(plan.size, plan.color_space, &samples);
+                if !self.composites.touch(&key) {
+                    let scratch = self.composites.take_target(device, plan.size);
+                    self.renderer.accumulate(
+                        device,
+                        queue,
+                        &scratch,
+                        plan.color_space,
+                        &samples,
+                    );
+                    self.composites.insert(key, scratch);
+                }
+                let target = self.composites.peek(&key)?;
+                Some(self.renderer.bind_target(device, target, key))
+            })
+            .collect();
+
         let textures = &self.textures;
         let mut layers = Vec::with_capacity(resolved.layers.len());
-        for ((layer, bound), nested) in resolved.layers.iter().zip(&bound).zip(&nested) {
+        for (((layer, bound), nested), blurred) in
+            resolved.layers.iter().zip(&bound).zip(&nested).zip(&blurred)
+        {
+            // A blurred layer's picture is the average, drawn at the node's own
+            // size with the transform already inside it — so it is laid down
+            // untransformed and at full opacity, both of which every sample
+            // already carried.
+            if let Some(texture) = blurred {
+                layers.push(Layer {
+                    texture,
+                    transform: ve_core::TransformState::default(),
+                    blend: layer.item.blend,
+                });
+                continue;
+            }
             let texture = match bound {
                 Some(Bound::Frame(key)) => textures.peek(key),
                 Some(Bound::Nested(_)) => nested.as_ref(),

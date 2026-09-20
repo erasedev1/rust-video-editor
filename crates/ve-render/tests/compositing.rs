@@ -753,3 +753,52 @@ fn the_composite_key_separates_the_two_spaces() {
         CompositeKey::of(size, OPAQUE_BLACK, ColorSpace::Perceptual, &layers)
     );
 }
+
+#[test]
+fn a_nested_target_is_not_premultiplied_a_second_time() {
+    // A group rendered offscreen and composited again must come out at the
+    // opacity it was given, not at the square of it. The pass that drew the
+    // group already multiplied its alpha into its colour, so the pass that
+    // draws the group has to leave that alone.
+    let size = Size::new(32, 32);
+    let gpu = gpu();
+    let mut renderer = Renderer::new(&gpu.device);
+    let group = RenderTarget::new(&gpu.device, size);
+    let final_target = RenderTarget::new(&gpu.device, size);
+    let texture = renderer.upload(&gpu.device, &gpu.queue, &solid_frame(size, RED));
+
+    // Half-opaque red on a transparent canvas, as a composition with a
+    // transparent background gives.
+    renderer.render(
+        &gpu.device,
+        &gpu.queue,
+        &group,
+        Rgba::TRANSPARENT,
+        ColorSpace::Perceptual,
+        &[Layer::new(&texture)
+            .with_transform(TransformState { opacity: 0.5, ..Default::default() })],
+    );
+
+    let key = ve_render::CompositeKey::of(
+        size,
+        Rgba::TRANSPARENT,
+        ColorSpace::Perceptual,
+        &[Layer::new(&texture)],
+    );
+    let nested = renderer.bind_target(&gpu.device, &group, key);
+    renderer.render(
+        &gpu.device,
+        &gpu.queue,
+        &final_target,
+        Rgba::new(1.0, 1.0, 1.0, 1.0),
+        ColorSpace::Perceptual,
+        &[Layer::new(&nested)],
+    );
+    let pixels = final_target.read_pixels(&gpu.device, &gpu.queue);
+
+    assert_colour(
+        RenderTarget::pixel_at(&pixels, size, 16, 16),
+        [255, 128, 128, 255],
+        "half red over white, not a quarter",
+    );
+}

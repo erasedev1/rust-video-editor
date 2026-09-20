@@ -12,13 +12,14 @@ use ve_command::{
     property_ref, AddClip, AddMarker, AddTrack, ClipProperty, Command, Compound,
     CrossfadeClips, EditKeyframes, KeyframeEdit, KeyframePoint, MoveClip, MoveTrack,
     PropertyValue, RemoveClip, RemoveMarker, RemoveTrack, RollEdit, SetClipBlendMode,
-    SetClipEnabled, SetClipFade, SetClipProperty, SetClipSpeed, SetCompositionSettings,
-    SetSequenceColorSpace, SetSequenceFormat, SetTrackFlag, SetTrackLevel, ShiftClips,
-    SlideClip, SlipClip, SplitClip, TrackFlag, TrackLevel, TrimClip, TrimEdge,
+    SetClipEnabled, SetClipFade, SetClipMotionBlur, SetClipProperty, SetClipSpeed,
+    SetCompositionSettings, SetSequenceColorSpace, SetSequenceFormat, SetSequenceMotionBlur,
+    SetTrackFlag, SetTrackLevel, ShiftClips, SlideClip, SlipClip, SplitClip, TrackFlag,
+    TrackLevel, TrimClip, TrimEdge,
 };
 use ve_core::{
     AssetId, BlendMode, Clip, ClipId, ColorSpace, Fade, FadeCurve, FadeEdge, Interpolation,
-    MarkerId, Project, SequenceId, Speed, TrackId, TrackKind,
+    MarkerId, MotionBlur, Project, SequenceId, Speed, TrackId, TrackKind,
 };
 use ve_engine::PlaybackEngine;
 use ve_media::WaveformService;
@@ -97,6 +98,14 @@ pub enum Action {
     /// Applies to whatever canvas is being viewed: the sequence, or a
     /// composition when one is open.
     SetColorSpace(ColorSpace),
+    // Whether one clip is smeared across the shutter when it moves.
+    SetClipMotionBlur {
+        clip: ClipId,
+        blurred: bool,
+    },
+    // The shutter itself, which belongs to the canvas being viewed. Coalesced
+    // while the angle or the sample count is dragged.
+    SetMotionBlur(MotionBlur),
 
     // Animation
     ToggleAnimationEditor,
@@ -779,6 +788,49 @@ pub fn dispatch(
 
         Action::SetTrackLevel { track, which, value } => {
             let command = Box::new(SetTrackLevel::new(sequence_id, track, which, value));
+            match state.history.execute_coalesced(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetClipMotionBlur { clip, blurred } => {
+            let command = Box::new(SetClipMotionBlur::new(sequence_id, clip, blurred));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.set_status(Status::info(if blurred {
+                        "motion blur on — the clip is now exposed across the shutter"
+                    } else {
+                        "motion blur off"
+                    }));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetMotionBlur(motion_blur) => {
+            // The shutter belongs to whichever canvas is on screen, exactly as
+            // the colour space does.
+            let command: Box<dyn ve_command::Command> = match state.viewing() {
+                Some(ve_engine::Viewing::Composition(id)) => {
+                    let Some(composition) = state.project.composition(id) else { return };
+                    if composition.settings.motion_blur == motion_blur {
+                        return;
+                    }
+                    let mut settings = composition.settings.clone();
+                    settings.motion_blur = motion_blur;
+                    Box::new(SetCompositionSettings::new(id, settings))
+                }
+                _ => {
+                    let current =
+                        state.project.sequence(sequence_id).map(|s| s.settings.motion_blur);
+                    if current == Some(motion_blur) {
+                        return;
+                    }
+                    Box::new(SetSequenceMotionBlur::new(sequence_id, motion_blur))
+                }
+            };
             match state.history.execute_coalesced(&mut state.project, command) {
                 Ok(()) => state.mark_edited(),
                 Err(e) => state.set_status(Status::warning(e.to_string())),

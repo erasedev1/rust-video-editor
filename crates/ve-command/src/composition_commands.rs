@@ -818,6 +818,9 @@ impl Command for NestClips {
                 // sequence into a perceptual composition would change how they
                 // blend with each other and quietly alter the picture.
                 color_space: s.settings.color_space,
+                // And the same again for the shutter: the clips being nested
+                // keep whichever one they were already exposed through.
+                motion_blur: s.settings.motion_blur,
             })
             .ok_or(CommandError::SequenceNotFound(self.sequence))?;
 

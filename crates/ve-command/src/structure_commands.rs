@@ -570,3 +570,108 @@ impl Command for SetSequenceColorSpace {
         self
     }
 }
+
+/// Turns a clip's motion blur on or off.
+///
+/// A switch rather than an animatable property, and per clip rather than per
+/// canvas: whether a layer is smeared across the shutter is a decision about
+/// that layer, while the shutter itself belongs to the sequence — see
+/// [`SetSequenceMotionBlur`] and [`ve_core::MotionBlur`].
+#[derive(Debug)]
+pub struct SetClipMotionBlur {
+    sequence: SequenceId,
+    clip: ClipId,
+    blurred: bool,
+    previous: Option<bool>,
+}
+
+impl SetClipMotionBlur {
+    pub fn new(sequence: SequenceId, clip: ClipId, blurred: bool) -> Self {
+        SetClipMotionBlur { sequence, clip, blurred, previous: None }
+    }
+}
+
+impl Command for SetClipMotionBlur {
+    fn name(&self) -> &str {
+        if self.blurred {
+            "Enable Motion Blur"
+        } else {
+            "Disable Motion Blur"
+        }
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let clip = clip_mut(project, self.sequence, self.clip)?;
+        self.previous.get_or_insert(clip.motion_blur);
+        clip.motion_blur = self.blurred;
+        Ok(())
+    }
+
+    fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let previous =
+            self.previous.ok_or_else(|| CommandError::Rejected("never applied".into()))?;
+        clip_mut(project, self.sequence, self.clip)?.motion_blur = previous;
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Sets the shutter every blurred clip on a sequence is exposed through.
+///
+/// Merges, because the angle and the sample count are dragged: one gesture on
+/// the shutter is one undo step, exactly like a slider in the inspector.
+#[derive(Debug)]
+pub struct SetSequenceMotionBlur {
+    sequence: SequenceId,
+    motion_blur: ve_core::MotionBlur,
+    previous: Option<ve_core::MotionBlur>,
+}
+
+impl SetSequenceMotionBlur {
+    pub fn new(sequence: SequenceId, motion_blur: ve_core::MotionBlur) -> Self {
+        SetSequenceMotionBlur { sequence, motion_blur, previous: None }
+    }
+}
+
+impl Command for SetSequenceMotionBlur {
+    fn name(&self) -> &str {
+        "Set Shutter"
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let seq = project
+            .sequence_mut(self.sequence)
+            .ok_or(CommandError::SequenceNotFound(self.sequence))?;
+        self.previous.get_or_insert(seq.settings.motion_blur);
+        seq.settings.motion_blur = self.motion_blur;
+        Ok(())
+    }
+
+    fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let previous =
+            self.previous.ok_or_else(|| CommandError::Rejected("never applied".into()))?;
+        project
+            .sequence_mut(self.sequence)
+            .ok_or(CommandError::SequenceNotFound(self.sequence))?
+            .settings
+            .motion_blur = previous;
+        Ok(())
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        match next.as_any().downcast_ref::<SetSequenceMotionBlur>() {
+            Some(other) if other.sequence == self.sequence => {
+                self.motion_blur = other.motion_blur;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}

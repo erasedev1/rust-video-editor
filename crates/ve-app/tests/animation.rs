@@ -501,3 +501,34 @@ fn the_animation_editor_opens_and_closes_and_lets_go_when_it_closes() {
         "keyframes cannot stay selected in an editor that is not on screen"
     );
 }
+
+#[test]
+fn motion_blur_is_a_switch_on_the_clip_and_a_shutter_on_the_canvas() {
+    use ve_core::MotionBlur;
+
+    let mut editor = Editor::new();
+    let v1 = editor.video_track();
+    let clip = editor.place(v1, Ticks::ZERO);
+
+    editor.act(Action::SetClipMotionBlur { clip, blurred: true });
+    assert!(editor.sequence().find_clip(clip).unwrap().1.motion_blur, "{}", editor.status());
+
+    // The shutter is dragged, so a gesture on it is one undo step.
+    let depth = editor.state.history.undo_depth();
+    for angle in [120.0, 150.0, 180.0] {
+        editor.act(Action::SetMotionBlur(MotionBlur::new(angle, 10)));
+    }
+    editor.act(Action::EndGesture);
+    assert_eq!(editor.state.history.undo_depth(), depth + 1);
+    assert_eq!(
+        editor.sequence().settings.motion_blur,
+        MotionBlur::new(180.0, 10),
+        "{}",
+        editor.status()
+    );
+
+    editor.act(Action::Undo);
+    assert_eq!(editor.sequence().settings.motion_blur, MotionBlur::default());
+    editor.act(Action::Undo);
+    assert!(!editor.sequence().find_clip(clip).unwrap().1.motion_blur);
+}

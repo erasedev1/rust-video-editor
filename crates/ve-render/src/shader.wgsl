@@ -57,9 +57,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sampled = textureSample(source, source_sampler, in.uv);
     let alpha = sampled.a * layer.opacity;
     // Premultiplied output, paired with a One / OneMinusSrcAlpha blend state.
-    // Premultiplying at the point of sampling is what makes nested
-    // compositions correct: a group rendered to an offscreen target and then
-    // composited again must not double-apply its own alpha, which straight
-    // alpha would do at every level of nesting.
+    // The source here is a decoded frame, whose colour is independent of its
+    // coverage, so its alpha is multiplied in on the way out. A source that
+    // already carries its own alpha — the output of another pass — goes
+    // through `fs_premultiplied` instead, which does not multiply it twice.
     return vec4<f32>(sampled.rgb * alpha, alpha);
+}
+
+// The same draw, for a source whose colour **already carries its alpha**: the
+// output of another pass of this shader, which a nested composition and a
+// motion-blurred layer both are.
+//
+// Multiplying by alpha again would apply it twice — a nested group at half
+// opacity would come out at a quarter, and every motion blur would darken
+// towards its own edges — so opacity scales the premultiplied value as a whole
+// instead.
+@fragment
+fn fs_premultiplied(in: VertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(source, source_sampler, in.uv) * layer.opacity;
 }

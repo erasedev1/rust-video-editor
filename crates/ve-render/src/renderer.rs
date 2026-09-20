@@ -64,7 +64,13 @@ pub struct Renderer {
     /// share a shader module and differ only in blend state and target format,
     /// so the whole set costs a few milliseconds once, and a mode or space
     /// chosen mid-drag never stalls a frame compiling.
-    pipelines: [wgpu::RenderPipeline; ColorSpace::ALL.len() * BlendMode::ALL.len()],
+    /// Indexed by [`Renderer::pipeline_index`]: colour space, then whether the
+    /// source is already premultiplied, then blend mode.
+    pipelines: [wgpu::RenderPipeline; ColorSpace::ALL.len() * 2 * BlendMode::ALL.len()],
+    /// One per (colour space, premultiplied) pair, for [`Renderer::accumulate`].
+    /// Additive in every channel including alpha, which is what turns a pass of
+    /// weighted draws into a mean rather than into a stack.
+    averaging: [wgpu::RenderPipeline; ColorSpace::ALL.len() * 2],
     uniform_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -199,54 +205,126 @@ impl Renderer {
         // — cannot be reinterpreted as sRGB, so its pipelines keep that format
         // for both spaces and the linear pair simply never gets used.
         let reinterpretable = format == FRAME_FORMAT;
-        let mut built = Vec::with_capacity(ColorSpace::ALL.len() * BlendMode::ALL.len());
+        let mut built = Vec::with_capacity(ColorSpace::ALL.len() * 2 * BlendMode::ALL.len());
         for space in ColorSpace::ALL {
             let target_format = if reinterpretable { view_format_for(space) } else { format };
-            for mode in BlendMode::ALL {
-                built.push(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("verge-composite-pipeline"),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some("vs_main"),
-                        // No vertex buffers: the quad comes from the vertex index.
-                        buffers: &[],
-                        compilation_options: Default::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some("fs_main"),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: target_format,
-                            // Premultiplied throughout: the shader already
-                            // multiplied colour by alpha, so every mode's source
-                            // factor works on a premultiplied value. See
-                            // [`blend_state`].
-                            blend: Some(blend_state(mode)),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                        compilation_options: Default::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleStrip,
-                        strip_index_format: None,
-                        front_face: wgpu::FrontFace::Ccw,
-                        // Layers are routinely mirrored by a negative scale, and a
-                        // mirrored layer must not disappear.
-                        cull_mode: None,
-                        unclipped_depth: false,
-                        polygon_mode: wgpu::PolygonMode::Fill,
-                        conservative: false,
-                    },
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
-                }));
+            // Two fragment shaders, because a decoded frame and the output of
+            // another pass carry their alpha differently. See
+            // [`GpuTexture::is_premultiplied`].
+            for entry in ["fs_main", "fs_premultiplied"] {
+                for mode in BlendMode::ALL {
+                    built.push(device.create_render_pipeline(
+                        &wgpu::RenderPipelineDescriptor {
+                            label: Some("verge-composite-pipeline"),
+                            layout: Some(&pipeline_layout),
+                            vertex: wgpu::VertexState {
+                                module: &shader,
+                                entry_point: Some("vs_main"),
+                                // No vertex buffers: the quad comes from the vertex index.
+                                buffers: &[],
+                                compilation_options: Default::default(),
+                            },
+                            fragment: Some(wgpu::FragmentState {
+                                module: &shader,
+                                entry_point: Some(entry),
+                                targets: &[Some(wgpu::ColorTargetState {
+                                    format: target_format,
+                                    // Premultiplied throughout: the shader already
+                                    // multiplied colour by alpha, so every mode's source
+                                    // factor works on a premultiplied value. See
+                                    // [`blend_state`].
+                                    blend: Some(blend_state(mode)),
+                                    write_mask: wgpu::ColorWrites::ALL,
+                                })],
+                                compilation_options: Default::default(),
+                            }),
+                            primitive: wgpu::PrimitiveState {
+                                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                                strip_index_format: None,
+                                front_face: wgpu::FrontFace::Ccw,
+                                // Layers are routinely mirrored by a negative scale, and a
+                                // mirrored layer must not disappear.
+                                cull_mode: None,
+                                unclipped_depth: false,
+                                polygon_mode: wgpu::PolygonMode::Fill,
+                                conservative: false,
+                            },
+                            depth_stencil: None,
+                            multisample: wgpu::MultisampleState::default(),
+                            multiview_mask: None,
+                            cache: None,
+                        },
+                    ));
+                }
             }
         }
-        let pipelines: [wgpu::RenderPipeline; ColorSpace::ALL.len() * BlendMode::ALL.len()] =
-            built.try_into().expect("one pipeline per colour space and blend mode");
+        let pipelines: [wgpu::RenderPipeline;
+            ColorSpace::ALL.len() * 2 * BlendMode::ALL.len()] = built
+            .try_into()
+            .expect("one pipeline per colour space, source kind and blend mode");
+
+        // The averaging pipelines differ from the rest only in blend state:
+        // `Cs + Cd` in colour *and* alpha, against a target cleared to
+        // transparent. Summing weighted samples that way is a mean; the `over`
+        // blending every other mode uses is not, because each sample would
+        // occlude the ones before it and a fully opaque layer would come out
+        // partly transparent.
+        let mut averaging_built = Vec::with_capacity(ColorSpace::ALL.len() * 2);
+        for space in ColorSpace::ALL {
+            for entry in ["fs_main", "fs_premultiplied"] {
+                let target_format =
+                    if reinterpretable { view_format_for(space) } else { format };
+                averaging_built.push(device.create_render_pipeline(
+                    &wgpu::RenderPipelineDescriptor {
+                        label: Some("verge-average-pipeline"),
+                        layout: Some(&pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &shader,
+                            entry_point: Some("vs_main"),
+                            buffers: &[],
+                            compilation_options: Default::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &shader,
+                            entry_point: Some(entry),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: target_format,
+                                blend: Some(wgpu::BlendState {
+                                    color: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::One,
+                                        dst_factor: wgpu::BlendFactor::One,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                    alpha: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::One,
+                                        dst_factor: wgpu::BlendFactor::One,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                }),
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                            compilation_options: Default::default(),
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleStrip,
+                            strip_index_format: None,
+                            front_face: wgpu::FrontFace::Ccw,
+                            cull_mode: None,
+                            unclipped_depth: false,
+                            polygon_mode: wgpu::PolygonMode::Fill,
+                            conservative: false,
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview_mask: None,
+                        cache: None,
+                    },
+                ));
+            }
+        }
+        let averaging: [wgpu::RenderPipeline; ColorSpace::ALL.len() * 2] = averaging_built
+            .try_into()
+            .expect("one averaging pipeline per colour space and source kind");
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("verge-frame-sampler"),
@@ -271,6 +349,7 @@ impl Renderer {
 
         Renderer {
             pipelines,
+            averaging,
             uniform_layout,
             texture_layout,
             sampler,
@@ -393,11 +472,16 @@ impl Renderer {
             // the whole pass. Layers keep their back-to-front order rather than
             // being grouped by mode: blending is not commutative, so reordering
             // to save a bind would change the picture.
-            let mut bound: Option<BlendMode> = None;
+            let mut bound: Option<usize> = None;
             for (i, layer) in layers.iter().enumerate() {
-                if bound != Some(layer.blend) {
-                    pass.set_pipeline(self.pipeline_for(color_space, layer.blend));
-                    bound = Some(layer.blend);
+                let index = Self::pipeline_index(
+                    color_space,
+                    layer.texture.is_premultiplied(),
+                    layer.blend,
+                );
+                if bound != Some(index) {
+                    pass.set_pipeline(&self.pipelines[index]);
+                    bound = Some(index);
                 }
                 let offset = (i as u32) * self.uniform_stride;
                 pass.set_bind_group(0, &self.uniform_bind_group, &[offset]);
@@ -408,10 +492,105 @@ impl Renderer {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// The pipeline that implements a blend mode in a colour space.
-    fn pipeline_for(&self, space: ColorSpace, mode: BlendMode) -> &wgpu::RenderPipeline {
+    /// Averages `samples` into `target`: one picture, exposed across a shutter.
+    ///
+    /// Each sample is the same texture under a different transform — where the
+    /// layer was at one instant while the shutter was open — and what comes out
+    /// is their **mean**, premultiplied, over a transparent target. The node
+    /// above then draws that mean once, with its own blend mode, exactly as it
+    /// would draw an unblurred layer.
+    ///
+    /// # Why an average, and why into a target of its own
+    ///
+    /// Motion blur is the mean of what the sensor saw while the shutter was
+    /// open. Drawing the samples straight onto the backdrop at `1/n` opacity
+    /// each is not that: `over` blending makes every sample occlude the ones
+    /// before it, so a fully opaque layer comes out about 63% opaque, and the
+    /// backdrop gets mixed into the smear instead of being composited under it.
+    ///
+    /// Summing weighted samples additively onto transparency is the mean, and
+    /// the result is a layer like any other. That costs one target per blurred
+    /// layer, which is what the render cache is for: the samples are part of
+    /// the key, so an unchanged blur is not recomputed.
+    ///
+    /// The weight is applied here rather than by the caller, because "average
+    /// these" is the whole contract: a caller that had to remember to divide by
+    /// `n` would be one bug away from a layer that glows.
+    pub fn accumulate(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &RenderTarget,
+        color_space: ColorSpace,
+        samples: &[Layer<'_>],
+    ) {
+        let _span = self.metrics.as_ref().map(|m| m.span(spans::COMPOSITE));
+        if samples.is_empty() {
+            return;
+        }
+        if samples.len() > self.uniform_capacity {
+            self.grow_uniform_buffer(device, samples.len());
+        }
+
+        let weight = 1.0 / samples.len() as f32;
+        let composition = target.size();
+        let stride = self.uniform_stride as usize;
+        let mut staging = vec![0u8; stride * samples.len()];
+        for (i, sample) in samples.iter().enumerate() {
+            let uniform = LayerUniform {
+                transform: layer_matrix(sample.texture.size(), composition, &sample.transform),
+                opacity: sample.transform.opacity.clamp(0.0, 1.0) as f32 * weight,
+                _padding: [0.0; 3],
+            };
+            let bytes = bytemuck::bytes_of(&uniform);
+            staging[i * stride..i * stride + bytes.len()].copy_from_slice(bytes);
+        }
+        queue.write_buffer(&self.uniform_buffer, 0, &staging);
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("verge-motion-blur-encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("verge-motion-blur-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target.view_for(color_space),
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Transparent, not the canvas background: this target
+                        // holds one layer's own picture, which whatever is
+                        // beneath it shows through.
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            // Every sample is the same texture, so the source kind is settled
+            // once for the whole pass.
+            let premultiplied = samples[0].texture.is_premultiplied();
+            pass.set_pipeline(
+                &self.averaging[color_space as usize * 2 + premultiplied as usize],
+            );
+            for (i, sample) in samples.iter().enumerate() {
+                let offset = (i as u32) * self.uniform_stride;
+                pass.set_bind_group(0, &self.uniform_bind_group, &[offset]);
+                pass.set_bind_group(1, sample.texture.bind_group(color_space), &[]);
+                pass.draw(0..4, 0..1);
+            }
+        }
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Where the pipeline for one (colour space, source kind, blend mode) sits.
+    fn pipeline_index(space: ColorSpace, premultiplied: bool, mode: BlendMode) -> usize {
         let mode_index = BlendMode::ALL.iter().position(|m| *m == mode).unwrap_or(0);
-        &self.pipelines[space as usize * BlendMode::ALL.len() + mode_index]
+        ((space as usize * 2) + premultiplied as usize) * BlendMode::ALL.len() + mode_index
     }
 
     /// The uniform buffer's per-layer stride, which must satisfy the device's

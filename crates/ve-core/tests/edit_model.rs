@@ -935,3 +935,52 @@ fn dragging_a_handle_keeps_the_other_one_and_stays_inside_the_segment() {
     let Interpolation::Bezier { x1, y1, x2, y2 } = both else { panic!("{both:?}") };
     assert_eq!((x1, y1, x2, y2), (1.0, 1.5, 0.25, -0.5));
 }
+
+// ---- motion blur --------------------------------------------------------
+
+#[test]
+fn the_shutter_samples_the_middle_of_each_slice_it_stands_for() {
+    use ve_core::MotionBlur;
+
+    let frame = Ticks::from_rational(1, 30);
+    let blur = MotionBlur::new(180.0, 4);
+    let offsets = blur.offsets(frame);
+
+    assert_eq!(offsets.len(), 4);
+    // Half a frame, centred on it: the smear sits about where the layer would
+    // have been drawn rather than trailing behind it.
+    assert_eq!(blur.open_for(frame), frame.scale(1, 2));
+    let first = offsets[0];
+    let last = offsets[3];
+    assert!(first.is_negative() && !last.is_negative(), "{offsets:?}");
+    assert_eq!(first.raw(), -last.raw(), "the samples must be symmetric");
+    // Sampling the ends instead would weight the extremes twice, so the first
+    // sample sits an eighth of the open interval in, not at its edge.
+    assert_eq!(first, -frame.scale(3, 16));
+}
+
+#[test]
+fn a_closed_shutter_asks_for_no_samples_at_all() {
+    use ve_core::MotionBlur;
+
+    let frame = Ticks::from_rational(1, 30);
+    assert!(MotionBlur { enabled: false, ..MotionBlur::default() }.offsets(frame).is_empty());
+    assert!(MotionBlur::new(0.0, 8).offsets(frame).is_empty());
+    assert!(!MotionBlur::new(0.0, 8).is_active());
+
+    // The bounds are enforced on the way in rather than being trusted.
+    assert_eq!(MotionBlur::new(1000.0, 999).shutter_angle, MotionBlur::MAX_ANGLE);
+    assert_eq!(MotionBlur::new(180.0, 999).samples, MotionBlur::MAX_SAMPLES);
+    assert_eq!(MotionBlur::new(180.0, 0).samples, MotionBlur::MIN_SAMPLES);
+}
+
+#[test]
+fn a_full_shutter_covers_the_whole_frame_interval() {
+    use ve_core::MotionBlur;
+
+    let frame = Ticks::from_rational(1, 24);
+    let blur = MotionBlur::new(360.0, 2);
+    assert_eq!(blur.open_for(frame), frame);
+    let offsets = blur.offsets(frame);
+    assert_eq!(offsets, vec![-frame.scale(1, 4), frame.scale(1, 4)]);
+}
