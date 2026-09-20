@@ -38,6 +38,13 @@
 //! animation system rather than beside it: the registry describes the control,
 //! and the keyframes live where every other keyframe lives.
 //!
+//! # Where the numbers are measured
+//!
+//! An effect chain runs on the clip's own picture, at its own resolution,
+//! before the clip's transform places it on the canvas — so a radius in pixels
+//! means *source* pixels and a position in fractions means fractions of the
+//! clip. See `ve_render::effects` for why that is the right place to run them.
+//!
 //! [`Property<f64>`]: crate::Property
 
 use std::collections::HashMap;
@@ -429,7 +436,7 @@ fn builtin_descriptors() -> Vec<EffectDescriptor> {
             "radius",
             "Radius",
             ParamKind::scalar(8.0, 0.0, 200.0),
-            "Standard deviation of the blur, in composition pixels",
+            "Standard deviation of the blur, in the clip's own pixels",
         ))
         .with_param(ParamDescriptor::new(
             "direction",
@@ -495,13 +502,13 @@ fn builtin_descriptors() -> Vec<EffectDescriptor> {
             kinds::TRANSFORM,
             "Transform",
             EffectCategory::Distort,
-            "Moves, scales and rotates inside the chain, after earlier effects",
+            "Moves, scales and rotates within the clip's own frame, cropping what leaves it",
         )
         .with_param(ParamDescriptor::new(
             "position",
             "Position",
             ParamKind::point(Vec2::ZERO, -16384.0, 16384.0),
-            "Offset from the centre, in composition pixels",
+            "Offset within the clip's own frame, in its own pixels",
         ))
         .with_param(ParamDescriptor::new(
             "scale",
@@ -543,13 +550,13 @@ fn builtin_descriptors() -> Vec<EffectDescriptor> {
             "center",
             "Centre",
             ParamKind::point(Vec2::splat(0.5), -4.0, 4.0),
-            "Where the shape sits, in fractions of the frame",
+            "Where the shape sits, in fractions of the clip's frame",
         ))
         .with_param(ParamDescriptor::new(
             "size",
             "Size",
             ParamKind::point(Vec2::splat(0.5), 0.0, 4.0),
-            "Width and height of the shape, in fractions of the frame",
+            "Width and height of the shape, in fractions of the clip's frame",
         ))
         .with_param(ParamDescriptor::new(
             "rotation",

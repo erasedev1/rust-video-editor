@@ -5,6 +5,7 @@ use ve_core::{BlendMode, ColorSpace, Rgba, TransformState};
 use ve_media::VideoFrame;
 use ve_metrics::{spans, Metrics};
 
+use crate::effects::{EffectPass, EffectRenderer};
 use crate::target::RenderTarget;
 use crate::texture::{view_format_for, GpuTexture, FRAME_FORMAT};
 use crate::transform::{layer_matrix, Matrix4};
@@ -73,6 +74,10 @@ pub struct Renderer {
     averaging: [wgpu::RenderPipeline; ColorSpace::ALL.len() * 2],
     uniform_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
+    /// The pipelines effect passes are drawn with. Held here because a pass
+    /// samples the same textures the compositor does, through the same layout
+    /// and sampler.
+    effects: EffectRenderer,
     sampler: wgpu::Sampler,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
@@ -347,11 +352,14 @@ impl Renderer {
             INITIAL_LAYER_CAPACITY,
         );
 
+        let effects = EffectRenderer::new(device, &texture_layout, format);
+
         Renderer {
             pipelines,
             averaging,
             uniform_layout,
             texture_layout,
+            effects,
             sampler,
             uniform_buffer,
             uniform_bind_group,
@@ -585,6 +593,28 @@ impl Renderer {
             }
         }
         queue.submit(Some(encoder.finish()));
+    }
+
+    /// Draws `source` through one effect pass into `target`.
+    ///
+    /// One pass, one target: a chain is run by calling this once per pass, with
+    /// each output becoming the next input. The ping-pong belongs to the caller
+    /// because it is the caller that owns the pool the targets come from and
+    /// the cache a pass's output may already be sitting in.
+    ///
+    /// `target` is cleared and completely overwritten, so it can be a used one
+    /// from the pool.
+    pub fn apply_effect(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &RenderTarget,
+        color_space: ColorSpace,
+        source: &GpuTexture,
+        pass: &EffectPass,
+    ) {
+        let _span = self.metrics.as_ref().map(|m| m.span(spans::EFFECT));
+        self.effects.run(device, queue, target, color_space, source, pass);
     }
 
     /// Where the pipeline for one (colour space, source kind, blend mode) sits.

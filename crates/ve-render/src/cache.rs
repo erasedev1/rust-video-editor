@@ -48,6 +48,7 @@ use crate::target::RenderTarget;
 /// inputs cannot share a key.
 const COMPOSITE: u8 = 0;
 const AVERAGE: u8 = 1;
+const EFFECT: u8 = 2;
 
 /// Identifies a composited picture by its contents.
 ///
@@ -82,6 +83,34 @@ impl CompositeKey {
     /// would hand one out for the other.
     pub fn of_average(size: Size, color_space: ColorSpace, samples: &[Layer<'_>]) -> Self {
         Self::hash_inputs(AVERAGE, size, Rgba::TRANSPARENT, color_space, samples)
+    }
+
+    /// The key of one effect pass's output: a source texture, drawn through a
+    /// pass, at a size and in a colour space.
+    ///
+    /// The whole uniform is hashed rather than the parameters the caller
+    /// thought were interesting, so a number that reaches the shader cannot
+    /// fail to reach the key — which is the same rule the composite key
+    /// follows, and the reason neither can go stale.
+    ///
+    /// A chain is keyed by construction: the second pass's source is the first
+    /// pass's output, whose identity is *its* key, so changing the first
+    /// parameter of a five-effect chain changes every key after it and nothing
+    /// before it.
+    pub fn of_effect(
+        source: crate::texture::TextureId,
+        size: Size,
+        color_space: ColorSpace,
+        pass: &crate::effects::EffectPass,
+    ) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        EFFECT.hash(&mut hasher);
+        source.hash(&mut hasher);
+        size.hash(&mut hasher);
+        color_space.hash(&mut hasher);
+        pass.program().hash(&mut hasher);
+        pass.uniform_bytes().hash(&mut hasher);
+        CompositeKey(hasher.finish())
     }
 
     fn hash_inputs(

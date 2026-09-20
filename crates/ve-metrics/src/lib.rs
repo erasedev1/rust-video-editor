@@ -216,6 +216,7 @@ pub mod spans {
     pub const SCALE: &str = "scale";
     pub const UPLOAD: &str = "upload";
     pub const COMPOSITE: &str = "composite";
+    pub const EFFECT: &str = "effect";
     pub const PRESENT: &str = "present";
     pub const UI: &str = "ui";
     pub const PROJECT_LOAD: &str = "project_load";

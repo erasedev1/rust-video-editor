@@ -33,6 +33,7 @@
 //! mode would need.
 
 pub mod cache;
+pub mod effects;
 mod gpu;
 mod renderer;
 mod target;
@@ -40,6 +41,7 @@ pub mod texture;
 pub mod transform;
 
 pub use cache::{CompositeCache, CompositeCacheStats, CompositeKey};
+pub use effects::{chain_passes, passes_for, EffectPass, Program};
 pub use gpu::GpuContext;
 pub use renderer::{Layer, Renderer};
 pub use target::RenderTarget;
