@@ -531,3 +531,53 @@ fn dropping_the_service_shuts_its_workers_down() {
         thread.join().expect("a shutdown loop panicked");
     }
 }
+
+#[test]
+fn a_seek_lands_at_the_keyframe_before_the_target_not_at_the_start_of_the_file() {
+    // The existing seek tests all assert on the frame that comes *back*, which
+    // a broken seek still gets right: landing too early is still landing
+    // before the target, and the decode that follows walks forward to the
+    // right frame. So this asserts on where the seek itself put the reader.
+    //
+    // The fixture is written with a group of ten pictures, so frames 0, 10, 20
+    // and so on are keyframes and a seek to frame 50 can land exactly on one.
+    let mut decoder = VideoDecoder::open(testdata("counter_30fps.mp4")).unwrap();
+    decoder.seek(Ticks::from_rational(50, 30)).unwrap();
+    let landed = decoder.next_frame().unwrap().expect("a frame after seeking");
+
+    assert_eq!(
+        identify_frame(&landed),
+        Some(50),
+        "a seek to frame 50 in a file with keyframes every ten frames should land \
+         on frame 50, not walk there from the beginning"
+    );
+}
+
+#[test]
+fn seeking_backwards_does_not_rewind_to_the_beginning() {
+    // What scrubbing backwards does, over and over. A seek in the wrong unit
+    // sends every one of these to frame 0 and decodes forward from there,
+    // which is correct and unusably slow.
+    let mut decoder = VideoDecoder::open(testdata("counter_30fps.mp4")).unwrap();
+    let metrics = Metrics::new();
+    let mut decoder = {
+        decoder.seek(Ticks::ZERO).unwrap();
+        decoder
+    }
+    .with_metrics(metrics.clone());
+
+    // Walk backwards through the file, a group at a time.
+    for frame in [80i64, 60, 40, 20] {
+        decoder.frame_at(Ticks::from_rational(frame, 30)).unwrap().unwrap();
+    }
+    let decodes = metrics.span_stats(ve_metrics::spans::DECODE).map(|s| s.count).unwrap_or(0);
+
+    // Four backward jumps, each landing on the keyframe at or before the
+    // target and decoding at most a group from there. Rewinding to the start
+    // each time would cost 80 + 60 + 40 + 20 frames instead.
+    assert!(
+        decodes < 60,
+        "four backward seeks cost {decodes} decodes, which means they are \
+         rewinding to the start of the file rather than seeking"
+    );
+}

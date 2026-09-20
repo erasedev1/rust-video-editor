@@ -13,13 +13,22 @@ pub(crate) fn ts_to_ticks(ts: i64, time_base: ffmpeg::Rational) -> Ticks {
     Ticks::from_rational(ts * time_base.numerator() as i64, time_base.denominator() as i64)
 }
 
-/// Converts an editor timestamp into a stream's timebase.
-pub(crate) fn ticks_to_ts(t: Ticks, time_base: ffmpeg::Rational) -> i64 {
-    // t seconds * (den / num) ticks, computed in i128 to avoid overflow on the
-    // large tick values.
-    let num = time_base.numerator() as i128;
-    let den = time_base.denominator() as i128;
-    let v = t.raw() as i128 * den / (num * ve_time::TICKS_PER_SECOND as i128);
+/// Converts an editor timestamp into microseconds, which is FFmpeg's own
+/// `AV_TIME_BASE`.
+///
+/// This is the unit a **seek** target must be in. `avformat_seek_file` is
+/// called with a stream index of -1, and FFmpeg documents that as "a default
+/// stream is selected, and the timestamp is automatically converted from
+/// AV_TIME_BASE units to the stream specific time_base" — so handing it a
+/// timestamp already in the stream's time base asks it to convert twice.
+///
+/// Getting this wrong does not produce wrong frames, which is why it can hide:
+/// a seek that lands too early is still *before* the target, and the decode
+/// that follows walks forward to the right frame regardless. It produces a
+/// seek that does nothing, and a scrub that decodes the file from its
+/// beginning every time it moves backwards.
+pub(crate) fn ticks_to_micros(t: Ticks) -> i64 {
+    let v = t.raw() as i128 * 1_000_000 / ve_time::TICKS_PER_SECOND as i128;
     v as i64
 }
 

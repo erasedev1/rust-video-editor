@@ -15,7 +15,7 @@ use ve_time::{Rate, SampleRate, Ticks};
 
 use crate::colour;
 use crate::frame::{AudioBuffer, PixelFormat, VideoFrame};
-use crate::probe::{ticks_to_ts, ts_to_ticks};
+use crate::probe::{ticks_to_micros, ts_to_ticks};
 use crate::{ffmpeg_init, MediaError};
 
 /// How far ahead of the current position a request can be before seeking beats
@@ -303,7 +303,10 @@ impl VideoDecoder {
             m.incr(ve_metrics::counters::SEEKS, 1);
         }
 
-        let target = ticks_to_ts(t.clamp_non_negative(), self.time_base);
+        // Microseconds, not the stream's time base: the seek goes through
+        // `avformat_seek_file` with a stream index of -1, which converts from
+        // AV_TIME_BASE itself. See `ticks_to_micros`.
+        let target = ticks_to_micros(t.clamp_non_negative());
         self.input.seek(target, ..target).map_err(MediaError::Ffmpeg)?;
         // The decoder holds frames from before the seek; they are now wrong.
         self.decoder.flush();
@@ -510,7 +513,7 @@ impl AudioDecoder {
 
     pub fn seek(&mut self, t: Ticks) -> Result<(), MediaError> {
         let _span = self.metrics.as_ref().map(|m| m.span(spans::SEEK));
-        let target = ticks_to_ts(t.clamp_non_negative(), self.time_base);
+        let target = ticks_to_micros(t.clamp_non_negative());
         self.input.seek(target, ..target)?;
         self.decoder.flush();
         self.position = None;
