@@ -114,10 +114,65 @@ done.
 
 ## Phase 5 — Animation
 
-- Keyframe editing in the timeline
-- A graph editor for curves
-- Copy, paste and retime keyframes
-- Motion blur from the keyframed transform
+- Keyframe editing in the timeline ✅
+- A graph editor for curves ✅
+- Copy, paste and retime keyframes ✅
+- Motion blur from the keyframed transform ✅
+
+**Complete.** The animation editor opens under the timeline with **A** and is
+drawn against the timeline's own scroll and zoom, so a keyframe sits directly
+under the frame it happens on: there is no second scroll position to keep in
+step, because there is no second scroll position.
+
+It shows one of two views of the same selection. The **sheet** answers *when* —
+every animatable property of the selected clip as a row, its keyframes as
+diamonds, and one button that both keyframes a property and un-keyframes it.
+The **curve editor** answers *what* — the value between keyframes, one curve per
+channel, with bezier handles on the selected points. Dragging a point there
+changes its value and leaves its time alone, and retiming is the sheet's job.
+That division is deliberate: a gesture that did both would merge two edits into
+the history on every pointer move, and the one the user did not intend is the
+one they would notice a minute later.
+
+Curves are drawn by **evaluating the property** at a column of pixels — the same
+call the compositor and the mixer make — so a curve cannot draw something other
+than what will be rendered. There is no second implementation of easing to
+disagree with the first.
+
+Every keyframe edit is one command stating an **absolute** destination: "these
+keyframes are now at these times", never "move them three ticks left". Applying
+the same edit twice lands in the same place, which is what lets a drag re-issue
+itself on every pointer move and still collapse into one undo step. Undo restores
+the affected properties whole rather than replaying an inverse, because retiming
+two keyframes onto the same tick collapses them and no retime brings the lost one
+back.
+
+Two selections coexist — clips and keyframes — so three rules keep them
+predictable: taking hold of a clip lets go of its keyframes, Delete and Copy
+follow whichever is in hand, and a paste reads whichever clipboard was filled
+last. An inspector drag on an animated property now writes a keyframe at the
+playhead rather than a static value the animation would go on overriding.
+
+**Motion blur** is two switches, as every compositor has: the shutter belongs to
+the canvas, and whether a particular clip is exposed through it is per clip and
+off by default, so an older project draws exactly what it drew. The engine
+resolves the transform once per sample — and not at all when the layer is not
+actually moving during that frame — and the renderer averages the samples into a
+target of its own, additively over transparency, which the node above then draws
+once. Drawing them straight onto the backdrop at `1/n` opacity each is not an
+average: `over` blending makes every sample occlude the ones before it, so a
+fully opaque layer would come out about 63% opaque.
+
+What is sampled is the transform, not the source time. Showing frames from
+between two frames needs sub-frame decoding or frame interpolation and blurs
+footage moving inside itself rather than a layer moving across the frame; that
+belongs with the professional work rather than being smuggled in under the same
+name. Track automation is the other thing still missing here: a track has no clip
+for a keyframe to be local to, so automating one needs a sequence-time domain the
+animation system does not have yet.
+
+See [BENCHMARKS.md](BENCHMARKS.md#animation) for what evaluating a property and
+averaging a shutter cost.
 
 ## Phase 6 — Effects
 

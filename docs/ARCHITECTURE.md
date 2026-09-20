@@ -123,6 +123,36 @@ Keyframe times are **clip-local**, which is what lets a clip be moved or rippled
 without touching its animation — and what obliges `split_at` to rebase the
 right-hand clip's keyframes.
 
+### Editing keyframes: one command, absolute edits
+
+Adding a keyframe, deleting a handful, dragging one along the timeline, scaling a
+span, pasting a copied curve and throwing the animation away are all the same
+shape — *the keyframes on these properties become those keyframes* — so they are
+one command, `EditKeyframes`, with a `KeyframeEdit` saying which. A command type
+per operation would mean six undo paths to keep exact and six merge rules.
+
+Two decisions make that work:
+
+**Undo restores the list rather than replaying an inverse.** Each edit captures
+the properties it touches whole before changing anything. A property holds a
+handful of keyframes rather than a timeline's worth of clips, so the copy is
+cheap — and it is the only thing that is exact where an inverse is not: retiming
+two keyframes onto the same tick collapses them, and no retime brings the lost
+one back.
+
+**Every edit states an absolute destination.** A drag re-issues its whole gesture
+on every pointer move — "these keyframes are now at these times", never "move
+them three ticks left" — so applying it twice lands in the same place. Merging a
+gesture into one undo step is then "keep my snapshot, take your destination",
+which cannot drift however many moves the pointer made.
+
+The animation editor is drawn against the **timeline's own** scroll and zoom
+rather than keeping a second view: there is no second scroll position to keep in
+step, because there is no second scroll position. Its curve editor draws each
+curve by evaluating the property at a column of pixels — the same call the
+compositor and the mixer make — so a curve cannot draw something other than what
+will be rendered.
+
 ## Commands and undo
 
 Nothing mutates a project directly. The UI builds a `Command` and hands it to a
@@ -323,6 +353,48 @@ the previous picture on screen until some other input happened to change.
 Sequences and compositions carry the setting independently, since a composition
 renders to its own target. Pre-composing inherits the sequence's, because
 pre-composing is meant to be a reorganisation rather than an edit.
+
+### Motion blur
+
+A frame is not an instant. A shutter is open for part of the frame interval, and
+whatever moves while it is open is smeared across the picture. The transform is
+animated, so where a layer was at any instant inside that interval is already
+known exactly; motion blur is not something to invent but something to stop
+ignoring.
+
+Two switches, as every compositor has. The **shutter** — angle and sample count —
+belongs to the canvas, because every layer in one frame is exposed for the same
+length of time. Whether a **particular** clip is blurred is per clip, because
+blur costs a draw per sample and most layers do not move. A clip defaults to off,
+so a project written before any of this existed draws exactly what it drew.
+
+The engine resolves the transform once per sample and hands the renderer a list.
+It resolves nothing at all when the transform does not actually differ across the
+interval, which is what keeps a clip with keyframes an hour apart costing one
+draw: being *animated* and being *in motion during this frame* are different
+things, and only the second is worth paying for.
+
+The renderer averages those samples into a target of its own — additively, over
+transparency — and the node above draws that target once with the layer's own
+blend mode. Drawing the samples straight onto the backdrop at `1/n` opacity each
+is **not** an average: `over` blending makes every sample occlude the ones before
+it, so a fully opaque layer comes out about 63% opaque and the backdrop is mixed
+into the smear instead of being composited under it. The samples are part of the
+cache key, so an unchanged blur is not recomputed.
+
+That distinction exposed a real bug next door. The compositor premultiplied at
+the point of sampling, which is right for a decoded frame — whose colour is
+independent of its coverage — and wrong for the output of another pass, which
+already carries its alpha. A nested composition at half opacity came out at a
+quarter. There is now a fragment shader for each kind of source, and a texture
+knows which kind it is.
+
+What is sampled is the **transform**, not the source time: every sample shows the
+same decoded frame in a different place. Sampling source time as well — showing
+frames from between two frames — needs sub-frame decoding or frame
+interpolation, and blurs footage that is moving inside itself rather than a layer
+moving across the frame. That is a different feature and belongs with the
+professional work.
 
 ## Playback
 
@@ -558,8 +630,12 @@ Honest gaps, not oversights:
   and `AudioOutput` are the one part no test here has exercised against
   hardware. The editor treats a missing device as an ordinary state and says so
   in the performance overlay rather than failing.
-- **No track automation.** Track level and pan are static values; keyframing them
-  needs a sequence-time animation domain, which arrives with keyframe editing.
+- **No track automation.** Track level and pan are static values. Clip and layer
+  properties are keyframed on clip-local time; a track has no clip to be local
+  to, so automating one needs a sequence-time domain the animation system does
+  not have yet.
+- **Motion blur samples the transform, not the source time.** See
+  [Motion blur](#motion-blur).
 - **No loudness measurement.** The meters are peak meters. LUFS is a different
   measurement with a different purpose and belongs with the delivery work.
 - **Non-linear compositing only**, as described above.

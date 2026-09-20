@@ -36,6 +36,15 @@ The first vertical slice is complete and tested end to end:
 - Audio playback through the system's default output device, mixed ahead on its
   own thread — built and tested to the device boundary, but **unverified against
   real hardware**, because this was developed in a container with no sound card
+- Keyframe any transform, audio or effect property, with hold, linear and eased
+  interpolation, from an animation editor that shares the timeline's own time
+  axis
+- Drag keyframes to retime them, scale a whole span from its ends, and copy,
+  paste and delete them across clips — each gesture one undo step
+- A graph editor for the curves between keyframes, with bezier handles, drawn by
+  evaluating the property rather than by a second opinion about easing
+- Motion blur, sampled from the keyframed transform across a shutter the canvas
+  owns
 - GPU compositing with transforms, opacity and alpha blending
 - Blend modes — normal, add, multiply and screen — as pipeline variants
 - A render cache keyed on the composition itself: an unchanged picture is never
@@ -193,7 +202,7 @@ says so in the performance overlay, and keeps cutting.
 ## Testing
 
 ```sh
-cargo test --workspace     # 579 tests
+cargo test --workspace     # 633 tests
 cargo bench                # measured, not estimated
 ```
 

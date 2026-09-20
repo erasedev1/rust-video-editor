@@ -268,6 +268,51 @@ fn transform_math(c: &mut Criterion) {
     });
 }
 
+/// What a motion-blurred layer costs, against the single draw it replaces.
+///
+/// A blurred layer is a pass of its own — N draws into a target, then one draw
+/// of that target into the node — so the number to watch is how the cost grows
+/// with the sample count. It should be close to linear in the samples and
+/// nothing else: the samples share one texture, one uniform buffer and one
+/// pass.
+fn motion_blur(c: &mut Criterion) {
+    let Ok(gpu) = GpuContext::headless() else { return };
+    let mut renderer = Renderer::new(&gpu.device);
+    let size = Size::new(1920, 1080);
+    let target = RenderTarget::new(&gpu.device, size);
+    let frame = solid_frame(size);
+    let texture = renderer.upload(&gpu.device, &gpu.queue, &frame);
+
+    let mut group = c.benchmark_group("motion_blur_1080p");
+    for &samples in &[1usize, 4, 12, 32] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(samples),
+            &samples,
+            |b, &samples| {
+                let list: Vec<Layer> = (0..samples)
+                    .map(|i| {
+                        Layer::new(&texture).with_transform(TransformState {
+                            position: Vec2::new(i as f64 * 0.5, 0.0),
+                            ..Default::default()
+                        })
+                    })
+                    .collect();
+                b.iter(|| {
+                    renderer.accumulate(
+                        &gpu.device,
+                        &gpu.queue,
+                        &target,
+                        ColorSpace::Perceptual,
+                        black_box(&list),
+                    );
+                    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     upload,
@@ -275,6 +320,7 @@ criterion_group!(
     blend_modes,
     render_cache,
     transform_math,
-    color_space
+    color_space,
+    motion_blur
 );
 criterion_main!(benches);

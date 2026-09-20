@@ -127,6 +127,27 @@ that. Track `volume` and `pan` are plain numbers; both are clamped when they are
 *read*, so a hand-edited file cannot push a negative gain or an out-of-range pan
 into the mixer.
 
+Everything Phase 5 added is additive too, and still at version 2:
+
+| Field                | Where                | Missing means                     |
+|----------------------|----------------------|-----------------------------------|
+| `motion_blur`        | clip, comp layer     | not blurred                       |
+| `motion_blur`        | sequence, comp settings | 180° shutter, twelve samples   |
+
+A clip's switch is a bare boolean and the canvas's is
+`{"enabled": true, "shutter_angle": 180.0, "samples": 12}`. The two defaults
+disagree on purpose: the canvas shutter comes back **open** so that turning blur
+on for a clip needs one click rather than two, and the clip switch comes back
+**off** so that a project written before any of this existed draws exactly what
+it drew. A test loads a document with both fields stripped and asserts that pair.
+
+Keyframes were always part of the format and are unchanged by this phase: a
+`Property` writes its `keyframes` array only when it has one, and each keyframe
+carries `{"time": <ticks>, "value": …, "interpolation": {"mode": …}}`. A
+hand-shaped curve is `{"mode": "bezier", "x1": …, "y1": …, "x2": …, "y2": …}`,
+and the loader re-establishes the sort and uniqueness invariants on the way in,
+so a hand-edited file cannot leave a property with two keyframes at one instant.
+
 ## Robustness
 
 The loader treats the file as untrusted. It repairs what it can and reports the

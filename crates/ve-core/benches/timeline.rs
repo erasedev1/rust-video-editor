@@ -178,5 +178,91 @@ fn time_conversion(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, build, range_query, clip_at, snapping, edits, time_conversion);
+/// Evaluating animation, which happens once per animated property per frame —
+/// and, with motion blur on, once per property per *sample*.
+///
+/// The interesting property is scaling: a property with a thousand keyframes
+/// should cost barely more than one with two, because evaluation binary-searches
+/// rather than walking. The un-animated case is the one that matters most, since
+/// nearly every property in a project is a constant and pays only a length
+/// check.
+fn animation(c: &mut Criterion) {
+    use ve_core::{Interpolation, Property, Transform, Vec2};
+
+    let mut group = c.benchmark_group("evaluate_property");
+
+    let constant = Property::constant(0.5f64);
+    group.bench_function("constant", |b| {
+        b.iter(|| black_box(constant.evaluate(black_box(Ticks::from_seconds(3)))));
+    });
+
+    for &count in &[2usize, 64, 1000] {
+        let mut animated = Property::constant(0.0f64);
+        for i in 0..count {
+            animated.set_keyframe(
+                Ticks::from_millis(i as i64 * 100),
+                i as f64,
+                Interpolation::Linear,
+            );
+        }
+        group.bench_with_input(BenchmarkId::new("linear", count), &count, |b, &count| {
+            let at = Ticks::from_millis(count as i64 * 50);
+            b.iter(|| black_box(animated.evaluate(black_box(at))));
+        });
+    }
+
+    // An eased segment pays for the bezier solver, which is the difference
+    // between "the common case" and "the worst one".
+    let mut eased = Property::constant(0.0f64);
+    eased.set_keyframe(
+        Ticks::ZERO,
+        0.0,
+        Interpolation::Bezier { x1: 0.9, y1: 0.0, x2: 0.1, y2: 1.0 },
+    );
+    eased.set_keyframe(Ticks::from_seconds(4), 1.0, Interpolation::Linear);
+    group.bench_function("bezier", |b| {
+        b.iter(|| black_box(eased.evaluate(black_box(Ticks::from_seconds(1)))));
+    });
+    group.finish();
+
+    // A whole transform, which is what a plan resolves per item — and twelve of
+    // them is what one motion-blurred item costs the engine before the GPU sees
+    // anything.
+    let mut transform = Transform::default();
+    transform.position.set_keyframe(Ticks::ZERO, Vec2::ZERO, Interpolation::Linear);
+    transform.position.set_keyframe(
+        Ticks::from_seconds(4),
+        Vec2::new(400.0, 0.0),
+        Interpolation::Linear,
+    );
+    transform.rotation.set_keyframe(Ticks::ZERO, 0.0, Interpolation::EaseInOut);
+    transform.rotation.set_keyframe(Ticks::from_seconds(4), 90.0, Interpolation::Linear);
+
+    let mut group = c.benchmark_group("evaluate_transform");
+    group.bench_function("once", |b| {
+        b.iter(|| black_box(transform.evaluate(black_box(Ticks::from_seconds(2)))));
+    });
+    group.bench_function("twelve_samples", |b| {
+        let blur = ve_core::MotionBlur::new(180.0, 12);
+        let frame = Rate::FPS_30.frame_duration();
+        let at = Ticks::from_seconds(2);
+        b.iter(|| {
+            let offsets = blur.offsets(black_box(frame));
+            let states: Vec<_> = offsets.iter().map(|o| transform.evaluate(at + *o)).collect();
+            black_box(states)
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    build,
+    range_query,
+    clip_at,
+    snapping,
+    edits,
+    time_conversion,
+    animation
+);
 criterion_main!(benches);

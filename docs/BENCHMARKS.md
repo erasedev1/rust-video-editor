@@ -68,6 +68,39 @@ is a small fraction of that figure.
 Exact rational time at 29.97 fps costs a few nanoseconds. There is no
 performance argument for floating-point seconds.
 
+### Animation
+
+Evaluating a property is what every animated value costs, once per frame — and
+with motion blur on, once per **sample** per frame.
+
+| Benchmark                          |     Time |
+|------------------------------------|---------:|
+| `evaluate_property/constant`       |  0.99 ns |
+| `evaluate_property/linear/2`       |  1.26 ns |
+| `evaluate_property/linear/64`      |  11.1 ns |
+| `evaluate_property/linear/1000`    |  18.8 ns |
+| `evaluate_property/bezier`         |  68.2 ns |
+| `evaluate_transform/once`          |  16.7 ns |
+| `evaluate_transform/twelve_samples`|   323 ns |
+
+Three things worth reading off this:
+
+- **A constant costs a nanosecond**, which matters because nearly every property
+  in a project is one: the evaluation returns before touching the keyframe
+  vector, so animation is not a tax on the properties that do not use it.
+- **A thousand keyframes cost 15× a single segment, not 500×.** Evaluation
+  binary-searches, so a heavily animated property is still a lookup rather than a
+  walk.
+- **A hand-shaped bezier costs about four times a preset.** The named presets are
+  all either linear or solved by the same Newton iteration; the 68 ns is the
+  solver converging, and it is the reason the linear case short-circuits before
+  reaching it.
+
+`twelve_samples` is what a motion-blurred item costs the engine before the GPU
+sees anything: twelve transform evaluations, one per instant the shutter is open.
+At 323 ns it is under a thousandth of the frame it belongs to — the cost of blur
+is entirely on the GPU side, which is where the next table is.
+
 ## Project save and load
 
 | Benchmark        |   100 clips | 1,000 clips | 10,000 clips |
@@ -115,6 +148,32 @@ Fifteen extra pipeline binds cost **2.6%** here, which is why the renderer binds
 only when the mode changes rather than once per layer — and also why it is not
 worth reordering layers to group them by mode, which would change the picture for
 a saving this size.
+
+### Motion blur
+
+Taken in one run on the same container as the animation table above, so the
+plain composite was re-measured alongside it rather than compared across runs.
+One 1080p layer, averaged across N samples:
+
+| Benchmark                | Time     | Against one draw |
+|--------------------------|---------:|-----------------:|
+| `composite_1080p/1`      |  5.12 ms |               1× |
+| `motion_blur_1080p/1`    |  4.90 ms |            0.96× |
+| `motion_blur_1080p/4`    |  15.4 ms |             3.0× |
+| `motion_blur_1080p/12`   |  41.5 ms |             8.1× |
+| `motion_blur_1080p/32`   |   104 ms |            20.3× |
+
+The shape is what to look at. Blur costs **a draw per sample and nothing else**:
+one sample is the same price as compositing one layer, and twelve samples cost
+about what twelve layers would. There is no per-sample upload, allocation or
+pipeline bind — the samples share one texture, one uniform buffer and one pass —
+which is why twelve samples come in under twelve times one rather than over it.
+
+That is also the argument for the default of twelve rather than thirty-two, and
+for the engine refusing to sample a layer that is not moving during this
+particular frame: the cheapest blurred frame is the one that was never blurred.
+On real hardware these are fill-rate bound and far cheaper, but the ratio
+carries.
 
 ### The render cache
 
@@ -321,6 +380,8 @@ Named because their absence is a gap, not because they are unimportant:
   deliberately)
 - Effect-heavy compositions (no effects yet), which is where the render cache
   starts to matter most
+- The animation editor as an interaction: the property evaluation under it is
+  measured, the drawing of a few hundred keyframes and a sampled curve is not
 - Export (not written yet)
 - Thumbnail generation (not written yet)
 - Timeline scrolling and zoom as interactions, as opposed to the queries
