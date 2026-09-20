@@ -23,6 +23,7 @@ mod clip_commands;
 mod composition_commands;
 mod edit_commands;
 mod history;
+mod keyframe_commands;
 mod property_commands;
 mod structure_commands;
 
@@ -35,6 +36,10 @@ pub use composition_commands::{
 };
 pub use edit_commands::{Compound, RollEdit, SetClipSpeed, ShiftClips, SlideClip, SlipClip};
 pub use history::{History, HistoryEntry};
+pub use keyframe_commands::{
+    animatable_properties, property_ref, Animated, EditKeyframes, KeyframeEdit, KeyframePoint,
+    PropertyRef, PropertyState,
+};
 pub use property_commands::{
     ClipProperty, PropertyValue, RemoveClipKeyframe, SetClipKeyframe, SetClipProperty,
     SetLayerProperty,

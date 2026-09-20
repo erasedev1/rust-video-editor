@@ -852,3 +852,86 @@ fn clip_count_reflects_every_track() {
     }
     assert_eq!(p.clip_count(), 10);
 }
+
+#[test]
+fn retiming_states_the_destination_rather_than_a_delta() {
+    let mut p = Property::constant(0.0f64);
+    p.set_keyframe(Ticks::ZERO, 0.0, Interpolation::Linear);
+    p.set_keyframe(Ticks::from_seconds(1), 1.0, Interpolation::Linear);
+    p.set_keyframe(Ticks::from_seconds(2), 2.0, Interpolation::Linear);
+
+    // The same gesture restated twice lands in the same place, which is what
+    // lets a drag re-issue itself on every pointer move.
+    let stretched = [Ticks::ZERO, Ticks::from_seconds(2), Ticks::from_seconds(4)];
+    assert!(p.set_keyframe_times(&stretched));
+    assert!(p.set_keyframe_times(&stretched));
+    let times: Vec<_> = p.keyframes().iter().map(|k| k.time).collect();
+    assert_eq!(times, stretched);
+    // Values travel with their keyframes rather than staying put in time.
+    assert_eq!(p.evaluate(Ticks::from_seconds(2)), 1.0);
+
+    // A count that does not match is refused outright, leaving the property as
+    // it was rather than half-retimed.
+    assert!(!p.set_keyframe_times(&[Ticks::ZERO]));
+    assert_eq!(p.keyframes().len(), 3);
+}
+
+#[test]
+fn retiming_two_keyframes_onto_one_tick_collapses_them() {
+    let mut p = Property::constant(0.0f64);
+    p.set_keyframe(Ticks::ZERO, 0.0, Interpolation::Linear);
+    p.set_keyframe(Ticks::from_seconds(1), 1.0, Interpolation::Linear);
+    assert!(p.set_keyframe_times(&[Ticks::ZERO, Ticks::ZERO]));
+    assert_eq!(p.keyframes().len(), 1);
+    // The later of the pair wins, as it does everywhere a time collides.
+    assert_eq!(p.keyframes()[0].value, 1.0);
+}
+
+#[test]
+fn interpolation_is_changed_on_the_keyframe_the_segment_leaves() {
+    let mut p = Property::constant(0.0f64);
+    p.set_keyframe(Ticks::ZERO, 0.0, Interpolation::Linear);
+    p.set_keyframe(Ticks::from_seconds(2), 1.0, Interpolation::Linear);
+
+    assert_eq!(
+        p.set_interpolation(Ticks::ZERO, Interpolation::Hold),
+        Some(Interpolation::Linear)
+    );
+    assert_eq!(p.evaluate(Ticks::from_seconds(1)), 0.0);
+    // Nothing is at one second, so there is nothing to set there.
+    assert_eq!(p.set_interpolation(Ticks::from_seconds(1), Interpolation::Linear), None);
+    assert_eq!(p.keyframe_at(Ticks::ZERO).unwrap().interpolation, Interpolation::Hold);
+    assert!(p.keyframe_at(Ticks::from_seconds(1)).is_none());
+}
+
+#[test]
+fn a_preset_promotes_to_the_bezier_that_draws_the_same_curve() {
+    for preset in Interpolation::ALL {
+        let promoted = preset.to_bezier();
+        for step in 0..=10 {
+            let t = step as f64 / 10.0;
+            assert!(
+                (preset.ease(t) - promoted.ease(t)).abs() < 1e-9,
+                "{preset:?} changed shape when promoted"
+            );
+        }
+    }
+    // Hold has no curve to promote: it stays stepped rather than quietly
+    // becoming an interpolation.
+    assert_eq!(Interpolation::Hold.to_bezier(), Interpolation::Hold);
+    assert_eq!(Interpolation::Hold.with_handle(true, 0.5, 0.5), Interpolation::Hold);
+}
+
+#[test]
+fn dragging_a_handle_keeps_the_other_one_and_stays_inside_the_segment() {
+    let curve = Interpolation::Linear.with_handle(true, 2.0, 1.5);
+    let Interpolation::Bezier { x1, y1, x2, y2 } = curve else { panic!("{curve:?}") };
+    // Time may not run backwards inside a segment, so x is clamped...
+    assert_eq!((x1, y1), (1.0, 1.5));
+    // ...but the value may overshoot, which is what an elastic move is made of.
+    assert_eq!((x2, y2), (1.0, 1.0));
+
+    let both = curve.with_handle(false, 0.25, -0.5);
+    let Interpolation::Bezier { x1, y1, x2, y2 } = both else { panic!("{both:?}") };
+    assert_eq!((x1, y1, x2, y2), (1.0, 1.5, 0.25, -0.5));
+}

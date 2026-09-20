@@ -70,6 +70,79 @@ pub enum Interpolation {
 }
 
 impl Interpolation {
+    /// The presets, in the order a menu offers them.
+    ///
+    /// [`Bezier`] is deliberately absent: it is what a curve *becomes* once its
+    /// handles are dragged, not something chosen from a list.
+    ///
+    /// [`Bezier`]: Interpolation::Bezier
+    pub const ALL: [Interpolation; 5] = [
+        Interpolation::Hold,
+        Interpolation::Linear,
+        Interpolation::EaseIn,
+        Interpolation::EaseOut,
+        Interpolation::EaseInOut,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Interpolation::Hold => "Hold",
+            Interpolation::Linear => "Linear",
+            Interpolation::EaseIn => "Ease In",
+            Interpolation::EaseOut => "Ease Out",
+            Interpolation::EaseInOut => "Ease In Out",
+            Interpolation::Bezier { .. } => "Bezier",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Interpolation::Hold => "Stay on this value until the next keyframe",
+            Interpolation::Linear => "A straight line to the next keyframe",
+            Interpolation::EaseIn => "Leave slowly, arrive at full speed",
+            Interpolation::EaseOut => "Leave at full speed, arrive slowly",
+            Interpolation::EaseInOut => "Leave and arrive slowly",
+            Interpolation::Bezier { .. } => "Handles dragged in the graph editor",
+        }
+    }
+
+    #[inline]
+    pub fn is_hold(self) -> bool {
+        matches!(self, Interpolation::Hold)
+    }
+
+    /// The same easing as a free-form [`Bezier`], which is what dragging a
+    /// handle in the graph editor turns a preset into.
+    ///
+    /// [`Hold`] has no curve to promote and stays as it is: a stepped parameter
+    /// that grew handles would start interpolating, which is the one thing it
+    /// exists not to do.
+    ///
+    /// [`Bezier`]: Interpolation::Bezier
+    /// [`Hold`]: Interpolation::Hold
+    pub fn to_bezier(self) -> Interpolation {
+        match self.control_points() {
+            None => self,
+            Some([x1, y1, x2, y2]) => Interpolation::Bezier { x1, y1, x2, y2 },
+        }
+    }
+
+    /// Replaces one of the two handles, keeping the other.
+    ///
+    /// `x` is clamped to the unit interval because a handle that overhangs its
+    /// segment makes the solver non-monotonic — time would run backwards inside
+    /// the segment. `y` is left alone, so a curve can overshoot and come back,
+    /// which is what an elastic or anticipating move is made of.
+    pub fn with_handle(self, outgoing: bool, x: f64, y: f64) -> Interpolation {
+        let Some([x1, y1, x2, y2]) = self.to_bezier().control_points() else { return self };
+        let x = x.clamp(0.0, 1.0);
+        if outgoing {
+            Interpolation::Bezier { x1: x, y1: y, x2, y2 }
+        } else {
+            Interpolation::Bezier { x1, y1, x2: x, y2: y }
+        }
+    }
+
     /// The control points this mode resolves to, or `None` for [`Hold`].
     ///
     /// [`Hold`]: Interpolation::Hold
@@ -268,6 +341,58 @@ impl<T: Animatable> Property<T> {
         }
     }
 
+    /// The keyframe at exactly `time`, if there is one.
+    pub fn keyframe_at(&self, time: Ticks) -> Option<&Keyframe<T>> {
+        match self.keyframes.binary_search_by_key(&time, |k| k.time) {
+            Ok(i) => Some(&self.keyframes[i]),
+            Err(_) => None,
+        }
+    }
+
+    /// Changes the easing that *leaves* a keyframe, returning what it was.
+    ///
+    /// The outgoing keyframe owns the segment after it — see
+    /// [`Property::evaluate`] — so this is the one edit a graph editor's handles
+    /// make.
+    pub fn set_interpolation(
+        &mut self,
+        time: Ticks,
+        interpolation: Interpolation,
+    ) -> Option<Interpolation> {
+        match self.keyframes.binary_search_by_key(&time, |k| k.time) {
+            Ok(i) => {
+                Some(std::mem::replace(&mut self.keyframes[i].interpolation, interpolation))
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Gives the keyframes new times, in their current order.
+    ///
+    /// This is the whole of retiming: dragging one keyframe, sliding a
+    /// selection and scaling a span all reduce to "these keyframes now happen at
+    /// these times". Stating the destination absolutely rather than as a delta
+    /// is what lets a drag restate itself on every pointer move and still
+    /// collapse into one undo step.
+    ///
+    /// Two keyframes landing on the same tick collapse into one — the later of
+    /// the pair wins, as it does everywhere else a time collides, so a keyframe
+    /// dragged onto a neighbour replaces it — and the count then drops. Undo restores the list wholesale rather than replaying this,
+    /// so nothing is lost by it.
+    ///
+    /// Returns `false`, changing nothing, if `times` is not one per keyframe.
+    pub fn set_keyframe_times(&mut self, times: &[Ticks]) -> bool {
+        if times.len() != self.keyframes.len() {
+            return false;
+        }
+        let mut kfs = std::mem::take(&mut self.keyframes);
+        for (kf, time) in kfs.iter_mut().zip(times) {
+            kf.time = *time;
+        }
+        self.set_keyframes(kfs);
+        true
+    }
+
     /// Drops all keyframes, freezing the property at its value at `t`.
     pub fn freeze_at(&mut self, t: Ticks) {
         if self.is_animated() {
@@ -278,9 +403,21 @@ impl<T: Animatable> Property<T> {
 
     /// Restores a full keyframe list. Used by undo, and by the project loader,
     /// which must re-establish the sort invariant on untrusted input.
+    ///
+    /// Two keyframes at the same time collapse into one, and the **later** of
+    /// the pair in the input wins — the same rule [`Property::set_keyframe`]
+    /// follows, so a keyframe dragged onto another replaces it rather than
+    /// vanishing behind it.
     pub fn set_keyframes(&mut self, mut kfs: Vec<Keyframe<T>>) {
         kfs.sort_by_key(|k| k.time);
-        kfs.dedup_by_key(|k| k.time);
+        kfs.dedup_by(|later, kept| {
+            if later.time == kept.time {
+                *kept = *later;
+                true
+            } else {
+                false
+            }
+        });
         self.keyframes = kfs;
     }
 

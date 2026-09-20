@@ -61,6 +61,65 @@ pub enum PropertyValue {
     Color(Rgba),
 }
 
+impl PropertyValue {
+    /// How many numbers the value is made of: one for a scalar, two for a
+    /// point, four for a colour.
+    ///
+    /// A graph editor draws a *curve per number*, not per property — the x and
+    /// y of a position move independently and have to be editable that way —
+    /// so this and [`PropertyValue::channel`] are how it takes a value apart
+    /// without knowing which kind it has.
+    pub fn channel_count(&self) -> usize {
+        match self {
+            PropertyValue::Scalar(_) => 1,
+            PropertyValue::Point(_) => 2,
+            PropertyValue::Color(_) => 4,
+        }
+    }
+
+    /// One of those numbers, or `0.0` past the end.
+    pub fn channel(&self, index: usize) -> f64 {
+        match (self, index) {
+            (PropertyValue::Scalar(v), 0) => *v,
+            (PropertyValue::Point(v), 0) => v.x,
+            (PropertyValue::Point(v), 1) => v.y,
+            (PropertyValue::Color(c), 0) => c.r,
+            (PropertyValue::Color(c), 1) => c.g,
+            (PropertyValue::Color(c), 2) => c.b,
+            (PropertyValue::Color(c), 3) => c.a,
+            _ => 0.0,
+        }
+    }
+
+    /// The same value with one channel replaced, which is what dragging a
+    /// single curve in the graph editor produces.
+    pub fn with_channel(self, index: usize, to: f64) -> PropertyValue {
+        match (self, index) {
+            (PropertyValue::Scalar(_), 0) => PropertyValue::Scalar(to),
+            (PropertyValue::Point(v), 0) => PropertyValue::Point(Vec2::new(to, v.y)),
+            (PropertyValue::Point(v), 1) => PropertyValue::Point(Vec2::new(v.x, to)),
+            (PropertyValue::Color(c), 0) => PropertyValue::Color(Rgba { r: to, ..c }),
+            (PropertyValue::Color(c), 1) => PropertyValue::Color(Rgba { g: to, ..c }),
+            (PropertyValue::Color(c), 2) => PropertyValue::Color(Rgba { b: to, ..c }),
+            (PropertyValue::Color(c), 3) => PropertyValue::Color(Rgba { a: to, ..c }),
+            _ => self,
+        }
+    }
+
+    /// What to call a channel of this value in a legend.
+    pub fn channel_label(&self, index: usize) -> &'static str {
+        match (self, index) {
+            (PropertyValue::Point(_), 0) => "x",
+            (PropertyValue::Point(_), 1) => "y",
+            (PropertyValue::Color(_), 0) => "r",
+            (PropertyValue::Color(_), 1) => "g",
+            (PropertyValue::Color(_), 2) => "b",
+            (PropertyValue::Color(_), 3) => "a",
+            _ => "",
+        }
+    }
+}
+
 /// Applies `op` to the property named by `target` on `clip`.
 ///
 /// The macro exists because the properties have different `T`, so a single
@@ -147,6 +206,8 @@ macro_rules! with_property {
         }
     }};
 }
+
+pub(crate) use with_property;
 
 fn layer_mut(
     project: &mut Project,
