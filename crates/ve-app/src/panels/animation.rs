@@ -124,7 +124,7 @@ fn empty(ui: &mut Ui, message: &str) {
         ui.label(egui::RichText::new(message).color(theme::TEXT_DIM));
         ui.label(
             egui::RichText::new(
-                "Keyframe a property with ◆, then drag its keyframes to retime them",
+                "Keyframe a property with ♦, then drag its keyframes to retime them",
             )
             .small()
             .color(theme::TEXT_FAINT),

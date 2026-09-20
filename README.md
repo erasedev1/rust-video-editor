@@ -45,6 +45,9 @@ The first vertical slice is complete and tested end to end:
   evaluating the property rather than by a second opinion about easing
 - Motion blur, sampled from the keyframed transform across a shutter the canvas
   owns
+- Per-clip effect chains — gaussian blur, colour adjust, sharpen, transform,
+  shape masks and a luma key — in the order they run, each switchable, movable
+  and keyframable from the inspector
 - GPU compositing with transforms, opacity and alpha blending
 - Blend modes — normal, add, multiply and screen — as pipeline variants
 - A render cache keyed on the composition itself: an unchanged picture is never
@@ -71,6 +74,19 @@ and the clip itself smeared across the shutter in the preview.
 The same keyframes as curves — one per channel, drawn by evaluating the property
 rather than by a second opinion about easing, with handles on the selected
 points.
+
+![A clip with an effect chain](docs/images/effects.png)
+
+Effects: a blur whose radius is keyframed, a feathered elliptical mask and a
+colour adjustment, running in that order on the clip's own picture before it is
+laid on the canvas.
+
+![The effect chain and the menu that adds to it](docs/images/effect-chain.png)
+
+The chain is the pipeline, so the list is the order it runs in and the arrows
+change it. Every control is built from what the effect *declares* it takes, so
+an effect added later — or by a plugin — arrives with working controls and
+keyframes for nothing.
 
 The development overlay reports what the frame actually cost, broken down by
 stage, so a regression is visible while editing rather than weeks later:

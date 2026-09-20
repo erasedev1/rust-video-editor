@@ -151,7 +151,7 @@ fn toolbar(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
         }
 
         ui.add_space(8.0);
-        if ui.small_button("◆").on_hover_text("Add a marker at the playhead (M)").clicked() {
+        if ui.small_button("♦").on_hover_text("Add a marker at the playhead (M)").clicked() {
             actions.push(Action::AddMarkerAtPlayhead);
         }
         if ui.small_button("+V").on_hover_text("Add a video track").clicked() {
@@ -613,7 +613,20 @@ fn draw_clip(
         painter.text(
             Pos2::new(rect.right() - 5.0, rect.top() + 6.0),
             Align2::RIGHT_TOP,
-            "◆",
+            "♦",
+            FontId::proportional(9.0),
+            theme::ACCENT,
+        );
+    }
+    // And one for an effect chain, beside the animation marker: both answer the
+    // same question — whether this clip is doing something to its picture that
+    // a glance at the timeline would otherwise not show.
+    if clip.effects.iter().any(|e| e.enabled) && rect.width() > 34.0 {
+        let crowded = if clip.is_animated() { 12.0 } else { 0.0 };
+        painter.text(
+            Pos2::new(rect.right() - 5.0 - crowded, rect.top() + 6.0),
+            Align2::RIGHT_TOP,
+            "fx",
             FontId::proportional(9.0),
             theme::ACCENT,
         );

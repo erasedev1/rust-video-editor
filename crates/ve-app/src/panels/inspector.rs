@@ -318,18 +318,18 @@ fn effect_header(
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("✕").on_hover_text("Remove").clicked() {
+            if ui.small_button("✖").on_hover_text("Remove").clicked() {
                 actions.push(Action::RemoveEffect { clip, effect: effect.id });
             }
             if ui
-                .add_enabled(index + 1 < count, egui::Button::new("▼").small())
+                .add_enabled(index + 1 < count, egui::Button::new("⏷").small())
                 .on_hover_text("Run later in the chain")
                 .clicked()
             {
                 actions.push(Action::MoveEffect { clip, effect: effect.id, to: index + 1 });
             }
             if ui
-                .add_enabled(index > 0, egui::Button::new("▲").small())
+                .add_enabled(index > 0, egui::Button::new("⏶").small())
                 .on_hover_text("Run earlier in the chain")
                 .clicked()
             {
@@ -657,7 +657,7 @@ fn point_row_response(
 /// put is visibly different from one that will.
 fn property_label(ui: &mut Ui, label: &str, animated: bool) {
     let text = if animated {
-        RichText::new(format!("◆ {label}")).color(theme::ACCENT)
+        RichText::new(format!("♦ {label}")).color(theme::ACCENT)
     } else {
         RichText::new(label).color(theme::TEXT_DIM)
     };

@@ -454,7 +454,7 @@ impl VergeApp {
                                     .color(theme::TEXT_DIM),
                             );
                             ui.label(name);
-                            if ui.small_button("✕").on_hover_text("Delete marker").clicked() {
+                            if ui.small_button("✖").on_hover_text("Delete marker").clicked() {
                                 actions_out.push(Action::RemoveMarker(id));
                             }
                         });
@@ -498,7 +498,7 @@ impl VergeApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self.state.history.is_dirty() {
                         ui.label(
-                            egui::RichText::new("● unsaved").small().color(theme::WARNING),
+                            egui::RichText::new("• unsaved").small().color(theme::WARNING),
                         );
                     }
                 });

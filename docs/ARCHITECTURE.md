@@ -269,6 +269,73 @@ composition that is all one mode — nearly all of them — still binds once per
 Layers keep their back-to-front order rather than being grouped by mode: blending
 does not commute, so reordering to save a bind would change the picture.
 
+### Effects
+
+An effect is a string naming a kind, a list of key/value parameters, and nothing
+else the edit model understands. Three layers give that meaning, and they are
+deliberately separate:
+
+| Layer | Knows | Lives in |
+|-------|-------|----------|
+| The **model** | that a clip has an ordered list of effects | `ve-core::effect` |
+| The **registry** | what a kind is called and what parameters it takes | `ve-core::registry` |
+| The **passes** | which shader a kind runs and where its numbers go | `ve-render::effects` |
+
+The registry is a runtime table rather than a match on an enum. That is what
+lets a plugin add an effect without the core crate knowing about it — and, more
+immediately, what lets a project holding an effect *this* build has never heard
+of open, render everything else, and save the unknown effect back untouched. A
+project file is conformed against the registry on load, so a parameter of the
+wrong type is replaced rather than reaching a shader as a number it is not,
+while a parameter the registry does not declare is kept.
+
+Parameters are `Property<T>`, the same type every animated value in the editor
+uses, so keyframing an effect parameter needs no effect-specific machinery: it
+goes through the same commands, the same graph editor and the same evaluation
+as opacity. Switches and choices are plain values, because a stepped parameter
+has no curve to sit on.
+
+#### Where a chain runs
+
+A chain runs **in layer space**: on the clip's own picture, at the clip's own
+resolution, before the clip's transform places it on the canvas. So a blur
+radius is in source pixels and a mask is cut in fractions of the clip.
+
+That is what every compositor does, and the reason is that the alternative is
+unstable. Effects applied after the transform would change as the clip moved: a
+mask would slide off what it was cut around, and a blur would soften by a
+different amount as a zoom went on. Running before means a chain is a property
+of the picture and of nothing else — which is also what lets the render cache
+keep a chain's output while the clip is dragged around the canvas.
+
+The order for one layer is therefore: **effects, then motion blur, then the
+draw**. The shutter smears whatever picture the layer has, and the transform is
+what puts that picture on the canvas.
+
+#### One pass at a time
+
+Each pass reads one texture and writes one target, and the preview owns the
+ping-pong between them — it is the preview that has the target pool and the
+cache. Each pass's output is keyed on its input's identity, its size, its
+colour space and its **whole uniform block**, which is the same rule the
+composite key follows: a number that reaches the shader cannot fail to reach the
+key. A chain then keys itself, because the second pass's source is the first
+pass's output. Change one parameter of a five-effect chain and the passes before
+it are still hits.
+
+Everything a pass writes is premultiplied, which is what keeps a blurred edge
+from picking up a dark fringe from the transparent pixels beside it; the colour
+effects unpremultiply first, so brightening a half-covered pixel brightens it as
+much as an opaque one. An effect dialled to neutral — a blur of zero radius, a
+mask that hides nothing — emits no pass at all, because a pass costs a
+full-resolution target whether or not it changes anything.
+
+A blur is two passes, one per axis, which is what turns an O(r²) kernel into two
+O(r) ones; blurring a single axis costs one. The kernel is sampled a bounded
+number of times, so past a certain radius the taps spread out rather than
+multiply — see [BENCHMARKS.md](BENCHMARKS.md#effects) for what that costs and
+where it stops costing more.
+
 ### The render cache
 
 A composited picture is cached on a **hash of everything the compositor read to
@@ -613,8 +680,16 @@ already exists.
 
 Honest gaps, not oversights:
 
-- **No effects yet.** The `Effect`/`ParamValue` model and the render-graph shape
-  exist; no effect implementations do.
+- **Six effects, not a library.** Blur, colour adjust, sharpen, transform, shape
+  mask and luma key. The registry is the point rather than the count — adding a
+  seventh is a descriptor and a shader entry point — but a catalogue the size of
+  a finished editor's is not there.
+- **No track mattes.** A mask is cut from a shape or from the clip's own
+  brightness. Using *another layer* as the matte needs a second input texture
+  bound to the pass and a rule in the plan for which layer is consumed, which is
+  a change to the plan's shape rather than another effect.
+- **No effect presets, copying or pasting between clips.** A chain is built per
+  clip.
 - **No export.** The renderer can already read frames back, which is the hard
   part; the encoder and muxer are not written.
 - **No thumbnails, proxies or bins.** Waveforms exist; the filmstrip on a video

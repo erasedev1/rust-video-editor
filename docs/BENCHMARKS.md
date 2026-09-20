@@ -8,7 +8,7 @@ Run them yourself:
 cargo bench                                   # everything
 cargo bench -p ve-core --bench timeline       # edit model
 cargo bench -p ve-project --bench project_io  # save and load
-cargo bench -p ve-render --bench compositing  # GPU
+cargo bench -p ve-render --bench compositing  # GPU, including effect passes
 cargo bench -p ve-media  --bench waveforms    # audio analysis and display
 cargo bench -p ve-engine --bench audio        # mixing, metering and fades
 ```
@@ -226,6 +226,63 @@ somewhere it does not belong — into the shader, or into an extra pass. What it
 should not be read as is the cost on real hardware, which is not measured here
 because this machine has no GPU.
 
+### Effects
+
+Taken in one run on a later container — llvmpipe again, and a different machine
+from the tables above, so the plain composites were re-measured alongside the
+effects rather than compared across runs. One 1080p source, `--sample-size 10`:
+
+| Benchmark                           |     Time | Against one composite |
+|-------------------------------------|---------:|----------------------:|
+| `composite_1080p/1`                 |  5.31 ms |                    1× |
+| `composite_1080p/4`                 |  20.5 ms |                  3.9× |
+| `effect_pass_1080p/transform`       |  4.71 ms |                 0.89× |
+| `effect_pass_1080p/mask`            |  4.91 ms |                 0.92× |
+| `effect_pass_1080p/luma_key`        |  5.51 ms |                  1.0× |
+| `effect_pass_1080p/color`           |  7.62 ms |                  1.4× |
+| `effect_pass_1080p/sharpen`         |  15.1 ms |                  2.8× |
+| `effect_pass_1080p/blur_one_axis`   |   183 ms |                   35× |
+| `chain_passes_3_effects`            |  89.4 ns |                       |
+
+What to read off this:
+
+- **A pass costs about what a layer costs**, plus its shader. Transform, mask
+  and luma key are one texture read per pixel and land within 10% of a plain
+  composite, which is the right sanity check that the pass machinery itself —
+  the target, the uniform, the bind, the submit — is not where the time goes.
+- **The shader is the variable, and the blur is the outlier.** Sixty-five taps
+  per pixel is sixty-five texture reads, and a software rasteriser charges full
+  price for every one; on a GPU these are the cache-friendliest reads there are.
+  Sharpen's nine taps landing at 2.8× a one-tap pass says the same thing from
+  the other end.
+- **Describing a chain is free.** Turning three resolved effects into their four
+  passes costs 89 ns against passes measured in milliseconds, which is what
+  makes it reasonable to rebuild the pass list every frame rather than caching
+  it and having to work out when it went stale.
+
+#### The blur's tap cap
+
+One axis, at four radii, re-measured on its own with `--measurement-time 8`:
+
+| Radius |     Time |
+|--------|---------:|
+| 1      |  41.1 ms |
+| 8      |   182 ms |
+| 64     |   180 ms |
+| 200    |   182 ms |
+
+**Past a radius of about 5, a blur stops getting more expensive.** The kernel
+is sampled a bounded number of times, so a wider blur spreads its taps out
+rather than taking more of them: 8, 64 and 200 are all 65 texture reads, and
+only the distance between them changes. A radius of 1 is cheaper still because
+its support is narrower than the budget, so it takes 13 taps rather than 65.
+
+What is traded away is exactness at the top of the range: at 200 the taps are
+about 19 texels apart, which is a coarse approximation of a Gaussian that wide.
+That is the trade every real-time blur makes, and it is why the parameter is
+called a radius rather than a promise — but it is a trade in *quality*, not in
+cost, which is what this table is here to show.
+
 ## Waveforms
 
 Taken on the same container as the render-cache table, `--measurement-time 3`.
@@ -378,8 +435,12 @@ Named because their absence is a gap, not because they are unimportant:
 
 - Seeking through 4K footage (no 4K fixture; the committed fixtures are small
   deliberately)
-- Effect-heavy compositions (no effects yet), which is where the render cache
-  starts to matter most
+- Effect chains **through the render cache**. A pass is measured on its own and
+  the cache is measured without effects; what is not measured is a realistic
+  edit where a chain is re-run on one parameter change and the passes before it
+  are hits — which is exactly where the cache should matter most
+- Effects at 4K, where the decision to run a chain at the source's own
+  resolution rather than the canvas's is at its most expensive
 - The animation editor as an interaction: the property evaluation under it is
   measured, the drawing of a few hundred keyframes and a sampled curve is not
 - Export (not written yet)

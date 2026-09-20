@@ -176,10 +176,47 @@ averaging a shutter cost.
 
 ## Phase 6 — Effects
 
-- Effect registry and dynamic dispatch through the existing `Effect` model
-- Blur, colour adjustment, sharpen, transform effects
-- Masks and mattes
-- Effect ordering and per-clip chains
+- Effect registry and dynamic dispatch through the existing `Effect` model ✅
+- Blur, colour adjustment, sharpen, transform effects ✅
+- Masks and mattes ✅ — shape masks and a luma key
+- Effect ordering and per-clip chains ✅
+
+**Complete.** An effect is a string naming a kind and a list of key/value
+parameters; the **registry** says what that kind is called and what its
+parameters mean, and the **renderer** says which shader it runs. Those three
+live apart on purpose. A registry that is a runtime table rather than a match on
+an enum is what will let a plugin add an effect in Phase 9 without the core
+crate knowing about it — and what already lets a project carrying an effect this
+build has never heard of open, render everything else, and save that effect back
+untouched rather than dropping it.
+
+Parameters are `Property<T>`, the type every animated value in the editor uses,
+so keyframing a blur's radius needs no effect-specific machinery: it is the same
+command, the same graph editor and the same evaluation as opacity. That is the
+whole reason the animation phase came first.
+
+**Order is the chain.** Blurring and then brightening is not the same picture as
+brightening and then blurring, so moving an effect is a real edit with its own
+undo step, and the list in the inspector is the pipeline rather than a
+presentation of it.
+
+A chain runs **in layer space** — the clip's own picture at its own resolution,
+before the clip's transform places it on the canvas — which is what every
+compositor does and what keeps a chain stable while the clip moves: a mask
+applied after the transform would slide off what it was cut around. Each pass is
+cached on its own inputs, so changing one parameter of a five-effect chain
+re-runs that pass onwards and leaves the ones before it as hits.
+
+What is **not** here: a track matte, which uses another layer as the matte
+rather than a shape or the clip's own brightness. That needs a second input
+texture bound to the pass and a rule in the plan for which layer is consumed by
+which — a change to the plan's shape rather than one more effect — so it belongs
+with the professional work rather than being bolted on. Effect presets and
+copying a chain between clips are likewise absent; they are interface work on
+top of a model that already supports them.
+
+See [BENCHMARKS.md](BENCHMARKS.md#effects) for what a pass costs, and why a
+blur's cost stops growing with its radius.
 
 ## Phase 7 — Professional editing
 

@@ -167,7 +167,7 @@ pub const BINDINGS: &[Binding] = &[
     Binding { label: "Select / roll / slip / slide tool", keys: "V / N / Y / U" },
     Binding { label: "Add marker", keys: "M" },
     Binding { label: "Animation editor", keys: "A" },
-    Binding { label: "Keyframe / delete keyframes", keys: "◆ button / Del" },
+    Binding { label: "Keyframe / delete keyframes", keys: "♦ button / Del" },
     Binding { label: "Copy / paste keyframes", keys: "Ctrl + C / V" },
     Binding { label: "Previous / next marker", keys: "Ctrl + ← / →" },
     Binding { label: "Zoom in / out", keys: "+ / −" },
