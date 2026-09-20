@@ -200,6 +200,37 @@ impl AudioRenderer {
         }
 
         let rate = self.mixer.sample_rate();
+        let block = self.mix_block(project, sequence, frames).len();
+        let written = producer.push(&self.scratch[..block]);
+        let written_frames = written / channels.max(1);
+        if written_frames < frames {
+            // Unreachable while one thread owns the producer — the ring had
+            // room for the whole block a moment ago — but the position must not
+            // run past what was actually handed over, or the samples in between
+            // would never be heard.
+            self.position -= rate.sample_to_ticks((frames - written_frames) as i64);
+        }
+        written_frames
+    }
+
+    /// Mixes exactly `frames` sample frames from the current position and
+    /// advances past them.
+    ///
+    /// The same mix the device is fed, without a ring or a device in sight:
+    /// this is what an export pulls, one video frame's worth of sound at a
+    /// time. Keeping it one function is the point — an export that mixed by a
+    /// second route would render a different soundtrack from the one the editor
+    /// played, and the difference would only be noticed in the delivered file.
+    ///
+    /// The block it returns lives until the next call.
+    pub fn mix_block(
+        &mut self,
+        project: &Project,
+        sequence: &Sequence,
+        frames: usize,
+    ) -> &[f32] {
+        let channels = self.mixer.channels() as usize;
+        let rate = self.mixer.sample_rate();
         // Through the project rather than the sequence alone, so a nested
         // composition's sound is in the mix: its layers arrive already flattened,
         // with their gains multiplied by every layer they pass through.
@@ -266,10 +297,8 @@ impl AudioRenderer {
             }
         }
 
-        let written = producer.push(&self.scratch[..frames * channels]);
-        let written_frames = written / channels.max(1);
-        self.position += rate.sample_to_ticks(written_frames as i64);
-        written_frames
+        self.position += rate.sample_to_ticks(frames as i64);
+        &self.scratch[..frames * channels]
     }
 
     /// Opens an asset's decoder if it is not open yet.
