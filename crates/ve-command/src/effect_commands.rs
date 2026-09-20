@@ -25,7 +25,8 @@ use std::any::Any;
 
 use ve_core::registry::EffectRegistry;
 use ve_core::{
-    builtin_registry, ClipId, CompositionId, Effect, EffectId, LayerId, Project, SequenceId,
+    builtin_registry, ClipId, CompositionId, Effect, EffectId, LayerId, ParamValue, Project,
+    SequenceId,
 };
 
 use crate::{Command, CommandError};
@@ -346,6 +347,97 @@ impl Command for SetEffectEnabled {
         let index = self.host.index_of(project, self.effect)?;
         self.host.effects_mut(project)?[index].enabled = previous;
         Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Sets a parameter that cannot be animated: a switch or a choice.
+///
+/// Everything animatable goes through [`SetClipProperty`] and the keyframe
+/// commands, which is why this one is narrow rather than general. A switch has
+/// no curve to sit on — see [`ve_core::ParamValue::Bool`] — so setting one is
+/// an ordinary undoable edit and nothing more.
+///
+/// [`SetClipProperty`]: crate::SetClipProperty
+#[derive(Debug)]
+pub struct SetEffectOption {
+    host: EffectHost,
+    effect: EffectId,
+    key: String,
+    value: ParamValue,
+    previous: Option<ParamValue>,
+    label: String,
+}
+
+impl SetEffectOption {
+    pub fn new(
+        host: EffectHost,
+        effect: EffectId,
+        key: impl Into<String>,
+        value: ParamValue,
+    ) -> Self {
+        let key = key.into();
+        let label = format!("Set {key}");
+        SetEffectOption { host, effect, key, value, previous: None, label }
+    }
+}
+
+impl Command for SetEffectOption {
+    fn name(&self) -> &str {
+        &self.label
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        if self.value.is_animated() {
+            return Err(CommandError::Rejected(
+                "an animatable parameter is set through the keyframe commands".into(),
+            ));
+        }
+        let index = self.host.index_of(project, self.effect)?;
+        let effect = &mut self.host.effects_mut(project)?[index];
+        let param = effect.param_mut(&self.key).ok_or_else(|| {
+            CommandError::Rejected(format!("no effect parameter '{}'", self.key))
+        })?;
+        // Replacing a keyframed parameter with a switch would throw its curve
+        // away, which is not what any control on screen is asking for.
+        if param.is_animated() {
+            return Err(CommandError::Rejected(format!(
+                "'{}' is animated; edit its keyframes instead",
+                self.key
+            )));
+        }
+        let previous = std::mem::replace(param, self.value.clone());
+        self.previous.get_or_insert(previous);
+        Ok(())
+    }
+
+    fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let Some(previous) = self.previous.clone() else {
+            return Err(CommandError::Rejected("parameter was never set".into()));
+        };
+        let index = self.host.index_of(project, self.effect)?;
+        let effect = &mut self.host.effects_mut(project)?[index];
+        if let Some(param) = effect.param_mut(&self.key) {
+            *param = previous;
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        match next.as_any().downcast_ref::<SetEffectOption>() {
+            Some(other)
+                if other.host == self.host
+                    && other.effect == self.effect
+                    && other.key == self.key =>
+            {
+                self.value = other.value.clone();
+                true
+            }
+            _ => false,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {

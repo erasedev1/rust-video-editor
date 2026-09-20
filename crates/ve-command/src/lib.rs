@@ -38,6 +38,7 @@ pub use composition_commands::{
 pub use edit_commands::{Compound, RollEdit, SetClipSpeed, ShiftClips, SlideClip, SlipClip};
 pub use effect_commands::{
     AddEffect, EffectHost, MoveEffect, RemoveEffect, RenameEffect, SetEffectEnabled,
+    SetEffectOption,
 };
 pub use history::{History, HistoryEntry};
 pub use keyframe_commands::{

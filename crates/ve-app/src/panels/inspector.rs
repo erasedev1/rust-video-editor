@@ -2,7 +2,11 @@
 
 use egui::{DragValue, RichText, Ui};
 use ve_command::{ClipProperty, PropertyValue, TrackLevel};
-use ve_core::{BlendMode, ColorSpace, Fade, FadeCurve, FadeEdge, MotionBlur, Vec2};
+use ve_core::registry::{EffectCategory, EffectRegistry, ParamKind};
+use ve_core::{
+    builtin_registry, BlendMode, Clip, ColorSpace, Effect, EffectId, Fade, FadeCurve, FadeEdge,
+    MotionBlur, ParamValue, Rgba, Vec2,
+};
 use ve_engine::AudioLevels;
 use ve_time::Ticks;
 
@@ -217,17 +221,290 @@ pub fn show(
 
         track_section(ui, state, levels, actions);
 
-        if !clip.effects.is_empty() {
-            section(ui, "Effects", |ui| {
-                for effect in &clip.effects {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&effect.name).color(theme::TEXT));
-                        ui.label(RichText::new(&effect.kind).small().color(theme::TEXT_FAINT));
-                    });
+        effects_section(ui, clip, local, actions);
+    });
+}
+
+/// The clip's effect chain: what runs over its picture, in the order it runs.
+///
+/// The chain is drawn as a list rather than as a set of tabs because **order is
+/// the chain** — blurring and then brightening is a different picture from
+/// brightening and then blurring — so the arrangement on screen has to be the
+/// arrangement in the pipeline, with the arrows that change it right there.
+///
+/// Every control is built from the registry's descriptor rather than from
+/// anything this panel knows about blurs or masks, which is what lets an effect
+/// added later, or by a plugin, arrive here with working controls and no change
+/// to this file.
+fn effects_section(ui: &mut Ui, clip: &Clip, local: Ticks, actions: &mut Vec<Action>) {
+    let registry = builtin_registry();
+    let clip_id = clip.id;
+    section(ui, "Effects", |ui| {
+        let count = clip.effects.len();
+        for (index, effect) in clip.effects.iter().enumerate() {
+            effect_header(ui, clip_id, effect, index, count, actions);
+            match registry.describe(effect) {
+                Some(descriptor) => {
+                    for param in &descriptor.params {
+                        let Some(value) = effect.param(&param.key) else { continue };
+                        param_row(
+                            ui,
+                            clip_id,
+                            effect.id,
+                            &param.label,
+                            &param.hint,
+                            &param.key,
+                            &param.kind,
+                            value,
+                            local,
+                            actions,
+                        );
+                    }
                 }
-            });
+                // An effect from a plugin that is not installed. It keeps its
+                // place in the chain and can be switched off or removed; what
+                // it cannot do is offer controls nobody can describe.
+                None => {
+                    ui.label(
+                        RichText::new(format!("{} is not installed", effect.kind))
+                            .small()
+                            .color(theme::WARNING),
+                    )
+                    .on_hover_text(
+                        "This effect is kept and saved back, but nothing in this build \
+                         can draw it.",
+                    );
+                }
+            }
+            if index + 1 < count {
+                ui.separator();
+            }
+        }
+        if count == 0 {
+            ui.label(RichText::new("No effects").small().color(theme::TEXT_FAINT));
+        }
+        ui.add_space(2.0);
+        add_effect_menu(ui, registry, clip_id, actions);
+    });
+}
+
+/// One effect's title row: the switch, the name, and where it sits.
+fn effect_header(
+    ui: &mut Ui,
+    clip: ve_core::ClipId,
+    effect: &Effect,
+    index: usize,
+    count: usize,
+    actions: &mut Vec<Action>,
+) {
+    ui.horizontal(|ui| {
+        let mut enabled = effect.enabled;
+        if ui
+            .checkbox(&mut enabled, "")
+            .on_hover_text("Switch the effect off without losing its settings")
+            .changed()
+        {
+            actions.push(Action::SetEffectEnabled { clip, effect: effect.id, enabled });
+        }
+
+        let mut name = effect.name.clone();
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut name)
+                .desired_width(110.0)
+                .text_color(if effect.enabled { theme::TEXT } else { theme::TEXT_FAINT }),
+        );
+        if response.changed() && !name.trim().is_empty() {
+            actions.push(Action::RenameEffect { clip, effect: effect.id, name });
+        }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                actions.push(Action::RemoveEffect { clip, effect: effect.id });
+            }
+            if ui
+                .add_enabled(index + 1 < count, egui::Button::new("▼").small())
+                .on_hover_text("Run later in the chain")
+                .clicked()
+            {
+                actions.push(Action::MoveEffect { clip, effect: effect.id, to: index + 1 });
+            }
+            if ui
+                .add_enabled(index > 0, egui::Button::new("▲").small())
+                .on_hover_text("Run earlier in the chain")
+                .clicked()
+            {
+                actions.push(Action::MoveEffect { clip, effect: effect.id, to: index - 1 });
+            }
+        });
+    });
+}
+
+/// One parameter, as whatever control its declared kind calls for.
+///
+/// The animatable kinds go through [`Action::SetClipProperty`] like any other
+/// property, so an edit at the playhead writes a keyframe when the parameter is
+/// animated and the static value when it is not — exactly as it does for
+/// position or opacity, and for the same reason.
+#[allow(clippy::too_many_arguments)]
+fn param_row(
+    ui: &mut Ui,
+    clip: ve_core::ClipId,
+    effect: EffectId,
+    label: &str,
+    hint: &str,
+    key: &str,
+    kind: &ParamKind,
+    value: &ParamValue,
+    local: Ticks,
+    actions: &mut Vec<Action>,
+) {
+    let property = ClipProperty::EffectParam { effect, key: key.to_string() };
+    let animated = value.is_animated();
+    let set = |value: PropertyValue, actions: &mut Vec<Action>| {
+        actions.push(Action::SetClipProperty { clip, property: property.clone(), value });
+    };
+
+    let response = match (kind, value) {
+        (ParamKind::Scalar { min, max, .. }, ParamValue::Scalar(p)) => {
+            let span = (max - min).abs().max(1e-6);
+            Some(scalar_row_response(
+                ui,
+                label,
+                p.evaluate(local),
+                animated,
+                *min..=*max,
+                // A slider that crosses its whole range in one screen of
+                // dragging is uncontrollable at one end and coarse at the
+                // other; a thousandth of the range per pixel is neither.
+                span / 1000.0,
+                "",
+                |v| set(PropertyValue::Scalar(v), actions),
+            ))
+        }
+        (ParamKind::Point { .. }, ParamValue::Point(p)) => {
+            Some(point_row_response(ui, label, p.evaluate(local), animated, |v| {
+                set(PropertyValue::Point(v), actions)
+            }))
+        }
+        (ParamKind::Color { .. }, ParamValue::Color(p)) => {
+            Some(color_row(ui, label, p.evaluate(local), animated, |v| {
+                set(PropertyValue::Color(v), actions)
+            }))
+        }
+        (ParamKind::Bool { .. }, ParamValue::Bool(on)) => {
+            let mut on = *on;
+            let response = ui
+                .horizontal(|ui| {
+                    property_label(ui, label, false);
+                    ui.checkbox(&mut on, "")
+                })
+                .inner;
+            if response.changed() {
+                actions.push(Action::SetEffectOption {
+                    clip,
+                    effect,
+                    key: key.to_string(),
+                    value: ParamValue::Bool(on),
+                });
+            }
+            Some(response)
+        }
+        (ParamKind::Choice { options, .. }, ParamValue::Choice(chosen)) => {
+            let chosen = *chosen;
+            let current = options.get(chosen as usize).cloned().unwrap_or_default();
+            let response = ui
+                .horizontal(|ui| {
+                    property_label(ui, label, false);
+                    egui::ComboBox::from_id_salt((effect.raw(), key))
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            for (i, option) in options.iter().enumerate() {
+                                let i = i as u32;
+                                if ui.selectable_label(i == chosen, option).clicked()
+                                    && i != chosen
+                                {
+                                    actions.push(Action::SetEffectOption {
+                                        clip,
+                                        effect,
+                                        key: key.to_string(),
+                                        value: ParamValue::Choice(i),
+                                    });
+                                }
+                            }
+                        })
+                        .response
+                })
+                .inner;
+            Some(response)
+        }
+        // The value disagrees with what the registry declares, which the loader
+        // conforms away — so this is only reachable for an effect registered
+        // after a project was opened.
+        _ => None,
+    };
+    if let Some(response) = response {
+        response.on_hover_text(hint);
+    }
+}
+
+/// The menu that adds an effect, grouped the way the registry groups them.
+fn add_effect_menu(
+    ui: &mut Ui,
+    registry: &EffectRegistry,
+    clip: ve_core::ClipId,
+    actions: &mut Vec<Action>,
+) {
+    ui.menu_button("+ Add effect", |ui| {
+        for category in EffectCategory::ALL {
+            let mut any = false;
+            for descriptor in registry.in_category(category) {
+                if !any {
+                    ui.label(RichText::new(category.label()).small().color(theme::TEXT_FAINT));
+                    any = true;
+                }
+                if ui.button(&descriptor.name).on_hover_text(&descriptor.summary).clicked() {
+                    actions.push(Action::AddEffect { clip, kind: descriptor.kind.clone() });
+                    ui.close();
+                }
+            }
+            if any {
+                ui.separator();
+            }
         }
     });
+}
+
+/// A colour swatch that opens a picker.
+///
+/// Alpha is editable because a tint's alpha multiplies coverage, which is a
+/// real thing to want and not a mistake to guard against.
+fn color_row(
+    ui: &mut Ui,
+    label: &str,
+    value: Rgba,
+    animated: bool,
+    mut on_change: impl FnMut(Rgba),
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        property_label(ui, label, animated);
+        let mut rgba = egui::Rgba::from_rgba_unmultiplied(
+            value.r as f32,
+            value.g as f32,
+            value.b as f32,
+            value.a as f32,
+        );
+        let response = egui::color_picker::color_edit_button_rgba(
+            ui,
+            &mut rgba,
+            egui::color_picker::Alpha::OnlyBlend,
+        );
+        if response.changed() {
+            let [r, g, b, a] = rgba.to_rgba_unmultiplied();
+            on_change(Rgba::new(r as f64, g as f64, b as f64, a as f64));
+        }
+        response
+    })
+    .inner
 }
 
 /// Playback speed, as a multiplier and as a row of the usual presets.
@@ -311,18 +588,38 @@ fn scalar_row(
     range: std::ops::RangeInclusive<f64>,
     speed: f64,
     suffix: &str,
-    mut on_change: impl FnMut(f64),
+    on_change: impl FnMut(f64),
 ) {
-    ui.horizontal(|ui| {
-        property_label(ui, label, animated);
-        let mut v = value;
-        let response = ui.add(
-            DragValue::new(&mut v).speed(speed).range(range).suffix(suffix).max_decimals(3),
-        );
-        if response.changed() {
-            on_change(v);
-        }
-    });
+    scalar_row_response(ui, label, value, animated, range, speed, suffix, on_change);
+}
+
+/// [`scalar_row`], handing back the control so a caller can hang a tooltip on
+/// it. The effect rows need that; the hand-written ones do not.
+#[allow(clippy::too_many_arguments)]
+fn scalar_row_response(
+    ui: &mut Ui,
+    label: &str,
+    value: f64,
+    animated: bool,
+    range: std::ops::RangeInclusive<f64>,
+    speed: f64,
+    suffix: &str,
+    mut on_change: impl FnMut(f64),
+) -> egui::Response {
+    let response = ui
+        .horizontal(|ui| {
+            property_label(ui, label, animated);
+            let mut v = value;
+            let response = ui.add(
+                DragValue::new(&mut v).speed(speed).range(range).suffix(suffix).max_decimals(3),
+            );
+            if response.changed() {
+                on_change(v);
+            }
+            response
+        })
+        .inner;
+    response
 }
 
 fn point_row(
@@ -330,8 +627,18 @@ fn point_row(
     label: &str,
     value: Vec2,
     animated: bool,
-    mut on_change: impl FnMut(Vec2),
+    on_change: impl FnMut(Vec2),
 ) {
+    point_row_response(ui, label, value, animated, on_change);
+}
+
+fn point_row_response(
+    ui: &mut Ui,
+    label: &str,
+    value: Vec2,
+    animated: bool,
+    mut on_change: impl FnMut(Vec2),
+) -> egui::Response {
     ui.horizontal(|ui| {
         property_label(ui, label, animated);
         let mut x = value.x;
@@ -341,7 +648,9 @@ fn point_row(
         if rx.changed() || ry.changed() {
             on_change(Vec2::new(x, y));
         }
-    });
+        rx.union(ry)
+    })
+    .inner
 }
 
 /// A property's name, marked when it is animated so a value that will not stay

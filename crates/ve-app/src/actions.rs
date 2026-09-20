@@ -9,17 +9,19 @@
 use std::path::PathBuf;
 
 use ve_command::{
-    property_ref, AddClip, AddMarker, AddTrack, ClipProperty, Command, Compound,
-    CrossfadeClips, EditKeyframes, KeyframeEdit, KeyframePoint, MoveClip, MoveTrack,
-    PropertyValue, RemoveClip, RemoveMarker, RemoveTrack, RollEdit, SetClipBlendMode,
-    SetClipEnabled, SetClipFade, SetClipMotionBlur, SetClipProperty, SetClipSpeed,
-    SetCompositionSettings, SetSequenceColorSpace, SetSequenceFormat, SetSequenceMotionBlur,
-    SetTrackFlag, SetTrackLevel, ShiftClips, SlideClip, SlipClip, SplitClip, TrackFlag,
-    TrackLevel, TrimClip, TrimEdge,
+    property_ref, AddClip, AddEffect, AddMarker, AddTrack, ClipProperty, Command, Compound,
+    CrossfadeClips, EditKeyframes, EffectHost, KeyframeEdit, KeyframePoint, MoveClip,
+    MoveEffect, MoveTrack, PropertyValue, RemoveClip, RemoveEffect, RemoveMarker, RemoveTrack,
+    RenameEffect, RollEdit, SetClipBlendMode, SetClipEnabled, SetClipFade, SetClipMotionBlur,
+    SetClipProperty, SetClipSpeed, SetCompositionSettings, SetEffectEnabled, SetEffectOption,
+    SetSequenceColorSpace, SetSequenceFormat, SetSequenceMotionBlur, SetTrackFlag,
+    SetTrackLevel, ShiftClips, SlideClip, SlipClip, SplitClip, TrackFlag, TrackLevel, TrimClip,
+    TrimEdge,
 };
 use ve_core::{
-    AssetId, BlendMode, Clip, ClipId, ColorSpace, Fade, FadeCurve, FadeEdge, Interpolation,
-    MarkerId, MotionBlur, Project, SequenceId, Speed, TrackId, TrackKind,
+    AssetId, BlendMode, Clip, ClipId, ColorSpace, EffectId, Fade, FadeCurve, FadeEdge,
+    Interpolation, MarkerId, MotionBlur, ParamValue, Project, SequenceId, Speed, TrackId,
+    TrackKind,
 };
 use ve_engine::PlaybackEngine;
 use ve_media::WaveformService;
@@ -106,6 +108,43 @@ pub enum Action {
     // The shutter itself, which belongs to the canvas being viewed. Coalesced
     // while the angle or the sample count is dragged.
     SetMotionBlur(MotionBlur),
+
+    // Effects. Every one of these names the clip whose chain is being edited;
+    // a parameter that can be animated is set through `SetClipProperty` like
+    // any other property, which is what gives effect parameters keyframes
+    // without a command of their own.
+    AddEffect {
+        clip: ClipId,
+        kind: String,
+    },
+    RemoveEffect {
+        clip: ClipId,
+        effect: EffectId,
+    },
+    // Order is the chain, so this is a real edit: `to` is where the effect
+    // ends up, stated absolutely.
+    MoveEffect {
+        clip: ClipId,
+        effect: EffectId,
+        to: usize,
+    },
+    SetEffectEnabled {
+        clip: ClipId,
+        effect: EffectId,
+        enabled: bool,
+    },
+    RenameEffect {
+        clip: ClipId,
+        effect: EffectId,
+        name: String,
+    },
+    // A switch or a choice, which have no curve to sit on.
+    SetEffectOption {
+        clip: ClipId,
+        effect: EffectId,
+        key: String,
+        value: ParamValue,
+    },
 
     // Animation
     ToggleAnimationEditor,
@@ -559,6 +598,61 @@ pub fn dispatch(
                         Err(e) => state.set_status(Status::warning(e.to_string())),
                     }
                 }
+            }
+        }
+
+        Action::AddEffect { clip, kind } => {
+            let host = EffectHost::clip(sequence_id, clip);
+            let command = Box::new(AddEffect::new(host, kind));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::RemoveEffect { clip, effect } => {
+            let host = EffectHost::clip(sequence_id, clip);
+            let command = Box::new(RemoveEffect::new(host, effect));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::MoveEffect { clip, effect, to } => {
+            let host = EffectHost::clip(sequence_id, clip);
+            let command = Box::new(MoveEffect::new(host, effect, to));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetEffectEnabled { clip, effect, enabled } => {
+            let host = EffectHost::clip(sequence_id, clip);
+            let command = Box::new(SetEffectEnabled::new(host, effect, enabled));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::RenameEffect { clip, effect, name } => {
+            let host = EffectHost::clip(sequence_id, clip);
+            let command = Box::new(RenameEffect::new(host, effect, name));
+            // Coalesced: a rename arrives one keystroke at a time.
+            match state.history.execute_coalesced(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetEffectOption { clip, effect, key, value } => {
+            let host = EffectHost::clip(sequence_id, clip);
+            let command = Box::new(SetEffectOption::new(host, effect, key, value));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
             }
         }
 
