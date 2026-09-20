@@ -27,9 +27,11 @@
 //! once. It is also what makes the plan easy to assert on: a test can name node
 //! indices instead of matching down a chain of boxes.
 
+use ve_core::registry::EffectRegistry;
 use ve_core::{
-    AssetId, BlendMode, ClipId, ColorSpace, Composition, CompositionId, LayerId, MotionBlur,
-    Project, Rgba, Sequence, Size, Source, TrackId, TrackKind, Transform, TransformState,
+    builtin_registry, AssetId, BlendMode, ClipId, ColorSpace, Composition, CompositionId,
+    Effect, EffectState, LayerId, MotionBlur, Project, Rgba, Sequence, Size, Source, TrackId,
+    TrackKind, Transform, TransformState,
 };
 use ve_time::{Rate, Ticks};
 
@@ -81,6 +83,13 @@ pub struct PlanItem {
     /// averages what they draw and needs to know nothing about shutters or
     /// frame rates. See [`ve_core::MotionBlur`].
     pub samples: Vec<TransformState>,
+    /// The item's effect chain, resolved at this instant, in the order it runs.
+    ///
+    /// Only what will actually be drawn: an effect that is switched off, or
+    /// that this build has no program for, is not here. So an empty chain and
+    /// no chain are the same thing to everything downstream, which is what
+    /// keeps the common case — no effects — free.
+    pub effects: Vec<EffectState>,
     pub blend: BlendMode,
 }
 
@@ -88,6 +97,12 @@ impl PlanItem {
     /// Whether this item is drawn once or averaged over a shutter.
     pub fn is_blurred(&self) -> bool {
         self.samples.len() > 1
+    }
+
+    /// Whether anything has to be run over this item's picture before it is
+    /// drawn.
+    pub fn has_effects(&self) -> bool {
+        !self.effects.is_empty()
     }
 
     /// The media this item needs decoded, if it is media at all.
@@ -230,12 +245,12 @@ impl RenderPlan {
 /// sequence — so a clip holding one contributes nothing. Use
 /// [`evaluate_project`] for a sequence that may nest.
 pub fn evaluate(sequence: &Sequence, at: Ticks) -> RenderPlan {
-    Evaluator { project: None }.plan(sequence, at)
+    Evaluator::new(None).plan(sequence, at)
 }
 
 /// Resolves a sequence at `at`, descending into every composition it draws.
 pub fn evaluate_project(project: &Project, sequence: &Sequence, at: Ticks) -> RenderPlan {
-    Evaluator { project: Some(project) }.plan(sequence, at)
+    Evaluator::new(Some(project)).plan(sequence, at)
 }
 
 /// Resolves the instants a range of frames lands on.
@@ -261,6 +276,24 @@ struct Evaluator<'a> {
     /// `None` when evaluating a sequence in isolation, which is what the pure
     /// track-ordering tests want.
     project: Option<&'a Project>,
+    /// What an effect's kind and parameters mean. The built-in table unless a
+    /// host has loaded plugin effects, in which case it is that host's, so a
+    /// plugin's effect resolves rather than being silently dropped.
+    registry: &'static EffectRegistry,
+}
+
+impl<'a> Evaluator<'a> {
+    fn new(project: Option<&'a Project>) -> Self {
+        Evaluator { project, registry: builtin_registry() }
+    }
+
+    /// Every effect that will actually be drawn, resolved at clip-local time.
+    fn effects(&self, effects: &[Effect], local: Ticks) -> Vec<EffectState> {
+        if effects.is_empty() {
+            return Vec::new();
+        }
+        self.registry.evaluate_chain(effects, local)
+    }
 }
 
 impl Evaluator<'_> {
@@ -323,6 +356,7 @@ impl Evaluator<'_> {
                         source_time,
                         clip.transform.evaluate(local),
                         samples,
+                        self.effects(&clip.effects, local),
                         clip.blend,
                         &mut nodes,
                         &mut audio,
@@ -369,6 +403,7 @@ impl Evaluator<'_> {
         source_time: Ticks,
         transform: TransformState,
         samples: Vec<TransformState>,
+        effects: Vec<EffectState>,
         blend: BlendMode,
         nodes: &mut Vec<PlanNode>,
         audio: &mut Vec<AudibleItem>,
@@ -393,7 +428,7 @@ impl Evaluator<'_> {
                 Draw::Nested { composition: id, node }
             }
         };
-        Some(PlanItem { origin, draw, transform, samples, blend })
+        Some(PlanItem { origin, draw, transform, samples, effects, blend })
     }
 
     /// Builds the node for a nested composition and returns its index.
@@ -430,6 +465,7 @@ impl Evaluator<'_> {
                 source_time,
                 transform,
                 samples,
+                self.effects(&layer.effects, local),
                 layer.blend,
                 nodes,
                 audio,
@@ -573,7 +609,7 @@ pub fn evaluate_composition(
     let Some(comp) = project.composition(composition) else {
         return RenderPlan::empty(at, Size::new(1920, 1080), Rgba::BLACK);
     };
-    let evaluator = Evaluator { project: Some(project) };
+    let evaluator = Evaluator::new(Some(project));
     let mut nodes = Vec::new();
     let mut audio = Vec::new();
     // Depth 0 so the composition's own layers sit at depth 1, matching what they

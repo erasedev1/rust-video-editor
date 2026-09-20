@@ -6,8 +6,8 @@ use ve_engine::{EngineUpdate, LayerContent, PlanItem};
 use ve_media::CacheKey;
 use ve_metrics::{counters, Metrics};
 use ve_render::{
-    CompositeCache, CompositeCacheStats, CompositeKey, GpuTexture, Layer, RenderTarget,
-    Renderer, TextureCache,
+    chain_passes, CompositeCache, CompositeCacheStats, CompositeKey, GpuTexture, Layer,
+    RenderTarget, Renderer, TextureCache,
 };
 
 /// How much GPU memory uploaded frames may occupy.
@@ -46,6 +46,19 @@ const COMPOSITE_BUDGET_MB: usize = 256;
 /// ordinary layer. Each node is keyed and cached separately, so changing one
 /// layer of a deep composite redraws that composition and the ones containing
 /// it, and leaves its siblings alone.
+///
+/// # What happens to one layer, in order
+///
+/// 1. **Effects**, in chain order, each into a target of its own at the
+///    layer's own resolution.
+/// 2. **Motion blur**, averaging the result across the shutter into a target
+///    at the node's resolution.
+/// 3. **The draw** into the node, with the layer's transform and blend mode.
+///
+/// Effects before the blur because a chain is part of the layer's own picture
+/// and the shutter smears whatever picture the layer has; the transform last
+/// because that is what puts the picture on the canvas. Every step is keyed
+/// and cached, so a chain is not re-run for a clip that only moved.
 pub struct Preview {
     renderer: Renderer,
     /// The one texture the interface draws from. Composites are copied into it
@@ -181,6 +194,36 @@ impl Preview {
             })
             .collect();
 
+        // The effect chain, run before anything else touches the picture. Each
+        // pass reads the last one's output, and each output is cached on its
+        // own key, so re-running a chain after one parameter changed redraws
+        // from that parameter's pass onwards and no further back.
+        let effected: Vec<Option<GpuTexture>> = resolved
+            .layers
+            .iter()
+            .zip(&bound)
+            .zip(&nested)
+            .map(|((layer, bound), nested)| {
+                if !layer.item.has_effects() {
+                    return None;
+                }
+                let source = match bound {
+                    Some(Bound::Frame(key)) => self.textures.peek(key),
+                    Some(Bound::Nested(_)) => nested.as_ref(),
+                    None => None,
+                }?;
+                run_chain(
+                    &mut self.renderer,
+                    &mut self.composites,
+                    device,
+                    queue,
+                    plan.color_space,
+                    source,
+                    &layer.item.effects,
+                )
+            })
+            .collect();
+
         // A motion-blurred layer is averaged into a target of its own first,
         // and the node then draws that target once. Done before the node's own
         // layer list is built, so by the time the pass below runs every blurred
@@ -190,14 +233,18 @@ impl Preview {
             .iter()
             .zip(&bound)
             .zip(&nested)
-            .map(|((layer, bound), nested)| {
+            .zip(&effected)
+            .map(|(((layer, bound), nested), effected)| {
                 if !layer.item.is_blurred() {
                     return None;
                 }
-                let texture = match bound {
-                    Some(Bound::Frame(key)) => self.textures.peek(key),
-                    Some(Bound::Nested(_)) => nested.as_ref(),
-                    None => None,
+                // What the shutter smears is the picture the chain produced,
+                // not the one the decoder handed over.
+                let texture = match (effected, bound) {
+                    (Some(texture), _) => Some(texture),
+                    (None, Some(Bound::Frame(key))) => self.textures.peek(key),
+                    (None, Some(Bound::Nested(_))) => nested.as_ref(),
+                    (None, None) => None,
                 }?;
                 let samples: Vec<Layer<'_>> = layer
                     .item
@@ -232,8 +279,8 @@ impl Preview {
 
         let textures = &self.textures;
         let mut layers = Vec::with_capacity(resolved.layers.len());
-        for (((layer, bound), nested), blurred) in
-            resolved.layers.iter().zip(&bound).zip(&nested).zip(&blurred)
+        for ((((layer, bound), nested), blurred), effected) in
+            resolved.layers.iter().zip(&bound).zip(&nested).zip(&blurred).zip(&effected)
         {
             // A blurred layer's picture is the average, drawn at the node's own
             // size with the transform already inside it — so it is laid down
@@ -247,10 +294,11 @@ impl Preview {
                 });
                 continue;
             }
-            let texture = match bound {
-                Some(Bound::Frame(key)) => textures.peek(key),
-                Some(Bound::Nested(_)) => nested.as_ref(),
-                None => None,
+            let texture = match (effected, bound) {
+                (Some(texture), _) => Some(texture),
+                (None, Some(Bound::Frame(key))) => textures.peek(key),
+                (None, Some(Bound::Nested(_))) => nested.as_ref(),
+                (None, None) => None,
             };
             let Some(texture) = texture else { continue };
             layers.push(Layer {
@@ -333,6 +381,47 @@ impl Preview {
             wgpu::FilterMode::Linear,
         ));
     }
+}
+
+/// Runs an effect chain over one picture, returning what came out.
+///
+/// One target per pass, taken from the same pool everything else composites
+/// into. The chain runs at the **source's own resolution** — a 4K clip's blur
+/// is computed at 4K even on a 1080p canvas — because that is the picture the
+/// effects are a property of, and because the alternative would make a chain's
+/// result depend on where the clip happens to be scaled to.
+///
+/// Returns `None` only if a pass's output went missing from the cache between
+/// being inserted and being read, which means the budget evicted it; the layer
+/// is then drawn without its effects rather than not drawn at all.
+///
+/// Takes the renderer and the cache rather than `&mut Preview` so that the
+/// source texture, which is borrowed from the *other* cache, can still be held
+/// across the call.
+fn run_chain(
+    renderer: &mut Renderer,
+    composites: &mut CompositeCache,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    color_space: ve_core::ColorSpace,
+    source: &GpuTexture,
+    effects: &[ve_core::EffectState],
+) -> Option<GpuTexture> {
+    let size = source.size();
+    let passes = chain_passes(effects, size);
+    let mut current: Option<GpuTexture> = None;
+    for pass in &passes {
+        let input = current.as_ref().unwrap_or(source);
+        let key = CompositeKey::of_effect(input.id(), size, color_space, pass);
+        if !composites.touch(&key) {
+            let scratch = composites.take_target(device, size);
+            renderer.apply_effect(device, queue, &scratch, color_space, input, pass);
+            composites.insert(key, scratch);
+        }
+        let target = composites.peek(&key)?;
+        current = Some(renderer.bind_target(device, target, key));
+    }
+    current
 }
 
 /// Which cache a layer's picture was found in, once it has been touched.
