@@ -13,6 +13,7 @@ use ve_core::Size;
 use ve_metrics::{spans, Metrics};
 use ve_time::{Rate, SampleRate, Ticks};
 
+use crate::colour;
 use crate::frame::{AudioBuffer, PixelFormat, VideoFrame};
 use crate::probe::{ticks_to_ts, ts_to_ticks};
 use crate::{ffmpeg_init, MediaError};
@@ -155,7 +156,7 @@ impl VideoDecoder {
 
         // Bilinear is the right default: bicubic costs noticeably more for a
         // difference invisible at preview sizes, and export can ask for better.
-        let scaler = scaling::Context::get(
+        let mut scaler = scaling::Context::get(
             decoder.format(),
             source_size.width,
             source_size.height,
@@ -164,6 +165,20 @@ impl VideoDecoder {
             output_size.height,
             scaling::Flags::BILINEAR,
         )?;
+
+        // swscale would otherwise convert every file with the BT.601 matrix,
+        // which is wrong for anything shot in HD and visibly shifts saturated
+        // colour. The stream's own tag decides, falling back on its size the
+        // way a player does; the same rule writes the tag on the way out, so
+        // importing Verge's own export gets back what it put in.
+        let matrix = colour::Matrix::from_space(decoder.color_space(), source_size.height);
+        let range = match decoder.color_range() {
+            ffmpeg::color::Range::JPEG => colour::Range::Full,
+            _ => colour::Range::Limited,
+        };
+        if !colour::set_matrix(&mut scaler, matrix, range, colour::Range::Full) {
+            log::debug!("swscale kept its default matrix for {}", path.display());
+        }
 
         Ok(VideoDecoder {
             path,

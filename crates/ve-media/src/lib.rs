@@ -20,6 +20,8 @@
 //!   off the UI thread.
 //! * [`Waveform`] reduces audio to peaks, and [`WaveformService`] produces them
 //!   on background workers under a budget of their own.
+//! * [`colour`] says which matrix converts between YUV and RGB, which both this
+//!   crate's decoders and the exporter's encoders have to agree on.
 
 use std::path::{Path, PathBuf};
 use std::sync::Once;
@@ -27,6 +29,7 @@ use std::sync::Once;
 use ffmpeg_next as ffmpeg;
 
 mod cache;
+pub mod colour;
 mod decoder;
 mod frame;
 mod probe;
@@ -35,6 +38,7 @@ mod waveform;
 mod waveform_service;
 
 pub use cache::{CacheKey, CacheStats, FrameCache};
+pub use colour::{set_matrix, Matrix, Range};
 pub use decoder::{AudioDecoder, VideoDecoder};
 pub use frame::{AudioBuffer, PixelFormat, VideoFrame};
 pub use probe::probe;
@@ -72,6 +76,16 @@ impl MediaError {
     pub(crate) fn open(path: impl AsRef<Path>, source: ffmpeg::Error) -> Self {
         MediaError::Open { path: path.as_ref().to_path_buf(), source }
     }
+}
+
+/// Initialises FFmpeg, for a crate that drives it directly rather than through
+/// this one.
+///
+/// The exporter opens encoders of its own and so needs the same global
+/// registration the decoders do — and it has to be *this* initialisation, once
+/// per process, rather than a second call of its own.
+pub fn init() -> Result<(), MediaError> {
+    ffmpeg_init()
 }
 
 static FFMPEG_INIT: Once = Once::new();
