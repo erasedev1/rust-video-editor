@@ -175,6 +175,14 @@ impl PlaybackEngine {
 
     /// Opens a decoder for every asset the project references.
     ///
+    /// Each one is opened on whichever file the project says its picture comes
+    /// from — the original, or a proxy where there is one and proxies are
+    /// switched on. `picture_source` decides, so there is one copy of that rule
+    /// rather than one per call site.
+    ///
+    /// Paths are already absolute by the time a project is in memory: loading
+    /// resolves them, which is why no project directory is needed here.
+    ///
     /// Returns the assets that could not be opened, paired with why. A failure
     /// is not fatal: the rest of the timeline still plays, and the offending
     /// clip renders as offline.
@@ -183,15 +191,39 @@ impl PlaybackEngine {
         project: &Project,
     ) -> Vec<(ve_core::AssetId, MediaError)> {
         let mut failures = Vec::new();
+        let proxies = project.settings.use_proxies;
         for asset in &project.assets {
             if asset.offline || !asset.info.has_video() || self.decode.is_open(asset.id) {
                 continue;
             }
-            if let Err(e) = self.decode.open(asset.id, &asset.path, None) {
+            let source = asset.picture_source(None, proxies);
+            if let Err(e) = self.decode.open(asset.id, &source.path, None) {
                 failures.push((asset.id, e));
             }
         }
         failures
+    }
+
+    /// Closes every asset's decoder and opens it again.
+    ///
+    /// What switching proxies on or off *is*: which file an asset decodes from
+    /// is fixed when its worker is opened, so changing the answer means
+    /// replacing the worker. Closing also drops that asset's cached frames,
+    /// which would otherwise sit there at the wrong resolution — harmlessly,
+    /// since the cache key carries the width, but taking up the budget the new
+    /// ones need.
+    ///
+    /// Assets with no proxy are reopened too. That is one wasted file open per
+    /// asset on a toggle the user does by hand, against a rule that has no
+    /// exceptions to get wrong.
+    pub fn reopen_project_assets(
+        &self,
+        project: &Project,
+    ) -> Vec<(ve_core::AssetId, MediaError)> {
+        for asset in &project.assets {
+            self.decode.close(asset.id);
+        }
+        self.open_project_assets(project)
     }
 
     /// Stops playback and moves the playhead.

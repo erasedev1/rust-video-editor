@@ -36,6 +36,14 @@ pub struct SourceFrames {
 
 impl SourceFrames {
     /// Registers every asset in the project that has a video stream.
+    ///
+    /// **Always the original file, never a proxy.** A proxy exists so the
+    /// editor can keep up with a hand on a mouse; a delivery has nowhere to be
+    /// and every reason to be right. Rendering one from the quarter-size
+    /// stand-in would hand back a soft file that the editor had never shown,
+    /// and the discovery would be made by whoever was given it. So this reads
+    /// `path` directly rather than going through `picture_source`, and
+    /// `ve_core::ProjectSettings::use_proxies` is not consulted here at all.
     pub fn new(project: &Project) -> Self {
         let paths = project
             .assets

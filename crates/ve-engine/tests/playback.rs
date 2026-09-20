@@ -833,3 +833,85 @@ fn seeking_the_audio_renderer_moves_where_it_mixes_from() {
     renderer.render_into(&project, project.sequence(sequence).unwrap(), &producer, 480);
     assert_eq!(renderer.position(), Ticks::from_seconds(5) + Ticks::from_millis(10));
 }
+
+// ---- proxies -----------------------------------------------------------
+//
+// Which file an asset's worker was opened on is not directly observable, but
+// the rate it reports is — so these point an asset's "proxy" at a fixture with
+// a different frame rate from its original. A worker reporting 25 was opened on
+// the proxy; one reporting 30 was opened on the original. That is a sharper
+// assertion than checking a path, because it is the decoder's own answer.
+
+/// The fixture's asset, given a proxy that is really the 25 fps fixture.
+fn with_stand_in_proxy(f: &mut Fixture) {
+    let proxy = ve_core::ProxyMedia::new(testdata("counter_25fps.mp4"), Size::new(160, 120));
+    f.project.asset_mut(f.asset).unwrap().proxy = Some(proxy);
+}
+
+#[test]
+fn an_asset_is_opened_on_its_proxy_only_when_proxies_are_switched_on() {
+    let mut f = fixture();
+    with_stand_in_proxy(&mut f);
+    let metrics = Metrics::new();
+    let (engine, _time) = engine(&metrics);
+
+    // Off by default: the original, whatever proxies exist.
+    assert!(!f.project.settings.use_proxies);
+    engine.open_project_assets(&f.project);
+    assert_eq!(engine.decode_service().asset_rate(f.asset), Some(Rate::FPS_30));
+
+    // On: the proxy, which is what reopening is for.
+    f.project.settings.use_proxies = true;
+    let failures = engine.reopen_project_assets(&f.project);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(
+        engine.decode_service().asset_rate(f.asset),
+        Some(Rate::FPS_25),
+        "switching proxies on should have reopened the worker on the proxy"
+    );
+
+    // And back, because the whole point is being able to see the real picture.
+    f.project.settings.use_proxies = false;
+    engine.reopen_project_assets(&f.project);
+    assert_eq!(engine.decode_service().asset_rate(f.asset), Some(Rate::FPS_30));
+}
+
+#[test]
+fn an_asset_whose_proxy_file_has_gone_opens_at_full_resolution() {
+    let mut f = fixture();
+    f.project.asset_mut(f.asset).unwrap().proxy =
+        Some(ve_core::ProxyMedia::new("/definitely/not/here.proxy.mov", Size::new(80, 60)));
+    f.project.settings.use_proxies = true;
+
+    let metrics = Metrics::new();
+    let (engine, _time) = engine(&metrics);
+    let failures = engine.open_project_assets(&f.project);
+
+    // Not a failure, and not offline: the editor lost its own scratch file,
+    // not the user's footage.
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(engine.decode_service().asset_rate(f.asset), Some(Rate::FPS_30));
+}
+
+#[test]
+fn reopening_drops_the_frames_decoded_from_the_other_file() {
+    let mut f = fixture();
+    with_stand_in_proxy(&mut f);
+    f.add_clip(f.v1, 0, 3);
+    let metrics = Metrics::new();
+    let (mut engine, _time) = engine(&metrics);
+    engine.open_project_assets(&f.project);
+    settle(&mut engine, &f);
+    assert!(engine.decode_service().cache_stats().entries > 0, "something was decoded");
+
+    f.project.settings.use_proxies = true;
+    engine.reopen_project_assets(&f.project);
+
+    // Frames from the original would be harmless — the cache key carries the
+    // width — but they would sit in a budget the new ones need.
+    assert_eq!(
+        engine.decode_service().cache_stats().entries,
+        0,
+        "reopening should have dropped what the old workers had cached"
+    );
+}

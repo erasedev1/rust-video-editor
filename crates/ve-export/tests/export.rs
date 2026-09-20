@@ -498,3 +498,39 @@ fn an_export_runs_on_its_own_thread_and_reports_when_it_is_done() {
     assert_eq!(report.frames, 30);
     assert!(settings.path.exists());
 }
+
+#[test]
+fn an_export_renders_the_original_even_when_the_editor_is_cutting_on_proxies() {
+    let mut f = fixture();
+    f.add_video(Ticks::ZERO, Ticks::from_seconds(3));
+
+    // A stand-in that is really the 25 fps fixture. Both files paint frame *i*
+    // the same colour, but they run at different rates, so the same instant is
+    // a different frame index in each: a third of a second in is frame 10 of
+    // the 30 fps original and frame 8 of this. The colours therefore say which
+    // file was decoded, which a proxy that merely looked softer would not.
+    f.project.asset_mut(f.video).unwrap().proxy =
+        Some(ve_core::ProxyMedia::new(testdata("counter_25fps.mp4"), Size::new(160, 120)));
+    // The editor is cutting on proxies, and says so in the project it hands
+    // the exporter.
+    f.project.settings.use_proxies = true;
+
+    let frame = Rate::FPS_30.frame_duration();
+    let mut settings = f.settings("not-the-proxy.mp4");
+    settings.range = ExportRange::Span(TimeRange::from_bounds(frame * 10, frame * 20));
+    f.export(&settings);
+
+    let colours = decoded_colours(&settings.path, 10);
+    for (i, colour) in colours.into_iter().enumerate() {
+        // Frame 10 + i of the original. Had the proxy been used, this would be
+        // frame 8 + something of the 25 fps file instead.
+        assert_close(
+            colour,
+            source_colour(10 + i),
+            &format!(
+                "exported frame {i} came from the proxy — a delivery rendered from a \
+                 stand-in is a soft file nobody asked for"
+            ),
+        );
+    }
+}
