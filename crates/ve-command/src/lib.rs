@@ -22,6 +22,7 @@ mod audio_commands;
 mod clip_commands;
 mod composition_commands;
 mod edit_commands;
+mod effect_commands;
 mod history;
 mod keyframe_commands;
 mod property_commands;
@@ -35,6 +36,9 @@ pub use composition_commands::{
     SetCompositionSettings, SetLayerBlendMode, SetLayerFlag, TrimLayer,
 };
 pub use edit_commands::{Compound, RollEdit, SetClipSpeed, ShiftClips, SlideClip, SlipClip};
+pub use effect_commands::{
+    AddEffect, EffectHost, MoveEffect, RemoveEffect, RenameEffect, SetEffectEnabled,
+};
 pub use history::{History, HistoryEntry};
 pub use keyframe_commands::{
     animatable_properties, property_ref, Animated, EditKeyframes, KeyframeEdit, KeyframePoint,
