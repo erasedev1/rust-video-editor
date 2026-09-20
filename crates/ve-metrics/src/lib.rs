@@ -225,6 +225,14 @@ pub mod spans {
     pub const SEEK: &str = "seek";
     /// One file's whole waveform analysis, on a background worker.
     pub const WAVEFORM: &str = "waveform";
+    /// One exported frame end to end: evaluate, decode, composite, read back
+    /// and encode. Measured on the export thread, so it never mixes with the
+    /// interface's own frame time.
+    pub const EXPORT_FRAME: &str = "export_frame";
+    /// Reading one composited picture back off the GPU.
+    pub const READBACK: &str = "readback";
+    /// Encoding one picture, swscale conversion included.
+    pub const ENCODE: &str = "encode";
 }
 
 /// Standard counter and gauge names.

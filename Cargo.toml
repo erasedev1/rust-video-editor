@@ -8,6 +8,7 @@ members = [
     "crates/ve-media",
     "crates/ve-render",
     "crates/ve-engine",
+    "crates/ve-export",
     "crates/ve-metrics",
     "crates/ve-app",
 ]
@@ -28,6 +29,7 @@ ve-command = { path = "crates/ve-command" }
 ve-media = { path = "crates/ve-media" }
 ve-render = { path = "crates/ve-render" }
 ve-engine = { path = "crates/ve-engine" }
+ve-export = { path = "crates/ve-export" }
 ve-metrics = { path = "crates/ve-metrics" }
 
 serde = { version = "1", features = ["derive"] }

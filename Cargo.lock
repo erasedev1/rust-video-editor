@@ -3695,6 +3695,7 @@ dependencies = [
  "ve-command",
  "ve-core",
  "ve-engine",
+ "ve-export",
  "ve-media",
  "ve-metrics",
  "ve-project",
@@ -3738,6 +3739,24 @@ dependencies = [
  "ve-metrics",
  "ve-render",
  "ve-time",
+]
+
+[[package]]
+name = "ve-export"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "ffmpeg-next",
+ "log",
+ "tempfile",
+ "thiserror 2.0.20",
+ "ve-core",
+ "ve-engine",
+ "ve-media",
+ "ve-metrics",
+ "ve-render",
+ "ve-time",
+ "wgpu",
 ]
 
 [[package]]

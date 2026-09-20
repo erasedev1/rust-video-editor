@@ -1,0 +1,28 @@
+[package]
+name = "ve-export"
+description = "Offline rendering, encoding and muxing for the Verge video editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ve-core = { workspace = true }
+ve-time = { workspace = true }
+ve-media = { workspace = true }
+ve-render = { workspace = true }
+ve-engine = { workspace = true }
+ve-metrics = { workspace = true }
+ffmpeg-next = "6.1.1"
+wgpu = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "export"
+harness = false
