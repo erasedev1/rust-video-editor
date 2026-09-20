@@ -9,23 +9,23 @@
 use std::path::PathBuf;
 
 use ve_command::{
-    AddClip, AddMarker, AddTrack, ClipProperty, Command, Compound, CrossfadeClips, MoveClip,
-    MoveTrack, PropertyValue, RemoveClip, RemoveMarker, RemoveTrack, RollEdit,
-    SetClipBlendMode, SetClipEnabled, SetClipFade, SetClipProperty, SetClipSpeed,
-    SetCompositionSettings, SetSequenceColorSpace, SetSequenceFormat, SetTrackFlag,
-    SetTrackLevel, ShiftClips, SlideClip, SlipClip, SplitClip, TrackFlag, TrackLevel, TrimClip,
-    TrimEdge,
+    property_ref, AddClip, AddMarker, AddTrack, ClipProperty, Command, Compound,
+    CrossfadeClips, EditKeyframes, KeyframeEdit, KeyframePoint, MoveClip, MoveTrack,
+    PropertyValue, RemoveClip, RemoveMarker, RemoveTrack, RollEdit, SetClipBlendMode,
+    SetClipEnabled, SetClipFade, SetClipProperty, SetClipSpeed, SetCompositionSettings,
+    SetSequenceColorSpace, SetSequenceFormat, SetTrackFlag, SetTrackLevel, ShiftClips,
+    SlideClip, SlipClip, SplitClip, TrackFlag, TrackLevel, TrimClip, TrimEdge,
 };
 use ve_core::{
-    AssetId, BlendMode, Clip, ClipId, ColorSpace, Fade, FadeCurve, FadeEdge, MarkerId, Project,
-    SequenceId, Speed, TrackId, TrackKind,
+    AssetId, BlendMode, Clip, ClipId, ColorSpace, Fade, FadeCurve, FadeEdge, Interpolation,
+    MarkerId, Project, SequenceId, Speed, TrackId, TrackKind,
 };
 use ve_engine::PlaybackEngine;
 use ve_media::WaveformService;
 use ve_project::{autosave, store};
 use ve_time::Ticks;
 
-use crate::state::{EditorState, Status, TimelineTool};
+use crate::state::{AnimationMode, EditorState, Status, TimelineTool};
 
 /// Something the user asked for.
 #[derive(Debug, Clone)]
@@ -97,6 +97,56 @@ pub enum Action {
     /// Applies to whatever canvas is being viewed: the sequence, or a
     /// composition when one is open.
     SetColorSpace(ColorSpace),
+
+    // Animation
+    ToggleAnimationEditor,
+    SetAnimationMode(AnimationMode),
+    // Which property the curve editor draws; `None` draws every animated one.
+    FocusProperty(Option<ClipProperty>),
+    // Pins the value a property already has at the playhead, or takes the
+    // keyframe that is there away again.
+    ToggleKeyframeAtPlayhead {
+        clip: ClipId,
+        property: ClipProperty,
+    },
+    // Keyframes a property at a clip-local time with an explicit value: what
+    // dragging a point in the curve editor does.
+    SetKeyframe {
+        clip: ClipId,
+        property: ClipProperty,
+        at: Ticks,
+        value: PropertyValue,
+        coalesce: bool,
+    },
+    // Drops a property's animation, leaving it at the value it has now.
+    RemoveAnimation {
+        clip: ClipId,
+        property: ClipProperty,
+    },
+    SelectKeyframe {
+        clip: ClipId,
+        property: ClipProperty,
+        at: Ticks,
+        additive: bool,
+    },
+    ClearKeyframeSelection,
+    DeleteSelectedKeyframes,
+    // Retiming, stated absolutely: where every keyframe of each named property
+    // now is. One drag re-issues this on every pointer move.
+    SetKeyframeTimes {
+        clip: ClipId,
+        times: Vec<(ClipProperty, Vec<Ticks>)>,
+        coalesce: bool,
+    },
+    SetKeyframeEasing {
+        clip: ClipId,
+        property: ClipProperty,
+        at: Ticks,
+        interpolation: Interpolation,
+        coalesce: bool,
+    },
+    CopyKeyframes,
+    PasteKeyframes,
 
     // Tracks
     AddTrack(TrackKind),
@@ -276,6 +326,7 @@ pub fn dispatch(
             Ok(name) => {
                 state.mark_edited();
                 prune_selection(state);
+                prune_keyframe_selection(state, sequence_id);
                 state.set_status(Status::info(format!("undo {name}")));
             }
             Err(e) => state.set_status(Status::warning(e.to_string())),
@@ -285,10 +336,18 @@ pub fn dispatch(
             Ok(name) => {
                 state.mark_edited();
                 prune_selection(state);
+                prune_keyframe_selection(state, sequence_id);
                 state.set_status(Status::info(format!("redo {name}")));
             }
             Err(e) => state.set_status(Status::warning(e.to_string())),
         },
+
+        // Keyframes first: with some in hand, Delete is unambiguously about
+        // them, and taking the whole clip instead would be a surprise the
+        // user cannot see coming.
+        Action::DeleteSelected if !state.keyframes.is_empty() => {
+            delete_selected_keyframes(state, sequence_id)
+        }
 
         Action::DeleteSelected => delete_selected(state, sequence_id, false),
 
@@ -327,6 +386,17 @@ pub fn dispatch(
             }
         }
 
+        // Copy follows the same rule: keyframes when there are any selected,
+        // clips otherwise.
+        Action::Copy if !state.keyframes.is_empty() => {
+            match copy_keyframes(state, sequence_id) {
+                0 => state.set_status(Status::warning("no keyframes selected")),
+                n => {
+                    state.set_status(Status::info(format!("copied {n} keyframe{}", plural(n))))
+                }
+            }
+        }
+
         Action::Copy => match copy_selection(state, sequence_id) {
             0 => state.set_status(Status::warning("nothing selected")),
             n => state.set_status(Status::info(format!("copied {n} clip{}", plural(n)))),
@@ -338,6 +408,12 @@ pub fn dispatch(
                 return;
             }
             delete_selected(state, sequence_id, false);
+        }
+
+        // Whichever clipboard was filled last is the one a paste reads, so
+        // Ctrl+V never has to guess which of the two was meant.
+        Action::Paste if !state.keyframe_clipboard.is_empty() => {
+            paste_keyframes(state, engine, sequence_id)
         }
 
         Action::Paste => paste(state, engine, sequence_id),
@@ -380,6 +456,11 @@ pub fn dispatch(
             } else {
                 state.selection.select_only(clip, track);
             }
+            // Taking hold of a clip lets go of any keyframes. Whichever of the
+            // two was touched last is what Delete, Copy and Paste are about,
+            // and that rule is only predictable if pointing at a clip really
+            // does mean the clip.
+            state.keyframes.clear();
         }
 
         Action::SelectAll => {
@@ -408,7 +489,10 @@ pub fn dispatch(
             }
         }
 
-        Action::ClearSelection => state.selection.clear(),
+        Action::ClearSelection => {
+            state.selection.clear();
+            state.keyframes.clear();
+        }
 
         Action::ToggleSelectedEnabled => {
             let clips = state.selection.clips.clone();
@@ -426,10 +510,46 @@ pub fn dispatch(
         }
 
         Action::SetClipProperty { clip, property, value } => {
-            let command = Box::new(SetClipProperty::new(sequence_id, clip, property, value));
-            match state.history.execute_coalesced(&mut state.project, command) {
-                Ok(()) => state.mark_edited(),
-                Err(e) => state.set_status(Status::warning(e.to_string())),
+            // Setting a value on a property that is animated writes a keyframe
+            // at the playhead instead of the static value underneath the
+            // animation — otherwise an inspector drag would appear to do
+            // nothing, because the keyframes would go on overriding it.
+            let animated = state
+                .project
+                .sequence(sequence_id)
+                .and_then(|s| s.find_clip(clip))
+                .and_then(|(_, c)| property_ref(c, &property))
+                .map(|view| view.is_animated())
+                .unwrap_or(false);
+            let at = engine.clock().position();
+            match (animated, clip_local(state, sequence_id, clip, at)) {
+                (true, Some(local)) => {
+                    let interpolation =
+                        keyframe_easing(state, sequence_id, clip, &property, local);
+                    let command = Box::new(EditKeyframes::one(
+                        sequence_id,
+                        clip,
+                        property.clone(),
+                        KeyframeEdit::Set { time: local, value, interpolation },
+                    ));
+                    match state.history.execute_coalesced(&mut state.project, command) {
+                        Ok(()) => {
+                            state.mark_edited();
+                            state.keyframes.add(clip, property, local);
+                        }
+                        Err(e) => state.set_status(Status::warning(e.to_string())),
+                    }
+                }
+                // Not animated, or the playhead is not over the clip: there is
+                // no instant to key, so the static value is what changes.
+                _ => {
+                    let command =
+                        Box::new(SetClipProperty::new(sequence_id, clip, property, value));
+                    match state.history.execute_coalesced(&mut state.project, command) {
+                        Ok(()) => state.mark_edited(),
+                        Err(e) => state.set_status(Status::warning(e.to_string())),
+                    }
+                }
             }
         }
 
@@ -476,6 +596,186 @@ pub fn dispatch(
                 Err(e) => state.set_status(Status::warning(e.to_string())),
             }
         }
+
+        Action::ToggleAnimationEditor => {
+            state.animation.open = !state.animation.open;
+            if !state.animation.open {
+                state.keyframes.clear();
+                state.animation.drag = None;
+            }
+        }
+
+        Action::SetAnimationMode(mode) => state.animation.mode = mode,
+
+        Action::FocusProperty(property) => state.animation.focus = property,
+
+        Action::ToggleKeyframeAtPlayhead { clip, property } => {
+            let at = engine.clock().position();
+            let Some(local) = clip_local(state, sequence_id, clip, at) else {
+                state.set_status(Status::warning(
+                    "the playhead is not over that clip, so there is nothing to keyframe",
+                ));
+                return;
+            };
+            let Some(clip_ref) =
+                state.project.sequence(sequence_id).and_then(|s| s.find_clip(clip))
+            else {
+                return;
+            };
+            let Some(view) = property_ref(clip_ref.1, &property) else {
+                state.set_status(Status::warning("that property cannot be animated"));
+                return;
+            };
+            // A keyframe already there is the user asking for it to go, which
+            // is what makes one button both add and remove.
+            let edit = match view.keyframe_at(local) {
+                Some(_) => KeyframeEdit::Remove(vec![local]),
+                None => KeyframeEdit::Set {
+                    time: local,
+                    // The value it already shows at this instant, so pinning it
+                    // changes nothing until something else moves.
+                    value: view.evaluate(local),
+                    interpolation: Interpolation::Linear,
+                },
+            };
+            let removing = matches!(edit, KeyframeEdit::Remove(_));
+            let command =
+                Box::new(EditKeyframes::one(sequence_id, clip, property.clone(), edit));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    if removing {
+                        state.keyframes.remove(&property, local);
+                    } else {
+                        state.keyframes.add(clip, property, local);
+                    }
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetKeyframe { clip, property, at, value, coalesce } => {
+            let interpolation = keyframe_easing(state, sequence_id, clip, &property, at);
+            let command = Box::new(EditKeyframes::one(
+                sequence_id,
+                clip,
+                property,
+                // An existing keyframe keeps its easing: this sets a value,
+                // not a curve.
+                KeyframeEdit::Set { time: at, value, interpolation },
+            ));
+            let result = if coalesce {
+                state.history.execute_coalesced(&mut state.project, command)
+            } else {
+                state.history.execute(&mut state.project, command)
+            };
+            match result {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::RemoveAnimation { clip, property } => {
+            let at = engine.clock().position();
+            let local = clip_local(state, sequence_id, clip, at).unwrap_or(Ticks::ZERO);
+            let command = Box::new(EditKeyframes::one(
+                sequence_id,
+                clip,
+                property.clone(),
+                KeyframeEdit::Freeze { at: local },
+            ));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    prune_keyframe_selection(state, sequence_id);
+                    state.set_status(Status::info(format!(
+                        "{} is no longer animated",
+                        property.label()
+                    )));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SelectKeyframe { clip, property, at, additive } => {
+            if additive {
+                state.keyframes.toggle(clip, property, at);
+            } else {
+                state.keyframes.select_only(clip, property, at);
+            }
+        }
+
+        Action::ClearKeyframeSelection => state.keyframes.clear(),
+
+        Action::DeleteSelectedKeyframes => delete_selected_keyframes(state, sequence_id),
+
+        Action::SetKeyframeTimes { clip, times, coalesce } => {
+            // The keyframes keep their order through a retime, so where each
+            // selected one ended up is read off the two lists rather than
+            // guessed at afterwards.
+            let was = times
+                .iter()
+                .map(|(property, _)| {
+                    let old = state
+                        .project
+                        .sequence(sequence_id)
+                        .and_then(|s| s.find_clip(clip))
+                        .and_then(|(_, c)| property_ref(c, property))
+                        .map(|v| v.keyframe_times())
+                        .unwrap_or_default();
+                    (property.clone(), old)
+                })
+                .collect::<Vec<_>>();
+
+            let edits = times
+                .iter()
+                .map(|(property, times)| {
+                    (property.clone(), KeyframeEdit::SetTimes(times.clone()))
+                })
+                .collect();
+            let command = Box::new(EditKeyframes::new(sequence_id, clip, edits));
+            let result = if coalesce {
+                state.history.execute_coalesced(&mut state.project, command)
+            } else {
+                state.history.execute(&mut state.project, command)
+            };
+            match result {
+                Ok(()) => {
+                    state.mark_edited();
+                    for ((property, old), (_, new)) in was.iter().zip(&times) {
+                        for (before, after) in old.iter().zip(new) {
+                            state.keyframes.retimed(property, *before, *after);
+                        }
+                    }
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetKeyframeEasing { clip, property, at, interpolation, coalesce } => {
+            let command = Box::new(EditKeyframes::one(
+                sequence_id,
+                clip,
+                property,
+                KeyframeEdit::SetInterpolation { time: at, interpolation },
+            ));
+            let result = if coalesce {
+                state.history.execute_coalesced(&mut state.project, command)
+            } else {
+                state.history.execute(&mut state.project, command)
+            };
+            match result {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::CopyKeyframes => match copy_keyframes(state, sequence_id) {
+            0 => state.set_status(Status::warning("no keyframes selected")),
+            n => state.set_status(Status::info(format!("copied {n} keyframe{}", plural(n)))),
+        },
+
+        Action::PasteKeyframes => paste_keyframes(state, engine, sequence_id),
 
         Action::SetTrackLevel { track, which, value } => {
             let command = Box::new(SetTrackLevel::new(sequence_id, track, which, value));
@@ -923,6 +1223,8 @@ fn copy_selection(state: &mut EditorState, sequence: SequenceId) -> usize {
     }
     let count = clips.len();
     state.clipboard.fill(clips);
+    // The clip clipboard is now the one a paste reads. See `copy_keyframes`.
+    state.keyframe_clipboard.clear();
     count
 }
 
@@ -1204,5 +1506,180 @@ fn add_asset_to_timeline(state: &mut EditorState, asset: AssetId, track: TrackId
             state.set_status(Status::info("clip added"));
         }
         Err(e) => state.set_status(Status::error(e.to_string())),
+    }
+}
+
+/// A sequence time as the clip's own properties see it, or `None` when the
+/// playhead is not over the clip at all.
+///
+/// Snapped to the frame grid first: a keyframe dropped where a scrub happened
+/// to leave the playhead would sit a few thousand ticks off the frame it looks
+/// like it is on, and every later one would too.
+fn clip_local(
+    state: &EditorState,
+    sequence: SequenceId,
+    clip: ClipId,
+    at: Ticks,
+) -> Option<Ticks> {
+    let seq = state.project.sequence(sequence)?;
+    let (_, c) = seq.find_clip(clip)?;
+    let at = seq.snap_to_frame(at);
+    c.range().contains(at).then(|| c.local_time_at(at))
+}
+
+/// The easing a keyframe already at `at` carries, so that setting its value
+/// does not quietly straighten the curve leaving it.
+fn keyframe_easing(
+    state: &EditorState,
+    sequence: SequenceId,
+    clip: ClipId,
+    property: &ClipProperty,
+    at: Ticks,
+) -> Interpolation {
+    state
+        .project
+        .sequence(sequence)
+        .and_then(|s| s.find_clip(clip))
+        .and_then(|(_, c)| property_ref(c, property))
+        .and_then(|view| view.keyframe_at(at))
+        .map(|k| k.interpolation)
+        .unwrap_or_default()
+}
+
+/// Drops selected keyframes that no longer exist, which an undo or a delete can
+/// cause.
+fn prune_keyframe_selection(state: &mut EditorState, sequence: SequenceId) {
+    let Some(clip) = state.keyframes.clip else { return };
+    let Some(found) = state.project.sequence(sequence).and_then(|s| s.find_clip(clip)) else {
+        state.keyframes.clear();
+        return;
+    };
+    let alive: Vec<(ClipProperty, Ticks)> = state
+        .keyframes
+        .keys()
+        .iter()
+        .filter(|(property, time)| {
+            property_ref(found.1, property)
+                .map(|view| view.keyframe_at(*time).is_some())
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    state.keyframes.retain(alive);
+}
+
+/// Deletes every selected keyframe, as one undo step however many properties
+/// they were spread across.
+fn delete_selected_keyframes(state: &mut EditorState, sequence: SequenceId) {
+    let Some(clip) = state.keyframes.clip else {
+        state.set_status(Status::warning("no keyframes selected"));
+        return;
+    };
+    let edits: Vec<(ClipProperty, KeyframeEdit)> = state
+        .keyframes
+        .properties()
+        .into_iter()
+        .map(|property| {
+            let times = state.keyframes.times_on(&property);
+            (property, KeyframeEdit::Remove(times))
+        })
+        .collect();
+    if edits.is_empty() {
+        state.set_status(Status::warning("no keyframes selected"));
+        return;
+    }
+    let count = state.keyframes.len();
+    let command = Box::new(EditKeyframes::new(sequence, clip, edits));
+    match state.history.execute(&mut state.project, command) {
+        Ok(()) => {
+            state.mark_edited();
+            state.keyframes.clear();
+            state
+                .set_status(Status::info(format!("deleted {count} keyframe{}", plural(count))));
+        }
+        Err(e) => state.set_status(Status::warning(e.to_string())),
+    }
+}
+
+/// Lifts the selected keyframes onto the keyframe clipboard, and returns how
+/// many were taken.
+///
+/// The clip clipboard is emptied by this, and filling the clip clipboard empties
+/// this one: whichever was copied last is what a paste pastes, so Ctrl+V never
+/// has to guess which of two clipboards the user meant.
+fn copy_keyframes(state: &mut EditorState, sequence: SequenceId) -> usize {
+    let Some(clip) = state.keyframes.clip else { return 0 };
+    let Some((_, found)) = state.project.sequence(sequence).and_then(|s| s.find_clip(clip))
+    else {
+        return 0;
+    };
+    let entries: Vec<(ClipProperty, Vec<KeyframePoint>)> = state
+        .keyframes
+        .properties()
+        .into_iter()
+        .filter_map(|property| {
+            let view = property_ref(found, &property)?;
+            let taken: Vec<KeyframePoint> = state
+                .keyframes
+                .times_on(&property)
+                .into_iter()
+                .filter_map(|time| view.keyframe_at(time))
+                .collect();
+            (!taken.is_empty()).then_some((property, taken))
+        })
+        .collect();
+
+    let count = entries.iter().map(|(_, kfs)| kfs.len()).sum();
+    state.keyframe_clipboard.fill(entries);
+    if count > 0 {
+        state.clipboard.clear();
+    }
+    count
+}
+
+/// Pastes the copied keyframes onto the selected clip, starting at the
+/// playhead.
+///
+/// Onto the *selected* clip rather than the one they came from: copying a move
+/// from one clip onto another is most of what a keyframe clipboard is for.
+fn paste_keyframes(state: &mut EditorState, engine: &PlaybackEngine, sequence: SequenceId) {
+    if state.keyframe_clipboard.is_empty() {
+        state.set_status(Status::warning("no keyframes copied"));
+        return;
+    }
+    let Some(clip) = state.selection.only() else {
+        state.set_status(Status::warning("select one clip to paste keyframes onto"));
+        return;
+    };
+    let at = engine.clock().position();
+    let Some(local) = clip_local(state, sequence, clip, at) else {
+        state.set_status(Status::warning("the playhead is not over the selected clip"));
+        return;
+    };
+
+    let entries = state.keyframe_clipboard.entries().to_vec();
+    let count: usize = entries.iter().map(|(_, kfs)| kfs.len()).sum();
+    let edits: Vec<(ClipProperty, KeyframeEdit)> = entries
+        .iter()
+        .map(|(property, keyframes)| {
+            (property.clone(), KeyframeEdit::Insert { keyframes: keyframes.clone(), at: local })
+        })
+        .collect();
+
+    let command = Box::new(EditKeyframes::new(sequence, clip, edits));
+    match state.history.execute(&mut state.project, command) {
+        Ok(()) => {
+            state.mark_edited();
+            // What was just pasted is what the user is now holding, so it can
+            // be moved, retimed or deleted without hunting for it.
+            state.keyframes.clear();
+            for (property, keyframes) in &entries {
+                for kf in keyframes {
+                    state.keyframes.add(clip, property.clone(), local + kf.time);
+                }
+            }
+            state.set_status(Status::info(format!("pasted {count} keyframe{}", plural(count))));
+        }
+        Err(e) => state.set_status(Status::warning(e.to_string())),
     }
 }

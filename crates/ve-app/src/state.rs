@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ve_command::History;
+use ve_command::{ClipProperty, History, KeyframePoint};
 use ve_core::{AssetId, Clip, ClipId, CompositionId, LayerId, Project, SequenceId, TrackId};
 use ve_engine::{Timebase, Viewing};
 use ve_project::Autosave;
@@ -137,6 +137,247 @@ impl Clipboard {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
+}
+
+/// Which keyframes the user has hold of.
+///
+/// Separate from the clip selection rather than folded into it: the two answer
+/// different questions, and a keyframe being selected must not make Delete take
+/// the clip it belongs to. A keyframe is named by the property it sits on and
+/// the clip-relative time it sits at, which is exactly what a command needs.
+#[derive(Debug, Default, Clone)]
+pub struct KeyframeSelection {
+    /// The clip whose keyframes these are. Clearing the clip selection or
+    /// picking another clip empties this, because a keyframe from a clip that
+    /// is no longer open is not something the user can see or act on.
+    pub clip: Option<ClipId>,
+    keys: Vec<(ClipProperty, Ticks)>,
+}
+
+impl KeyframeSelection {
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn keys(&self) -> &[(ClipProperty, Ticks)] {
+        &self.keys
+    }
+
+    pub fn contains(&self, property: &ClipProperty, time: Ticks) -> bool {
+        self.keys.iter().any(|(p, t)| p == property && *t == time)
+    }
+
+    /// The selected times on one property, in order.
+    pub fn times_on(&self, property: &ClipProperty) -> Vec<Ticks> {
+        let mut times: Vec<Ticks> =
+            self.keys.iter().filter(|(p, _)| p == property).map(|(_, t)| *t).collect();
+        times.sort_unstable();
+        times
+    }
+
+    /// The properties with anything selected on them, in the order they were
+    /// first touched.
+    pub fn properties(&self) -> Vec<ClipProperty> {
+        let mut properties: Vec<ClipProperty> = Vec::new();
+        for (property, _) in &self.keys {
+            if !properties.contains(property) {
+                properties.push(property.clone());
+            }
+        }
+        properties
+    }
+
+    /// The span the selection covers, which is what a scale gesture works on.
+    pub fn span(&self) -> Option<(Ticks, Ticks)> {
+        let first = self.keys.iter().map(|(_, t)| *t).min()?;
+        let last = self.keys.iter().map(|(_, t)| *t).max()?;
+        Some((first, last))
+    }
+
+    pub fn select_only(&mut self, clip: ClipId, property: ClipProperty, time: Ticks) {
+        self.clip = Some(clip);
+        self.keys.clear();
+        self.keys.push((property, time));
+    }
+
+    pub fn toggle(&mut self, clip: ClipId, property: ClipProperty, time: Ticks) {
+        if self.clip != Some(clip) {
+            self.select_only(clip, property, time);
+            return;
+        }
+        match self.keys.iter().position(|(p, t)| *p == property && *t == time) {
+            Some(i) => {
+                self.keys.remove(i);
+            }
+            None => self.keys.push((property, time)),
+        }
+    }
+
+    pub fn add(&mut self, clip: ClipId, property: ClipProperty, time: Ticks) {
+        if self.clip != Some(clip) {
+            self.clear();
+            self.clip = Some(clip);
+        }
+        if !self.contains(&property, time) {
+            self.keys.push((property, time));
+        }
+    }
+
+    pub fn remove(&mut self, property: &ClipProperty, time: Ticks) {
+        self.keys.retain(|(p, t)| p != property || *t != time);
+    }
+
+    /// Keeps only these keys, which is how a selection follows a delete or an
+    /// undo that took some of its keyframes away.
+    pub fn retain(&mut self, keys: Vec<(ClipProperty, Ticks)>) {
+        self.keys = keys;
+        if self.keys.is_empty() {
+            self.clip = None;
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.clip = None;
+        self.keys.clear();
+    }
+
+    /// Follows a retime: the keyframes are the same ones, at new times.
+    pub fn retimed(&mut self, property: &ClipProperty, from: Ticks, to: Ticks) {
+        for (p, t) in &mut self.keys {
+            if p == property && *t == from {
+                *t = to;
+            }
+        }
+    }
+}
+
+/// Keyframes lifted from a clip, waiting to be pasted.
+///
+/// Times are stored **relative to the earliest keyframe copied**, across every
+/// property at once rather than per property. That is what makes a paste
+/// reproduce the shape of the copy: a position curve and an opacity curve that
+/// were a second apart stay a second apart, wherever the playhead is when they
+/// land.
+#[derive(Debug, Default, Clone)]
+pub struct KeyframeClipboard {
+    entries: Vec<(ClipProperty, Vec<KeyframePoint>)>,
+}
+
+impl KeyframeClipboard {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// How many keyframes are held, across every property.
+    pub fn len(&self) -> usize {
+        self.entries.iter().map(|(_, kfs)| kfs.len()).sum()
+    }
+
+    pub fn entries(&self) -> &[(ClipProperty, Vec<KeyframePoint>)] {
+        &self.entries
+    }
+
+    /// Replaces the contents, re-basing every time on the earliest of them.
+    pub fn fill(&mut self, entries: Vec<(ClipProperty, Vec<KeyframePoint>)>) {
+        self.entries.clear();
+        let origin = entries.iter().flat_map(|(_, kfs)| kfs.iter().map(|k| k.time)).min();
+        let Some(origin) = origin else { return };
+        self.entries = entries
+            .into_iter()
+            .map(|(property, keyframes)| {
+                let rebased = keyframes
+                    .into_iter()
+                    .map(|mut k| {
+                        k.time -= origin;
+                        k
+                    })
+                    .collect();
+                (property, rebased)
+            })
+            .collect();
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+/// What the animation editor is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnimationMode {
+    /// Keyframes as diamonds on the timeline's own time axis: where things
+    /// happen, and when.
+    #[default]
+    Sheet,
+    /// The curves themselves: what the value does between keyframes, and the
+    /// handles that shape it.
+    Curves,
+}
+
+impl AnimationMode {
+    pub const ALL: [AnimationMode; 2] = [AnimationMode::Sheet, AnimationMode::Curves];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AnimationMode::Sheet => "Sheet",
+            AnimationMode::Curves => "Curves",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            AnimationMode::Sheet => "Keyframes in time, aligned with the timeline",
+            AnimationMode::Curves => "The value between keyframes, and its handles",
+        }
+    }
+}
+
+/// A gesture in progress in the animation editor.
+///
+/// Held across frames for the same reason a timeline drag is: the keyframes
+/// being moved and where they started have to survive until the pointer comes
+/// up. Every variant carries the times as they were **at the grab**, so each
+/// pointer move states an absolute destination rather than accumulating deltas
+/// — which is what lets the whole gesture merge into one undo step.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyframeGesture {
+    /// Sliding the selected keyframes along the timeline.
+    Move { grab: Ticks, snapshot: Vec<PropertyTimes> },
+    /// Scaling the selected span about its far end.
+    Scale { anchor: Ticks, grab: Ticks, snapshot: Vec<PropertyTimes> },
+    /// Dragging one end of a curve segment's bezier handle.
+    Handle { property: ClipProperty, time: Ticks, outgoing: bool },
+    /// Dragging a keyframe's value in the curve editor.
+    Value { property: ClipProperty, time: Ticks, channel: usize },
+}
+
+/// Every keyframe time on one property as a gesture began, and which of them
+/// the gesture moves.
+///
+/// The whole list is kept, not only the moving ones: retiming states where
+/// *all* of a property's keyframes now are, so the ones standing still have to
+/// be restated too.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PropertyTimes {
+    pub property: ClipProperty,
+    pub times: Vec<Ticks>,
+    pub moving: Vec<bool>,
+}
+
+/// The animation editor's own state: whether it is open, which of its two
+/// views it is showing, and the gesture in progress.
+#[derive(Debug, Clone, Default)]
+pub struct AnimationView {
+    pub open: bool,
+    pub mode: AnimationMode,
+    /// The property the curve editor draws. `None` draws every animated
+    /// property at once, which is how a graph editor usually starts.
+    pub focus: Option<ClipProperty>,
+    pub drag: Option<KeyframeGesture>,
 }
 
 /// How the timeline is scrolled and zoomed.
@@ -358,7 +599,11 @@ pub struct EditorState {
     pub path: Option<PathBuf>,
     pub autosave: Autosave,
     pub selection: Selection,
+    /// Which keyframes are in hand, and the editor that shows them.
+    pub keyframes: KeyframeSelection,
+    pub animation: AnimationView,
     pub clipboard: Clipboard,
+    pub keyframe_clipboard: KeyframeClipboard,
     pub timeline: TimelineView,
     pub tool: TimelineTool,
     pub status: Option<Status>,
@@ -390,7 +635,10 @@ impl EditorState {
             path: None,
             autosave: Autosave::new(scratch_dir, interval),
             selection: Selection::default(),
+            keyframes: KeyframeSelection::default(),
+            animation: AnimationView::default(),
             clipboard: Clipboard::default(),
+            keyframe_clipboard: KeyframeClipboard::default(),
             timeline: TimelineView::default(),
             tool: TimelineTool::default(),
             status: None,
@@ -443,6 +691,8 @@ impl EditorState {
     pub fn open(&mut self, composition: Option<CompositionId>) {
         self.open_composition = composition;
         self.selection.clear();
+        self.keyframes.clear();
+        self.animation.drag = None;
         self.drag = TimelineDrag::None;
     }
 

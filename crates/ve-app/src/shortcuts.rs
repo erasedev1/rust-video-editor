@@ -101,6 +101,9 @@ pub fn collect(ctx: &egui::Context, timeline_width: f32) -> Vec<Action> {
         if i.consume_key(plain, Key::M) {
             actions.push(Action::AddMarkerAtPlayhead);
         }
+        if i.consume_key(plain, Key::A) {
+            actions.push(Action::ToggleAnimationEditor);
+        }
         // The timeline tools, on the keys every other editor puts them on.
         for (key, tool) in [
             (Key::V, TimelineTool::Select),
@@ -163,6 +166,9 @@ pub const BINDINGS: &[Binding] = &[
     Binding { label: "Toggle snapping", keys: "S" },
     Binding { label: "Select / roll / slip / slide tool", keys: "V / N / Y / U" },
     Binding { label: "Add marker", keys: "M" },
+    Binding { label: "Animation editor", keys: "A" },
+    Binding { label: "Keyframe / delete keyframes", keys: "◆ button / Del" },
+    Binding { label: "Copy / paste keyframes", keys: "Ctrl + C / V" },
     Binding { label: "Previous / next marker", keys: "Ctrl + ← / →" },
     Binding { label: "Zoom in / out", keys: "+ / −" },
     Binding { label: "Zoom to fit", keys: "Shift + Z" },

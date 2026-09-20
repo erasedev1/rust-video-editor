@@ -360,7 +360,7 @@ fn easing_a_keyframe_that_is_not_there_is_refused() {
 }
 
 #[test]
-fn pasting_lands_the_earliest_keyframe_on_the_paste_point() {
+fn pasting_offsets_every_keyframe_from_the_paste_point() {
     let (mut p, seq, id, mut h) = fixture();
     animate_opacity(&mut p, seq, id, &mut h);
 
@@ -394,6 +394,56 @@ fn pasting_lands_the_earliest_keyframe_on_the_paste_point() {
 
     h.undo(&mut p).unwrap();
     assert_eq!(p, before);
+}
+
+#[test]
+fn a_paste_keeps_two_properties_the_distance_apart_they_were_copied() {
+    let (mut p, seq, id, mut h) = fixture();
+    // A copy held as offsets from a shared origin: opacity at the origin,
+    // rotation a second later.
+    let opacity = KeyframePoint {
+        time: Ticks::ZERO,
+        value: PropertyValue::Scalar(1.0),
+        interpolation: Interpolation::Linear,
+    };
+    let rotation = KeyframePoint {
+        time: Ticks::from_seconds(1),
+        value: PropertyValue::Scalar(45.0),
+        interpolation: Interpolation::Linear,
+    };
+
+    h.execute(
+        &mut p,
+        Box::new(EditKeyframes::new(
+            seq,
+            id,
+            vec![
+                (
+                    ClipProperty::Opacity,
+                    KeyframeEdit::Insert {
+                        keyframes: vec![opacity],
+                        at: Ticks::from_seconds(4),
+                    },
+                ),
+                (
+                    ClipProperty::Rotation,
+                    KeyframeEdit::Insert {
+                        keyframes: vec![rotation],
+                        at: Ticks::from_seconds(4),
+                    },
+                ),
+            ],
+        )),
+    )
+    .unwrap();
+
+    let clip = clip_of(&p, id);
+    assert_eq!(clip.transform.opacity.keyframes()[0].time, Ticks::from_seconds(4));
+    assert_eq!(
+        clip.transform.rotation.keyframes()[0].time,
+        Ticks::from_seconds(5),
+        "the second property has to stay a second behind the first"
+    );
 }
 
 #[test]

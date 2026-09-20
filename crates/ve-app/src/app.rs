@@ -481,6 +481,11 @@ impl VergeApp {
                         actions_out.push(Action::ToggleSnapping);
                         ui.close();
                     }
+                    let mut animation = self.state.animation.open;
+                    if ui.checkbox(&mut animation, "Animation Editor    A").clicked() {
+                        actions_out.push(Action::ToggleAnimationEditor);
+                        ui.close();
+                    }
                 });
 
                 ui.menu_button("Help", |ui| {
@@ -615,6 +620,24 @@ impl eframe::App for VergeApp {
         // 3. Interface.
         self.menu_bar(root, &mut pending_actions);
         self.status_bar(root);
+
+        // Added before the timeline, so it takes the bottom of the window and
+        // the timeline sits above it: the ruler, the tracks, then the keyframes
+        // of whatever is selected, all on one time axis reading downwards.
+        if self.state.animation.open {
+            egui::Panel::bottom("animation")
+                .resizable(true)
+                .default_size(168.0)
+                .min_size(70.0)
+                .show(root, |ui| {
+                    panels::animation::show(
+                        ui,
+                        &mut self.state,
+                        position,
+                        &mut pending_actions,
+                    );
+                });
+        }
 
         egui::Panel::bottom("timeline")
             .resizable(true)

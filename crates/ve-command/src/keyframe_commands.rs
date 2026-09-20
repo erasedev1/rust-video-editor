@@ -77,9 +77,13 @@ pub enum KeyframeEdit {
     /// Changes the easing that leaves a keyframe — what the graph editor's
     /// handles set.
     SetInterpolation { time: Ticks, interpolation: Interpolation },
-    /// Adds keyframes, offset so that the earliest lands on `at`. A time that
-    /// already has a keyframe is overwritten, as pasting over something always
-    /// is.
+    /// Adds keyframes, each landing at `at` plus its own time.
+    ///
+    /// The times are therefore offsets from a shared origin rather than
+    /// absolute, which is what keeps the shape of a copy intact when it spans
+    /// several properties: two curves a second apart stay a second apart. A
+    /// time that already has a keyframe is overwritten, as pasting over
+    /// something always is.
     Insert { keyframes: Vec<KeyframePoint>, at: Ticks },
     /// Drops every keyframe, leaving the property at the value it had at `at`.
     Freeze { at: Ticks },
@@ -274,12 +278,9 @@ fn apply_edit(
                 }
             }
             KeyframeEdit::Insert { keyframes, at } => {
-                let Some(origin) = keyframes.iter().map(|k| k.time).min() else {
-                    return Ok(());
-                };
                 for kf in keyframes {
                     let Variant(v) = kf.value else { continue };
-                    p.set_keyframe(*at + (kf.time - origin), v, kf.interpolation);
+                    p.set_keyframe(*at + kf.time, v, kf.interpolation);
                 }
             }
             KeyframeEdit::Freeze { at } => p.freeze_at(*at),
