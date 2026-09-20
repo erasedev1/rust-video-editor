@@ -984,3 +984,108 @@ fn a_full_shutter_covers_the_whole_frame_interval() {
     let offsets = blur.offsets(frame);
     assert_eq!(offsets, vec![-frame.scale(1, 4), frame.scale(1, 4)]);
 }
+
+// ---- proxies ----------------------------------------------------------
+//
+// A proxy is a stand-in for an asset's *picture*. These assert the rules that
+// decide which file the editor decodes from, which is the one piece of proxy
+// behaviour the rest of the editor depends on being right.
+
+/// An asset whose proxy points at `proxy_path`, which need not exist.
+fn asset_with_proxy(proxy_path: &std::path::Path, original: &std::path::Path) -> MediaAsset {
+    let mut asset = MediaAsset::new(AssetId::from_raw(1), original, MediaInfo::default());
+    asset.proxy = Some(ProxyMedia::new(proxy_path, Size::new(640, 360)));
+    asset
+}
+
+#[test]
+fn the_editor_decodes_a_proxy_only_when_proxies_are_switched_on() {
+    let dir = std::env::temp_dir().join("verge-proxy-model-on");
+    std::fs::create_dir_all(&dir).unwrap();
+    let proxy = dir.join("clip.proxy.mov");
+    let original = dir.join("clip.mp4");
+    std::fs::write(&proxy, b"proxy").unwrap();
+    std::fs::write(&original, b"original").unwrap();
+
+    let asset = asset_with_proxy(&proxy, &original);
+
+    let on = asset.picture_source(None, true);
+    assert!(on.is_proxy);
+    assert_eq!(on.path, proxy);
+
+    // The switch is the whole point: the real picture is still one toggle away.
+    let off = asset.picture_source(None, false);
+    assert!(!off.is_proxy);
+    assert_eq!(off.path, original);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_proxy_whose_file_has_gone_falls_back_to_the_original() {
+    let dir = std::env::temp_dir().join("verge-proxy-model-gone");
+    std::fs::create_dir_all(&dir).unwrap();
+    let original = dir.join("clip.mp4");
+    std::fs::write(&original, b"original").unwrap();
+    // Never created: a cleared cache directory, or a project moved without it.
+    let proxy = dir.join("clip.proxy.mov");
+
+    let asset = asset_with_proxy(&proxy, &original);
+    let source = asset.picture_source(None, true);
+
+    // Not offline, and not an error — the editor loses its own scratch file,
+    // not the user's footage, so it carries on at full resolution.
+    assert!(!source.is_proxy);
+    assert_eq!(source.path, original);
+    assert!(asset.has_proxy(), "the proxy is remembered, so restoring it works");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn an_asset_with_no_proxy_is_unaffected_by_the_switch() {
+    let asset = MediaAsset::new(AssetId::from_raw(1), "/media/movie.mp4", MediaInfo::default());
+    assert!(!asset.has_proxy());
+    for enabled in [true, false] {
+        let source = asset.picture_source(None, enabled);
+        assert!(!source.is_proxy);
+        assert_eq!(source.path, std::path::Path::new("/media/movie.mp4"));
+    }
+}
+
+#[test]
+fn relinking_moves_a_proxy_with_its_asset() {
+    let root = std::path::Path::new("/projects/cut");
+    let mut asset = asset_with_proxy(
+        std::path::Path::new("/projects/cut/proxies/movie.mov"),
+        std::path::Path::new("/projects/cut/media/movie.mp4"),
+    );
+
+    asset.relink_relative_to(root);
+
+    assert_eq!(asset.relative_path.as_deref(), Some(std::path::Path::new("media/movie.mp4")));
+    assert_eq!(
+        asset.proxy.as_ref().unwrap().relative_path.as_deref(),
+        Some(std::path::Path::new("proxies/movie.mov")),
+        "a proxy left absolute is the one file a moved project cannot find"
+    );
+}
+
+#[test]
+fn a_project_written_before_proxies_existed_opens_with_none() {
+    // The field is defaulted rather than versioned, so this is the whole
+    // compatibility story: an asset object with no `proxy` key at all.
+    let json = r#"{
+        "id": 1,
+        "name": "movie.mp4",
+        "path": "/media/movie.mp4",
+        "info": {"duration": 0, "container": ""}
+    }"#;
+    let asset: MediaAsset = serde_json::from_str(json).unwrap();
+    assert!(!asset.has_proxy());
+
+    // And an absent proxy is not written back out, so saving does not grow
+    // every asset in every older project by an empty field.
+    let text = serde_json::to_string(&asset).unwrap();
+    assert!(!text.contains("proxy"), "{text}");
+}

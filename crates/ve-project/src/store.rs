@@ -222,6 +222,11 @@ fn read_project(path: &Path) -> Result<LoadOutcome, ProjectError> {
 ///
 /// A missing file is never fatal: the project opens, the asset is marked
 /// offline, and clips referencing it render as offline until the user relinks.
+///
+/// A proxy is resolved the same way but is never allowed to make an asset
+/// offline, and a proxy that has gone is kept rather than dropped: the editor
+/// falls back to the original for now, and finds the proxy again if the
+/// directory it was in comes back.
 fn resolve_asset_paths(outcome: &mut LoadOutcome, project_path: &Path) {
     let dir = project_path.parent().map(Path::to_path_buf);
     for asset in &mut outcome.project.assets {
@@ -230,6 +235,16 @@ fn resolve_asset_paths(outcome: &mut LoadOutcome, project_path: &Path) {
         asset.offline = !asset.path.exists();
         if asset.offline {
             outcome.warnings.push(format!("media offline: {}", asset.path.display()));
+        }
+        if let Some(proxy) = &mut asset.proxy {
+            if let Some(dir) = dir.as_deref() {
+                if let Some(rel) = &proxy.relative_path {
+                    let candidate = dir.join(rel);
+                    if candidate.exists() {
+                        proxy.path = candidate;
+                    }
+                }
+            }
         }
     }
 }

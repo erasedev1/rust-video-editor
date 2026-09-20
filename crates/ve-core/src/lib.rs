@@ -30,7 +30,9 @@ pub mod source;
 pub mod track;
 
 pub use animation::{Animatable, Interpolation, Keyframe, Property};
-pub use asset::{AudioStreamInfo, MediaAsset, MediaInfo, VideoStreamInfo};
+pub use asset::{
+    AudioStreamInfo, MediaAsset, MediaInfo, PictureSource, ProxyMedia, VideoStreamInfo,
+};
 pub use blend::BlendMode;
 pub use clip::{Clip, Speed};
 pub use composition::{Composition, CompositionLayer, CompositionSettings};

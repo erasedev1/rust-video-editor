@@ -1091,3 +1091,59 @@ fn a_project_written_before_motion_blur_loads_with_it_off() {
         "the shutter comes back at the film convention"
     );
 }
+
+#[test]
+fn a_moved_project_folder_relinks_its_proxies_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let original_dir = dir.path().join("original");
+    fs::create_dir_all(original_dir.join("proxies")).unwrap();
+    let media = original_dir.join("movie.mp4");
+    fs::write(&media, b"media").unwrap();
+    let proxy = original_dir.join("proxies").join("movie.mov");
+    fs::write(&proxy, b"proxy").unwrap();
+
+    let mut project = sample_project(&media);
+    project.settings.use_proxies = true;
+    project.assets[0].proxy =
+        Some(ve_core::ProxyMedia::new(&proxy, ve_core::Size::new(640, 360)));
+    let path = original_dir.join("p.verge");
+    store::save(&project, &path).unwrap();
+
+    let moved_dir = dir.path().join("moved");
+    fs::rename(&original_dir, &moved_dir).unwrap();
+
+    let loaded = store::load(&moved_dir.join("p.verge")).unwrap();
+    let asset = &loaded.project.assets[0];
+    assert!(loaded.project.settings.use_proxies, "the switch is part of the project");
+
+    let source = asset.picture_source(Some(&moved_dir), true);
+    assert!(source.is_proxy, "the proxy moved with the project and should be found");
+    assert_eq!(source.path, moved_dir.join("proxies").join("movie.mov"));
+    assert_eq!(asset.proxy.as_ref().unwrap().size, ve_core::Size::new(640, 360));
+}
+
+#[test]
+fn a_project_whose_proxies_were_left_behind_opens_at_full_resolution() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("movie.mp4");
+    fs::write(&media, b"media").unwrap();
+    let proxy = dir.path().join("movie.proxy.mov");
+    fs::write(&proxy, b"proxy").unwrap();
+
+    let mut project = sample_project(&media);
+    project.settings.use_proxies = true;
+    project.assets[0].proxy =
+        Some(ve_core::ProxyMedia::new(&proxy, ve_core::Size::new(640, 360)));
+    let path = dir.path().join("p.verge");
+    store::save(&project, &path).unwrap();
+
+    // The user cleared their proxy directory between sessions.
+    fs::remove_file(&proxy).unwrap();
+
+    let loaded = store::load(&path).unwrap();
+    let asset = &loaded.project.assets[0];
+    assert!(!asset.offline, "losing a proxy must not take the footage offline");
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    assert!(asset.has_proxy(), "it is remembered, so rebuilding or restoring it works");
+    assert!(!asset.picture_source(Some(dir.path()), true).is_proxy);
+}

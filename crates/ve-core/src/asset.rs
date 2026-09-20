@@ -66,6 +66,56 @@ impl MediaInfo {
     }
 }
 
+/// A smaller stand-in for an asset's picture.
+///
+/// A proxy is a **picture, not a file**: the original's sound is what the mixer
+/// and the waveforms read whether or not one of these exists. That is why there
+/// is no sample rate or channel count here, and why generating one never has to
+/// re-encode audio or keep two sound tracks in step.
+///
+/// Stored with the same absolute-and-relative pair as the asset itself, so
+/// moving a project folder that carries its proxies alongside its media finds
+/// both again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProxyMedia {
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_path: Option<PathBuf>,
+    /// The size frames come out of the proxy at, which is what makes a proxy
+    /// worth having and what keeps its frames out of the full-resolution
+    /// cache entries.
+    pub size: Size,
+}
+
+impl ProxyMedia {
+    pub fn new(path: impl Into<PathBuf>, size: Size) -> Self {
+        ProxyMedia { path: path.into(), relative_path: None, size }
+    }
+
+    fn resolve_path(&self, project_dir: Option<&Path>) -> PathBuf {
+        if let (Some(dir), Some(rel)) = (project_dir, &self.relative_path) {
+            let candidate = dir.join(rel);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+        self.path.clone()
+    }
+}
+
+/// Which file the editor decodes an asset's picture from, and whether that file
+/// is a proxy.
+///
+/// Returned as one value rather than resolved at each call site because the
+/// rule has exactly one subtle case — a proxy whose file has gone — and two
+/// copies of it would eventually disagree about whether the editor and the
+/// cache were looking at the same picture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PictureSource {
+    pub path: PathBuf,
+    pub is_proxy: bool,
+}
+
 /// A reference to source media on disk.
 ///
 /// The asset never owns pixel or sample data: it is a handle plus the metadata
@@ -86,6 +136,13 @@ pub struct MediaAsset {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relative_path: Option<PathBuf>,
     pub info: MediaInfo,
+    /// A smaller stand-in for this asset's picture, built by the editor and
+    /// used in place of the original while proxies are switched on.
+    ///
+    /// Defaulted on read, so a project written before proxies existed opens
+    /// with none rather than needing a format version of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyMedia>,
     /// Set when the file could not be found on load. The project still opens;
     /// clips referencing it render as offline until it is relinked.
     #[serde(default, skip_serializing)]
@@ -99,13 +156,48 @@ impl MediaAsset {
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".to_string());
-        MediaAsset { id, name, path, relative_path: None, info, offline: false }
+        MediaAsset { id, name, path, relative_path: None, info, proxy: None, offline: false }
     }
 
     /// Records where this file sits relative to the project directory, if it
     /// sits under it at all.
+    ///
+    /// A proxy is relinked alongside its asset rather than separately: the two
+    /// travel together, and a proxy that kept an absolute path while its
+    /// original went relative would be the one file a moved project could not
+    /// find.
     pub fn relink_relative_to(&mut self, project_dir: &Path) {
         self.relative_path = pathdiff(&self.path, project_dir);
+        if let Some(proxy) = &mut self.proxy {
+            proxy.relative_path = pathdiff(&proxy.path, project_dir);
+        }
+    }
+
+    pub fn has_proxy(&self) -> bool {
+        self.proxy.is_some()
+    }
+
+    /// Which file to decode this asset's picture from.
+    ///
+    /// **A missing proxy is not a missing asset.** A proxy is a convenience the
+    /// editor built for itself, so one that has been deleted — a cleared cache
+    /// directory, a project moved without it — falls back to the original and
+    /// carries on at full resolution. Going offline over it would lose the
+    /// user's footage because the editor lost its own scratch file.
+    pub fn picture_source(
+        &self,
+        project_dir: Option<&Path>,
+        proxies_enabled: bool,
+    ) -> PictureSource {
+        if proxies_enabled {
+            if let Some(proxy) = &self.proxy {
+                let path = proxy.resolve_path(project_dir);
+                if path.exists() {
+                    return PictureSource { path, is_proxy: true };
+                }
+            }
+        }
+        PictureSource { path: self.resolve_path(project_dir), is_proxy: false }
     }
 
     /// Resolves the path to use when opening the file, preferring the relative

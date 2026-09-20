@@ -25,6 +25,18 @@ pub struct ProjectSettings {
     pub min_clip_frames: u32,
     #[serde(default = "default_autosave_seconds")]
     pub autosave_interval_seconds: u32,
+    /// Whether the editor decodes from proxies where an asset has one.
+    ///
+    /// A switch rather than a consequence of a proxy existing, because the
+    /// whole point of building one is to be able to turn it off and look at the
+    /// real picture — checking focus, checking a key — without throwing the
+    /// proxy away. It is stored with the project so that reopening a cut
+    /// resumes at the resolution it was being cut at.
+    ///
+    /// Only the **editor** reads this. An export always renders the originals;
+    /// see `ve_export::SourceFrames`.
+    #[serde(default)]
+    pub use_proxies: bool,
 }
 
 fn default_min_clip_frames() -> u32 {
@@ -40,6 +52,7 @@ impl Default for ProjectSettings {
             default_sequence: SequenceSettings::default(),
             min_clip_frames: default_min_clip_frames(),
             autosave_interval_seconds: default_autosave_seconds(),
+            use_proxies: false,
         }
     }
 }
