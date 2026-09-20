@@ -11,7 +11,16 @@ use crate::meter;
 use crate::state::EditorState;
 use crate::theme;
 
-pub fn show(ui: &mut Ui, state: &EditorState, levels: &AudioLevels, actions: &mut Vec<Action>) {
+/// `playhead` is where the transport is, which is the instant an animated
+/// property is read at: a field showing the static value underneath a curve
+/// would disagree with the picture beside it.
+pub fn show(
+    ui: &mut Ui,
+    state: &EditorState,
+    playhead: Ticks,
+    levels: &AudioLevels,
+    actions: &mut Vec<Action>,
+) {
     ui.label(RichText::new("INSPECTOR").small().color(theme::TEXT_FAINT));
     ui.separator();
 
@@ -73,16 +82,26 @@ pub fn show(ui: &mut Ui, state: &EditorState, levels: &AudioLevels, actions: &mu
             });
         });
 
+        // Animated properties are shown as they read *now*, which is also what
+        // an edit to one of them writes a keyframe for.
+        let local = clip.local_time_at(playhead);
+
         section(ui, "Transform", |ui| {
             let t = &clip.transform;
-            point_row(ui, "Position", t.position.value, t.position.is_animated(), |v| {
-                actions.push(Action::SetClipProperty {
-                    clip: clip_id,
-                    property: ClipProperty::Position,
-                    value: PropertyValue::Point(v),
-                });
-            });
-            point_row(ui, "Scale", t.scale.value, t.scale.is_animated(), |v| {
+            point_row(
+                ui,
+                "Position",
+                t.position.evaluate(local),
+                t.position.is_animated(),
+                |v| {
+                    actions.push(Action::SetClipProperty {
+                        clip: clip_id,
+                        property: ClipProperty::Position,
+                        value: PropertyValue::Point(v),
+                    });
+                },
+            );
+            point_row(ui, "Scale", t.scale.evaluate(local), t.scale.is_animated(), |v| {
                 actions.push(Action::SetClipProperty {
                     clip: clip_id,
                     property: ClipProperty::Scale,
@@ -92,7 +111,7 @@ pub fn show(ui: &mut Ui, state: &EditorState, levels: &AudioLevels, actions: &mu
             scalar_row(
                 ui,
                 "Rotation",
-                t.rotation.value,
+                t.rotation.evaluate(local),
                 t.rotation.is_animated(),
                 -3600.0..=3600.0,
                 0.5,
@@ -105,7 +124,7 @@ pub fn show(ui: &mut Ui, state: &EditorState, levels: &AudioLevels, actions: &mu
                     });
                 },
             );
-            point_row(ui, "Anchor", t.anchor.value, t.anchor.is_animated(), |v| {
+            point_row(ui, "Anchor", t.anchor.evaluate(local), t.anchor.is_animated(), |v| {
                 actions.push(Action::SetClipProperty {
                     clip: clip_id,
                     property: ClipProperty::Anchor,
@@ -115,7 +134,7 @@ pub fn show(ui: &mut Ui, state: &EditorState, levels: &AudioLevels, actions: &mu
             scalar_row(
                 ui,
                 "Opacity",
-                t.opacity.value,
+                t.opacity.evaluate(local),
                 t.opacity.is_animated(),
                 0.0..=1.0,
                 0.01,
@@ -165,7 +184,7 @@ pub fn show(ui: &mut Ui, state: &EditorState, levels: &AudioLevels, actions: &mu
             scalar_row(
                 ui,
                 "Volume",
-                clip.audio.volume.value,
+                clip.audio.volume.evaluate(local),
                 clip.audio.volume.is_animated(),
                 0.0..=4.0,
                 0.01,
@@ -181,7 +200,7 @@ pub fn show(ui: &mut Ui, state: &EditorState, levels: &AudioLevels, actions: &mu
             scalar_row(
                 ui,
                 "Pan",
-                clip.audio.pan.value,
+                clip.audio.pan.evaluate(local),
                 clip.audio.pan.is_animated(),
                 -1.0..=1.0,
                 0.01,

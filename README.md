@@ -60,6 +60,18 @@ and a track strip with its level, pan and meter.
 
 ![Fades, a crossfade and the track strip](docs/images/audio.png)
 
+![The animation editor under the timeline](docs/images/animation.png)
+
+Animation: the selected clip's properties as keyframe rows on the timeline's own
+time axis, two keyframes in hand with the bar that scales the span between them,
+and the clip itself smeared across the shutter in the preview.
+
+![The graph editor](docs/images/curves.png)
+
+The same keyframes as curves — one per channel, drawn by evaluating the property
+rather than by a second opinion about easing, with handles on the selected
+points.
+
 The development overlay reports what the frame actually cost, broken down by
 stage, so a regression is visible while editing rather than weeks later:
 

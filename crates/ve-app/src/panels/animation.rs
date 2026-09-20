@@ -319,19 +319,30 @@ fn draw_sheet(
             painter.text(
                 clear_button.center(),
                 Align2::CENTER_CENTER,
-                "✕",
+                // The multiplication sign rather than a cross: the proportional
+                // font the painter uses has it, and a missing glyph draws as a
+                // hollow box that reads as another keyframe.
+                "×",
                 FontId::proportional(9.5),
                 theme::TEXT_FAINT,
             );
             value_right = clear_button.left() - 4.0;
         }
-        painter.text(
-            Pos2::new(value_right, rect.center().y),
-            Align2::RIGHT_CENTER,
-            value_text(view.evaluate(local)),
-            FontId::monospace(9.0),
-            theme::TEXT_FAINT,
-        );
+        // Clipped to what is left of the row after the name, so a long value is
+        // cut rather than drawn through the thing it belongs to.
+        let name_width = property.label().chars().count() as f32 * 5.6;
+        painter
+            .with_clip_rect(Rect::from_min_max(
+                Pos2::new(rect.left() + 26.0 + name_width, rect.top()),
+                Pos2::new(value_right, rect.bottom()),
+            ))
+            .text(
+                Pos2::new(value_right, rect.center().y),
+                Align2::RIGHT_CENTER,
+                value_text(view.evaluate(local)),
+                FontId::monospace(9.0),
+                theme::TEXT_FAINT,
+            );
 
         // The keyframes themselves, culled to the visible time range.
         for kf in view.keyframes() {
@@ -445,10 +456,32 @@ fn draw_diamond(painter: &egui::Painter, centre: Pos2, r: f32, fill: Color32, st
 }
 
 /// A value, short enough to sit in a row header.
+///
+/// Large numbers drop their decimals rather than their digits: a position of
+/// 1020.3 is a position of 1020, and the three characters that saves are the
+/// difference between the value fitting beside the property's name and running
+/// into it.
 pub fn value_text(value: PropertyValue) -> String {
+    fn scalar(v: f64) -> String {
+        match v.abs() {
+            x if x >= 100.0 => format!("{v:.0}"),
+            x if x >= 10.0 => format!("{v:.1}"),
+            _ => format!("{v:.3}"),
+        }
+    }
+    // A point is two numbers in the space one gets, so it is rounded harder
+    // still: the row says roughly where the thing is, and the inspector beside
+    // it says exactly.
+    fn coarse(v: f64) -> String {
+        if v.abs() >= 10.0 {
+            format!("{v:.0}")
+        } else {
+            format!("{v:.1}")
+        }
+    }
     match value {
-        PropertyValue::Scalar(v) => format!("{v:.3}"),
-        PropertyValue::Point(p) => format!("{:.1}, {:.1}", p.x, p.y),
+        PropertyValue::Scalar(v) => scalar(v),
+        PropertyValue::Point(p) => format!("{}, {}", coarse(p.x), coarse(p.y)),
         PropertyValue::Color(c) => format!("{:.2} {:.2} {:.2}", c.r, c.g, c.b),
     }
 }

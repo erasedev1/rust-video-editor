@@ -627,7 +627,7 @@ impl eframe::App for VergeApp {
         if self.state.animation.open {
             egui::Panel::bottom("animation")
                 .resizable(true)
-                .default_size(168.0)
+                .default_size(204.0)
                 .min_size(70.0)
                 .show(root, |ui| {
                     panels::animation::show(
@@ -666,7 +666,13 @@ impl eframe::App for VergeApp {
             .default_size(248.0)
             .min_size(180.0)
             .show(root, |ui| {
-                panels::inspector::show(ui, &self.state, &levels, &mut pending_actions);
+                panels::inspector::show(
+                    ui,
+                    &self.state,
+                    position,
+                    &levels,
+                    &mut pending_actions,
+                );
             });
 
         // The darkest surface surrounds the picture, so the preview is judged

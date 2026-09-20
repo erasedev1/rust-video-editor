@@ -44,9 +44,10 @@ const PADDING_PX: f32 = 14.0;
 /// at any zoom while costing a few hundred evaluations rather than a few
 /// thousand.
 const SAMPLE_PX: f32 = 3.0;
-/// How long a bezier handle's arm is drawn, in pixels, when its segment runs
-/// off screen.
+/// Radius of a bezier handle.
 const HANDLE_R: f32 = 3.5;
+/// The strip along the top that says which curve is which.
+const LEGEND_H: f32 = 13.0;
 
 /// One property's place in the plot: which vertical span it is mapped into, and
 /// what range of values that span covers.
@@ -82,8 +83,10 @@ pub fn draw(
     rows: &[ClipProperty],
     lanes_left: f32,
 ) -> Vec<Curve> {
+    // The legend takes the top strip, so a curve at its extreme is not drawn
+    // through the names of the things it is being compared with.
     let plot = Rect::from_min_max(
-        Pos2::new(area.left(), area.top() + PADDING_PX),
+        Pos2::new(area.left(), area.top() + LEGEND_H + PADDING_PX),
         Pos2::new(area.right(), area.bottom() - PADDING_PX),
     );
     if plot.height() <= 1.0 {
@@ -121,7 +124,7 @@ pub fn draw(
         }
     }
 
-    for (index, curve) in curves.iter().enumerate() {
+    for curve in &curves {
         let Some(view) = property_ref(clip, &curve.property) else { continue };
         let keyframes = view.keyframes();
         if keyframes.is_empty() {
@@ -193,35 +196,69 @@ pub fn draw(
                     }
                 }
             }
-
-            if channels > 1 {
-                painter.text(
-                    Pos2::new(
-                        lanes_left + 6.0 + index as f32 * 60.0 + channel as f32 * 16.0,
-                        curve.plot.top() - PADDING_PX + 2.0,
-                    ),
-                    Align2::LEFT_TOP,
-                    keyframes[0].value.channel_label(channel),
-                    FontId::monospace(9.0),
-                    colour,
-                );
-            }
         }
+    }
 
+    draw_legend(painter, area, state, clip, &curves, lanes_left);
+    curves
+}
+
+/// Which curve is which, along the top of the plot.
+///
+/// One line rather than a label per curve at its own height: the curves are
+/// each normalised to their own range and cross constantly, so a label anchored
+/// to a line would move every time the value did.
+fn draw_legend(
+    painter: &egui::Painter,
+    area: Rect,
+    state: &EditorState,
+    clip: &Clip,
+    curves: &[Curve],
+    lanes_left: f32,
+) {
+    let mut x = lanes_left + 6.0;
+    let y = area.top() + 2.0;
+    for curve in curves {
+        let Some(view) = property_ref(clip, &curve.property) else { continue };
+        let Some(first) = view.keyframes().first().map(|k| k.value) else { continue };
+
+        let label = curve.property.label();
         painter.text(
-            Pos2::new(lanes_left + 6.0 + index as f32 * 60.0, curve.plot.bottom() + 2.0),
+            Pos2::new(x, y),
             Align2::LEFT_TOP,
-            curve.property.label(),
+            label,
             FontId::proportional(9.5),
             if state.animation.focus.as_ref() == Some(&curve.property) {
                 theme::ACCENT
             } else {
-                theme::TEXT_FAINT
+                theme::TEXT_DIM
             },
         );
-    }
+        // Measured by the same rule the timeline elides labels with, rather
+        // than by laying the text out twice.
+        x += label.chars().count() as f32 * 5.2 + 6.0;
 
-    curves
+        for channel in 0..first.channel_count() {
+            let colour = channel_colour(channel);
+            painter.circle_filled(Pos2::new(x + 3.0, y + 5.0), 3.0, colour);
+            x += 8.0;
+            let text = first.channel_label(channel);
+            if !text.is_empty() {
+                painter.text(
+                    Pos2::new(x, y),
+                    Align2::LEFT_TOP,
+                    text,
+                    FontId::monospace(9.0),
+                    colour,
+                );
+                x += 7.0;
+            }
+        }
+        x += 12.0;
+        if x > area.right() - 40.0 {
+            return;
+        }
+    }
 }
 
 /// Where a segment's two bezier handles are drawn, as `(outgoing, position)`.
