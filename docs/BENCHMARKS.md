@@ -11,6 +11,7 @@ cargo bench -p ve-project --bench project_io  # save and load
 cargo bench -p ve-render --bench compositing  # GPU, including effect passes
 cargo bench -p ve-media  --bench waveforms    # audio analysis and display
 cargo bench -p ve-engine --bench audio        # mixing, metering and fades
+cargo bench -p ve-export --bench export       # encoding, readback and a whole second
 ```
 
 ## The machine these were taken on
@@ -403,6 +404,50 @@ The reason to record it anyway is that the shape would change if fades ever move
 onto the per-sample path — a per-sample envelope at 48 kHz would be 22.6 ns ×
 48,000 = 1.1 ms a second per clip, which is no longer nothing. They are not there,
 and this table is why they should not go there.
+
+## Export
+
+`cargo bench -p ve-export --bench export`, on the same container. The encoder is
+libx264 at its `medium` preset; the readback figures are a software rasteriser's
+and are here for the shape rather than the value.
+
+### One frame, in the parts this suite adds
+
+| Stage                       |     360p |    1080p |
+|-----------------------------|---------:|---------:|
+| Encode (swscale + libx264)  |  1.26 ms | 10.73 ms |
+| Read back from the GPU      |   223 µs |  1.68 ms |
+
+Those are the two stages an export has that a preview does not. The third —
+compositing — is the same call the preview makes and is measured in the [GPU
+table](#gpu-compositing) above, where one 1080p layer costs 5.51 ms on this
+container's software rasteriser.
+
+The encode is measured against deliberately noisy pictures, which is the worst
+case: a picture with detail in every block is what an encoder spends its time
+on, and real footage is easier.
+
+### A whole second, end to end
+
+Thirty frames of a real timeline — decode, composite, read back, encode, mux:
+
+| Canvas |    Time | Per frame | Against real time |
+|--------|--------:|----------:|------------------:|
+| 360p   |  154 ms |   5.14 ms |             6.5×  |
+| 1080p  |  818 ms |   27.3 ms |             1.2×  |
+
+So an export of a 1080p sequence on **four cores with no GPU** runs at about
+real time: a ten-minute programme takes a little over ten minutes. That is the
+honest figure for the worst hardware this is likely to meet.
+
+What the split says about where to spend effort next. At 1080p the encode is
+10.7 ms of that 27.3 — **39% of the frame** — and the two stages beside it,
+compositing and readback, are the two that a real GPU makes small. On any
+machine with hardware worth the name the encoder is therefore not one cost
+among several but the cost, and it is the one stage that is not ours: libx264
+is already the fastest thing in its class at this quality. That is the argument
+for the hardware encoders listed in Phase 7 — not that software encoding is
+slow, but that everything else has somewhere to go and it does not.
 
 ## Live measurements
 

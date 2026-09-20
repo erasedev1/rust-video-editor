@@ -52,6 +52,9 @@ The first vertical slice is complete and tested end to end:
 - Blend modes — normal, add, multiply and screen — as pipeline variants
 - A render cache keyed on the composition itself: an unchanged picture is never
   drawn twice, and changing one clip only recomposites the instants it appears in
+- Export the sequence to a file — H.264, H.265 or ProRes, with AAC or PCM
+  sound, at the canvas's size or a fraction of it, over the whole sequence or a
+  range — rendered on a background thread while editing carries on
 - Undo and redo on every edit, with drags collapsed into single steps
 - Save and reopen projects, with autosave and crash recovery
 - A development performance overlay reporting real measurements
@@ -87,6 +90,14 @@ The chain is the pipeline, so the list is the order it runs in and the arrows
 change it. Every control is built from what the effect *declares* it takes, so
 an effect added later — or by a plugin — arrives with working controls and
 keyframes for nothing.
+
+![The export dialogue](docs/images/export.png)
+
+Export: what to write and where, with the file size it will come to. The render
+runs on its own thread from a snapshot of the project, so the editor keeps
+playing and keeps being edited while it works — and says how far it has got:
+
+![An export in progress](docs/images/export-progress.png)
 
 The development overlay reports what the frame actually cost, broken down by
 stage, so a regression is visible while editing rather than weeks later:
@@ -230,7 +241,7 @@ says so in the performance overlay, and keeps cutting.
 ## Testing
 
 ```sh
-cargo test --workspace     # 633 tests
+cargo test --workspace     # 749 tests
 cargo bench                # measured, not estimated
 ```
 
@@ -242,6 +253,14 @@ Media tests run against committed fixtures in `testdata/`, where each video
 frame is a solid colour encoding its own frame index. That lets a test assert
 *which* frame a seek returned rather than merely that one came back — which is
 how three real decoder bugs were caught.
+
+The export tests encode real files and then decode them again, asserting frame
+by frame that what came out is the frame the timeline showed, at the right size,
+over the right range, with the sound still in step at 29.97. That is how the
+first real export bug was found: packets written without a duration left every
+file claiming a frame rate slightly too high, so reading one back landed
+between frames — which a test that only checked "a file was written" would
+never have noticed.
 
 ## Documentation
 
@@ -262,6 +281,7 @@ how three real decoder bugs were caught.
 | `ve-media`   | FFmpeg decoding, frame cache, decode scheduling           |
 | `ve-render`  | wgpu compositor                                           |
 | `ve-engine`  | Playback clock, composition evaluation, audio mixing      |
+| `ve-export`  | Offline rendering, encoding and muxing                    |
 | `ve-metrics` | Performance instrumentation                               |
 | `ve-app`     | The editor shell                                          |
 

@@ -20,12 +20,20 @@ attached to the clock.
 ```
 ve-app  ──────────────┬──────────┬──────────┬───────────┐
    │                  │          │          │           │
-ve-engine ──┬─────────┤     ve-command  ve-project  ve-metrics
+ve-export ──┬─────────┤     ve-command  ve-project  ve-metrics
+   │        │         │          │          │
+ve-engine   │         │          │          │
    │        │         │          │          │
 ve-media  ve-render   │       ve-core ──────┘
    │        │         │          │
    └────────┴─────────┴──────► ve-time
 ```
+
+`ve-export` sits where it does because it is the one thing that needs both
+halves: the engine to say what an instant contains, and the renderer to draw it.
+That is also why the plan-to-picture walk lives there rather than in either —
+and why the preview, which is above it, calls into it rather than keeping a
+second copy.
 
 Dependencies point one way. `ve-time` depends on nothing but `serde`;
 `ve-core` is pure data with no I/O, no threads and no GPU. That is what makes
@@ -421,6 +429,12 @@ Sequences and compositions carry the setting independently, since a composition
 renders to its own target. Pre-composing inherits the sequence's, because
 pre-composing is meant to be a reorganisation rather than an edit.
 
+That is about how colour is *combined*. Which matrix converts between the YUV a
+file stores and the RGB everything above the decoder works in is a separate
+question, and one both the decoder and the exporter now answer explicitly rather
+than leaving to swscale's default — see [Colour is said out
+loud](#colour-is-said-out-loud).
+
 ### Motion blur
 
 A frame is not an instant. A shutter is open for part of the frame interval, and
@@ -635,6 +649,109 @@ The levels are summaries of the base grid rather than a second analysis of the
 audio, so they cannot disagree with it: a transient in the base grid is in the
 envelope of every level above it. See [BENCHMARKS.md](BENCHMARKS.md#waveforms).
 
+## Export
+
+An export is **the editor, run with nobody watching**. The same
+`evaluate` the preview calls resolves each instant, the same `FrameComposer`
+draws it, and the same `AudioRenderer` mixes the sound. What differs is only
+what the editor is allowed to do about time:
+
+| | Preview | Export |
+|---|---|---|
+| A frame that is not decoded yet | is dropped | is waited for |
+| A frame decoded before | may be a cache hit | is decoded in order |
+| The clock | drives the picture | is the frame index |
+
+Playback is a real-time system with a deadline it must not miss; an export is a
+batch job with an answer it must not get wrong. Everything below follows from
+that one difference.
+
+### One compositor, not two
+
+The walk over a plan's nodes — effects, then motion blur, then the draw, with
+children composited before their parents — is a single piece of code that the
+preview and the exporter both call. It could have been written twice, and the
+second copy would have been easier in the moment. It would also have drifted:
+a blend mode fixed in one and not the other, a chain order changed on one side,
+an averaged shutter that rounds differently. The place that failure would be
+discovered is the delivered file, which is the worst possible place.
+
+So `Preview` keeps what is genuinely about being on screen — the texture egui
+draws from, the blit into it, the handle registration — and nothing else.
+
+### Decoding is the opposite of playback's
+
+Playback's decode service is built around cancellation: a frame the user has
+scrolled past is worthless, so a new request overwrites the waiting one and a
+frame that is not ready is reported as dropped. None of that is right for an
+export, where the frame being asked for *is* the frame being written. So an
+export opens an ordinary blocking decoder per asset and walks it forward in
+timeline order, which is also the order a decoder is fastest at. A layer whose
+media will not decode is counted and reported rather than passed over, because a
+delivery quietly missing a layer is worse than an export that says it went
+wrong.
+
+### Sound is counted in samples, not in frames
+
+How much audio belongs to one video frame is not a constant: 48000 does not
+divide 30000/1001. So each frame's block is the difference between two
+**absolute** sample indices from the start of the range, never a fixed count
+per frame. Over an hour that is the difference between sound that stays in sync
+and sound that ends up a frame and a half late — and it is asserted by a test
+that exports at 29.97 and compares the two streams' durations.
+
+The same reasoning governs presentation times inside the encoder: a video
+frame's is its **index** in a time base of one frame, and an audio packet's is
+the running sample count. Neither is a sum of durations, for exactly the reason
+the timeline is not.
+
+### Where the picture is composited
+
+At the **sequence's own resolution**, then scaled on the way into the encoder.
+A half-size review copy is therefore the picture the editor showed, rather than
+a different composite with smaller masks, softer blurs and different rounding.
+It costs one swscale pass, and only when the sizes differ.
+
+### Colour is said out loud
+
+swscale's default conversion matrix is BT.601 whatever the picture's size, which
+is right for standard definition and wrong for everything HD — by more than
+twenty 8-bit levels on saturated colour. Both directions now state what they
+mean, from one table in `ve_media::colour`:
+
+- the **exporter** converts with the matrix it tags the file with — 709 from 720
+  lines up, 601 below — and tags the primaries, the transfer curve and the
+  limited range alongside it;
+- the **decoder** converts with the matrix the file *declares*, falling back on
+  its size the way a player does when a file says nothing, which most do.
+
+So importing Verge's own export gets back what it put in, which a test asserts
+frame by frame against fixtures whose colour identifies the frame.
+
+### Cancelling deletes the file
+
+A part-written MP4 has no index — the muxer writes that last — so what a
+cancelled export would leave behind is a file that looks like a deliverable and
+plays as nothing. It is removed instead. The same holds when the editor quits
+mid-export: dropping the job cancels it and waits for the thread, so the cleanup
+happens rather than being left for later.
+
+### A thread, a snapshot, and one export at a time
+
+The render runs on its own thread and reports progress through a channel the
+interface drains once a repaint. It works from an `Arc<Project>` taken when the
+button was pressed — one clone of the edit model, no media — so editing
+continues underneath it and what is written is what was on screen when it
+started.
+
+Only one export runs at a time. Two would compete for the same decoders and the
+same GPU and finish later than running them one after the other.
+
+The device is the **interface's own**. A second device would double the VRAM the
+editor holds and upload every frame twice; sharing costs an export's submissions
+queueing behind the preview's, which is the right way round — the person
+watching the editor is waiting on the preview, not on the render.
+
 ## The project file
 
 See [PROJECT_FORMAT.md](PROJECT_FORMAT.md). In short: pretty-printed JSON behind
@@ -690,8 +807,14 @@ Honest gaps, not oversights:
   a change to the plan's shape rather than another effect.
 - **No effect presets, copying or pasting between clips.** A chain is built per
   clip.
-- **No export.** The renderer can already read frames back, which is the hard
-  part; the encoder and muxer are not written.
+- **No alpha export.** Every delivery codec here subsamples chroma and drops
+  the alpha channel. Keeping it needs ProRes 4444 and a compositing path that
+  does not assume an opaque background.
+- **No hardware encoders.** NVENC, Quick Sync and VideoToolbox are each a
+  different device to feed, and none of them can be exercised in the container
+  this was developed in. Claiming them would be claiming something unverified.
+- **No image-sequence or audio-only export.** Both are a container away rather
+  than a feature, and neither is what anyone reaches for first.
 - **No thumbnails, proxies or bins.** Waveforms exist; the filmstrip on a video
   clip does not, and would be the render cache's problem rather than a new one.
 - **Waveforms are a summary, not sample data.** The grid is five milliseconds,

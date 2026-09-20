@@ -220,8 +220,60 @@ blur's cost stops growing with its radius.
 
 ## Phase 7 — Professional editing
 
-Proxies, multicam, captions, advanced audio, colour grading, hardware encoders,
-and export worth the name.
+- Export: render a sequence to a file ✅ — H.264, H.265 and ProRes, with sound
+- Proxies, multicam, captions, advanced audio, colour grading
+- Hardware encoders
+
+**Export is done; the rest of the phase is not.** An editor that cannot produce
+a file is a demonstration rather than a tool, so it came first.
+
+What an export is, is the editor run with nobody watching. The same `evaluate`
+the preview calls resolves each instant; the same compositor draws it — one
+piece of code, shared, because an export that composited by a second route would
+eventually disagree with what the editor showed, and the disagreement would be
+discovered in the delivered file. The same mixer produces the sound. Only the
+rules about *time* differ, and only in the two ways that matter:
+
+| | Preview | Export |
+|---|---|---|
+| A frame that is not decoded yet | is dropped | is waited for |
+| The clock | drives the picture | is the frame index |
+
+Playback is a real-time system with a deadline it must not miss. An export is a
+batch job with an answer it must not get wrong.
+
+Three decisions are worth stating. **Sound is counted in samples, not in
+frames**: how much audio belongs to one video frame is not a constant at 29.97,
+so each block is the difference between two absolute sample indices — over an
+hour that is the difference between sync and a frame and a half of drift.
+**Compositing happens at the sequence's own resolution** and the picture is
+scaled on the way into the encoder, so a half-size review copy is the picture
+the editor showed rather than a different composite with smaller masks and
+softer blurs. And **a cancelled export deletes what it had written**, because a
+part-written MP4 has no index and would sit there looking like a deliverable.
+
+The exporter runs on its own thread and reports progress; the editor keeps
+running — keeps playing, keeps being edited — while it works, from a snapshot of
+the project taken when the button was pressed.
+
+Colour is now said out loud rather than assumed. swscale's default matrix is
+BT.601 whatever the picture's size, which is wrong for anything HD by more than
+twenty 8-bit levels on saturated colour. The exporter converts with the matrix
+it tags the file with — 709 from 720 lines up, 601 below — and the *decoder*
+reads a file with the matrix that file declares, falling back on its size the way
+a player does. So importing Verge's own export gets back what it put in, which a
+test asserts frame by frame.
+
+What is **not** here. There is no alpha export: every codec above subsamples
+chroma and drops the alpha channel, and keeping it needs ProRes 4444 and a
+compositing path that does not assume an opaque background. There are no
+hardware encoders — NVENC, Quick Sync, VideoToolbox are each a different device
+to feed and none of them can be tested in the container this was developed in,
+so claiming them would be claiming something unverified. And there is no
+image-sequence or audio-only output, both of which are a container away rather
+than a feature.
+
+See [BENCHMARKS.md](BENCHMARKS.md#export) for what a written frame costs.
 
 ## Phase 8 — Motion graphics
 
