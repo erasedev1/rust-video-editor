@@ -68,11 +68,16 @@ impl VergeApp {
         let waveforms = Arc::new(WaveformService::new(WAVEFORM_CACHE_MB, metrics.clone()));
 
         let scratch = std::env::temp_dir().join("verge-autosave");
-        let state = EditorState::new(Project::with_default_sequence("Untitled"), scratch);
+        let mut state = EditorState::new(Project::with_default_sequence("Untitled"), scratch);
+        state.export.metrics = metrics.clone();
 
         // Share the interface's device rather than creating a second one, so a
         // decoded frame is uploaded once and both the compositor and the UI
-        // draw from the same texture.
+        // draw from the same texture. Exports render on it too: a device of
+        // their own would double the VRAM the editor holds and upload every
+        // frame twice, and sharing only costs an export's submissions queueing
+        // behind the preview's — which is the right way round, since the person
+        // watching the editor is waiting on the preview and not on the render.
         let (preview, adapter_name, software_gpu) = match cc.wgpu_render_state.as_ref() {
             Some(render_state) => {
                 let size = state
@@ -82,6 +87,14 @@ impl VergeApp {
                 let info = render_state.adapter.get_info();
                 let software = matches!(info.device_type, wgpu::DeviceType::Cpu);
                 let name = format!("{} ({:?})", info.name, info.backend);
+                // `Device` and `Queue` are themselves handles, so the `Arc`
+                // here matches the shape `GpuContext` keeps for a device it
+                // created rather than sharing anything twice.
+                state.export.gpu = Some(ve_render::GpuContext::from_parts(
+                    Arc::new(render_state.device.clone()),
+                    Arc::new(render_state.queue.clone()),
+                    info.clone(),
+                ));
                 (Some(Preview::new(render_state, size, metrics.clone())), name, software)
             }
             None => {
@@ -255,6 +268,11 @@ impl VergeApp {
                         if let Some(paths) = crate::dialogs::pick_media_files() {
                             actions_out.push(Action::ImportMedia(paths));
                         }
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Export…    Ctrl+E").clicked() {
+                        actions_out.push(Action::OpenExportDialog);
                         ui.close();
                     }
                     ui.separator();
@@ -572,6 +590,48 @@ impl VergeApp {
         self.show_shortcuts = open;
     }
 
+    /// Takes whatever the running export has said and reports it.
+    ///
+    /// The job is dropped as soon as it has finished, which joins its thread:
+    /// an export that was cancelled has a file to clean up, and the cleanup
+    /// happens on the way out rather than being left to the next quit.
+    fn poll_export(&mut self) {
+        let Some(job) = self.state.export.job.as_mut() else { return };
+        let events = job.poll();
+        let mut done = false;
+        for event in events {
+            match event {
+                ve_export::ExportEvent::Progress(_) => {}
+                ve_export::ExportEvent::Finished(report) => {
+                    let summary = report.summary();
+                    log::info!("{summary}");
+                    self.state.warnings.extend(report.problems.iter().cloned());
+                    let level = if report.missing_frames > 0 || report.clipped_samples > 0 {
+                        Status::warning(summary.clone())
+                    } else {
+                        Status::info(summary.clone())
+                    };
+                    self.state.set_status(level);
+                    self.state.export.last = Some(summary);
+                    done = true;
+                }
+                ve_export::ExportEvent::Failed(why) => {
+                    self.state.set_status(Status::error(format!("export failed: {why}")));
+                    self.state.export.last = Some(format!("failed: {why}"));
+                    done = true;
+                }
+                ve_export::ExportEvent::Cancelled => {
+                    self.state.set_status(Status::info("export cancelled"));
+                    self.state.export.last = Some("cancelled".to_string());
+                    done = true;
+                }
+            }
+        }
+        if done {
+            self.state.export.job = None;
+        }
+    }
+
     /// Writes an autosave when one is due.
     fn maybe_autosave(&mut self) {
         if !self.state.autosave.should_save() {
@@ -703,6 +763,7 @@ impl eframe::App for VergeApp {
                 );
             });
 
+        panels::export::show(&ctx, &self.state, &mut pending_actions);
         self.shortcuts_window(&ctx);
 
         if self.state.show_performance_overlay {
@@ -749,6 +810,7 @@ impl eframe::App for VergeApp {
         }
 
         // 5. Housekeeping.
+        self.poll_export();
         self.maybe_autosave();
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.state.window_title()));
 
@@ -771,6 +833,11 @@ impl eframe::App for VergeApp {
         // keeps an idle editor off the CPU entirely.
         if playing || pending > 0 || waveform_progress {
             ctx.request_repaint();
+        } else if self.state.export.is_running() {
+            // An export reports about ten times a second and nothing else is
+            // happening, so this is the one case where repainting on a timer
+            // beats repainting continuously.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 

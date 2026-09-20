@@ -128,6 +128,9 @@ pub fn collect(ctx: &egui::Context, timeline_width: f32) -> Vec<Action> {
         if i.consume_key(ctrl, Key::N) {
             actions.push(Action::NewProject);
         }
+        if i.consume_key(ctrl, Key::E) {
+            actions.push(Action::OpenExportDialog);
+        }
 
         if i.consume_key(plain, Key::Equals) || i.consume_key(plain, Key::Plus) {
             actions.push(Action::ZoomIn);
@@ -175,5 +178,6 @@ pub const BINDINGS: &[Binding] = &[
     Binding { label: "New project", keys: "Ctrl + N" },
     Binding { label: "Save project", keys: "Ctrl + S" },
     Binding { label: "Import media", keys: "Ctrl + I" },
+    Binding { label: "Export…", keys: "Ctrl + E" },
     Binding { label: "Performance overlay", keys: "Ctrl + Shift + P" },
 ];

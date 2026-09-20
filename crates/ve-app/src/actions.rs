@@ -39,6 +39,19 @@ pub enum Action {
     SaveProject,
     SaveProjectAs(PathBuf),
     ImportMedia(Vec<PathBuf>),
+    // Export. The dialogue is state rather than a modal loop, so the editor
+    // keeps running — and keeps playing — while it is open.
+    OpenExportDialog,
+    CloseExportDialog,
+    /// What the dialogue is now showing. One action for the whole value rather
+    /// than one per control, because the settings are a single thing and the
+    /// dialogue is a view of it.
+    SetExportSettings(Box<ve_export::ExportSettings>),
+    /// Starts rendering the active sequence to a file. Carries the whole
+    /// request, so an export can be started from a test, a script or a future
+    /// command line without the dialogue existing at all.
+    StartExport(Box<ve_export::ExportSettings>),
+    CancelExport,
 
     // Edit
     Undo,
@@ -369,6 +382,60 @@ pub fn dispatch(
                 )));
             }
         }
+
+        Action::OpenExportDialog => {
+            state.export.prepare(&state.project, state.path.as_ref());
+            if state.export.settings.is_none() {
+                state.set_status(Status::error("there is no sequence to export"));
+                return;
+            }
+            state.export.open = true;
+        }
+
+        Action::CloseExportDialog => state.export.open = false,
+
+        Action::SetExportSettings(settings) => state.export.settings = Some(*settings),
+
+        Action::StartExport(settings) => {
+            if state.export.is_running() {
+                state.set_status(Status::warning("an export is already running"));
+                return;
+            }
+            if let Err(e) = settings.validate() {
+                state.set_status(Status::error(e.to_string()));
+                return;
+            }
+            let Some(gpu) = state.export.gpu.clone() else {
+                state.set_status(Status::error(
+                    "there is no GPU device to render an export with",
+                ));
+                return;
+            };
+            // A snapshot of the project as it is now: editing goes on while the
+            // export runs, and what is written is what was on screen when the
+            // button was pressed.
+            let project = std::sync::Arc::new(state.project.clone());
+            let settings = *settings;
+            state.export.last = None;
+            state
+                .set_status(Status::info(format!("exporting to {}…", settings.path.display())));
+            state.export.job = Some(ve_export::ExportJob::start(
+                project,
+                sequence_id,
+                settings.clone(),
+                gpu,
+                state.export.metrics.clone(),
+            ));
+            state.export.settings = Some(settings);
+        }
+
+        Action::CancelExport => match &state.export.job {
+            Some(job) => {
+                job.cancel();
+                state.set_status(Status::info("stopping the export…"));
+            }
+            None => state.set_status(Status::warning("no export is running")),
+        },
 
         Action::Undo => match state.history.undo(&mut state.project) {
             Ok(name) => {

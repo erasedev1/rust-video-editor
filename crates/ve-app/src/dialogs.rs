@@ -21,6 +21,36 @@ pub fn pick_media_files() -> Option<Vec<PathBuf>> {
         .pick_files()
 }
 
+/// Extensions offered in the export dialogue's file picker.
+const EXPORT_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv"];
+
+/// Where an export should be written, starting from where it would go anyway.
+///
+/// The suggested name and directory come from the settings the dialogue
+/// already holds, so choosing a file is a correction rather than a form to
+/// fill in.
+pub fn pick_export_file(suggested: &std::path::Path) -> Option<PathBuf> {
+    let mut dialog =
+        rfd::FileDialog::new().add_filter("Video", EXPORT_EXTENSIONS).set_title("Export");
+    if let Some(name) = suggested.file_name().and_then(|n| n.to_str()) {
+        dialog = dialog.set_file_name(name);
+    }
+    if let Some(parent) = suggested.parent() {
+        if parent.is_dir() {
+            dialog = dialog.set_directory(parent);
+        }
+    }
+    let path = dialog.save_file()?;
+    // A file with no extension would have no container, and the export would
+    // refuse it; carrying the one already chosen over is what the user meant.
+    Some(match path.extension() {
+        Some(_) => path,
+        None => {
+            path.with_extension(suggested.extension().and_then(|e| e.to_str()).unwrap_or("mp4"))
+        }
+    })
+}
+
 pub fn pick_project_to_open() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("Verge project", &[ve_project::PROJECT_EXTENSION])

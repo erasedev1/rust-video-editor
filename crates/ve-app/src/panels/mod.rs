@@ -6,6 +6,7 @@
 
 pub mod animation;
 pub mod curves;
+pub mod export;
 pub mod inspector;
 pub mod overlay;
 pub mod preview_panel;

@@ -6,7 +6,10 @@ use std::time::Duration;
 use ve_command::{ClipProperty, History, KeyframePoint};
 use ve_core::{AssetId, Clip, ClipId, CompositionId, LayerId, Project, SequenceId, TrackId};
 use ve_engine::{Timebase, Viewing};
+use ve_export::{ExportJob, ExportSettings};
+use ve_metrics::Metrics;
 use ve_project::Autosave;
+use ve_render::GpuContext;
 use ve_time::Ticks;
 
 /// What the user currently has selected.
@@ -589,6 +592,66 @@ impl Status {
     }
 }
 
+/// The export dialogue and whatever export is running.
+///
+/// The GPU context lives here rather than in the application shell because
+/// starting an export is an [`crate::actions::Action`] like every other
+/// operation, and `dispatch` has the state and nothing else. A test can put a
+/// headless device in it and export without a window.
+#[derive(Default)]
+pub struct ExportState {
+    /// Whether the dialogue is on screen.
+    pub open: bool,
+    /// What the dialogue is editing. Kept after it closes, so exporting a
+    /// second time starts from the settings used for the first rather than
+    /// from the defaults again.
+    pub settings: Option<ExportSettings>,
+    /// The export in progress, if any. Only one at a time: two exports would
+    /// compete for the same decoders and the same GPU, and finish later than
+    /// running them one after the other.
+    pub job: Option<ExportJob>,
+    /// The device exports render on. `None` on a machine with no GPU, where
+    /// exporting is refused with that as the reason rather than crashing.
+    pub gpu: Option<GpuContext>,
+    /// Where an export's own timings go. The editor's registry, so the
+    /// performance overlay reports what a rendered frame cost beside what a
+    /// previewed one did.
+    pub metrics: Metrics,
+    /// What the last finished export produced, shown in the dialogue until the
+    /// next one starts.
+    pub last: Option<String>,
+}
+
+impl ExportState {
+    /// Whether an export is running right now.
+    pub fn is_running(&self) -> bool {
+        self.job.as_ref().is_some_and(|j| j.is_running())
+    }
+
+    /// The settings the dialogue should show, built from the sequence if this
+    /// is the first time it has been opened.
+    ///
+    /// A file name derived from the project rather than an empty field: the
+    /// commonest export is "this project, next to the project file", and typing
+    /// that out again is not a decision anyone wants to make.
+    pub fn prepare(&mut self, project: &Project, path: Option<&PathBuf>) {
+        if self.settings.is_some() {
+            return;
+        }
+        let Some(sequence) = project.active() else { return };
+        let name = path
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| project.name.clone());
+        let directory = path
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        self.settings =
+            Some(ExportSettings::for_sequence(sequence, directory.join(format!("{name}.mp4"))));
+    }
+}
+
 /// Everything the editor knows, apart from the GPU and the transport.
 ///
 /// Deliberately free of any egui type, so the whole action layer can be driven
@@ -612,6 +675,8 @@ pub struct EditorState {
     /// Non-fatal problems from the last open, shown until dismissed.
     pub warnings: Vec<String>,
     pub show_performance_overlay: bool,
+    /// The export dialogue, and the export it may have started.
+    pub export: ExportState,
     /// The composition the user has open, if any. While one is open the
     /// timeline, the preview and the transport are all about *it* rather than
     /// about the sequence — which is what "open a composition" has to mean for
@@ -645,6 +710,7 @@ impl EditorState {
             drag: TimelineDrag::None,
             warnings: Vec::new(),
             show_performance_overlay: cfg!(debug_assertions),
+            export: ExportState::default(),
             open_composition: None,
             revision: 0,
         }

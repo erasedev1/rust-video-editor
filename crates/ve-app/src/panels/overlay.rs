@@ -81,6 +81,17 @@ pub fn show(ctx: &Context, input: &OverlayInput<'_>) {
             row(ui, "composite", snapshot.mean_ms(spans::COMPOSITE), None);
             row(ui, "ui", snapshot.mean_ms(spans::UI), None);
 
+            // Only once an export has run, and then permanently: what a written
+            // frame cost is worth keeping on screen after the render has
+            // finished, because that is when it is read.
+            let exported = snapshot.mean_ms(spans::EXPORT_FRAME);
+            if exported > 0.0 {
+                ui.separator();
+                row(ui, "export", exported, None);
+                row(ui, " readback", snapshot.mean_ms(spans::READBACK), None);
+                row(ui, " encode", snapshot.mean_ms(spans::ENCODE), None);
+            }
+
             ui.separator();
 
             let dropped = snapshot.dropped_frames;
