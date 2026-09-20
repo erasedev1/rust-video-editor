@@ -21,6 +21,7 @@
 //! # Structure
 //!
 //! * [`settings`] — what to write, where, and how. Plain data, no codecs.
+//! * [`proxy`] — building the smaller stand-ins the editor cuts against.
 //! * [`compose`] — one instant to a picture on the GPU, shared with the preview.
 //! * [`sources`] — blocking decoders, one per asset.
 //! * [`writer`] — the FFmpeg half: encoders, a muxer, and nothing else.
@@ -30,14 +31,19 @@ use std::path::PathBuf;
 
 pub mod compose;
 pub mod job;
+pub mod proxy;
 pub mod settings;
 pub mod sources;
 pub mod writer;
 
 pub use compose::FrameComposer;
 pub use job::{run, Cancel, ExportEvent, ExportJob, ExportReport, Progress};
+pub use proxy::{
+    proxy_dir_for, ProxyEvent, ProxyJob, ProxyProgress, ProxyReport, ProxyScale, ProxySettings,
+};
 pub use settings::{
-    AudioCodec, AudioSettings, Container, ExportRange, ExportSettings, Quality, VideoCodec,
+    AudioCodec, AudioSettings, Container, ExportRange, ExportSettings, Keyframes, Quality,
+    VideoCodec,
 };
 pub use sources::SourceFrames;
 pub use writer::MediaWriter;

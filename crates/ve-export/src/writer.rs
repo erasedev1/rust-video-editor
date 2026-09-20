@@ -87,8 +87,30 @@ impl MediaWriter {
     }
 
     /// Encodes one composited picture, tightly packed RGBA at the source size.
+    ///
+    /// The picture is stamped with the next frame index, which is what an
+    /// export wants: it renders every frame of a range in order, so the index
+    /// *is* the time.
     pub fn write_frame(&mut self, rgba: &[u8]) -> Result<(), ExportError> {
-        self.video.send(rgba)?;
+        self.video.send(rgba, None)?;
+        self.video.drain(&mut self.output, false)
+    }
+
+    /// Encodes one picture at a stated time, in frames of the output rate.
+    ///
+    /// For copying a file rather than rendering one: a transcode has real
+    /// source timestamps to preserve, and a variable-frame-rate source has
+    /// frames its own average rate would not put where they actually are.
+    /// Stamping by index would silently re-time such a file, and a proxy that
+    /// is re-timed shows a different frame from the original at the same
+    /// instant — which is the one thing a proxy may never do.
+    ///
+    /// Presentation times must increase. One that does not — two source frames
+    /// landing in the same slot of the average rate — is nudged to the slot
+    /// after the last, because a muxer will not accept the alternative and a
+    /// proxy cannot hold more frames than its rate has room for.
+    pub fn write_frame_at(&mut self, rgba: &[u8], pts: i64) -> Result<(), ExportError> {
+        self.video.send(rgba, Some(pts))?;
         self.video.drain(&mut self.output, false)
     }
 
@@ -201,9 +223,10 @@ impl VideoStream {
         if settings.video.uses_bitrate() {
             encoder.set_bit_rate(settings.bitrate() as usize);
         }
-        // A keyframe every second: long enough not to cost much, short enough
-        // that scrubbing the result in any player lands quickly.
-        encoder.set_gop(rate.as_f64().round().max(1.0) as u32);
+        // A delivery gets a keyframe a second — long enough not to cost much,
+        // short enough that scrubbing the result in any player lands quickly.
+        // A file meant to be scrubbed *by this editor* asks for every frame.
+        encoder.set_gop(settings.keyframes.gop(rate));
 
         // Say which matrix the picture was converted with, because the file is
         // unreadable without it: a player guessing 709 for a 601 conversion
@@ -270,7 +293,9 @@ impl VideoStream {
     }
 
     /// Converts one RGBA picture and hands it to the encoder.
-    fn send(&mut self, rgba: &[u8]) -> Result<(), ExportError> {
+    ///
+    /// `pts` states the time in frames; `None` takes the next index.
+    fn send(&mut self, rgba: &[u8], pts: Option<i64>) -> Result<(), ExportError> {
         let width = self.source.width() as usize;
         let height = self.source.height() as usize;
         let expected = width * height * 4;
@@ -294,8 +319,12 @@ impl VideoStream {
         }
 
         self.scaler.run(&self.source, &mut self.target)?;
-        self.target.set_pts(Some(self.next_pts));
-        self.next_pts += 1;
+        // A stated time that has not moved on is pulled up to the next free
+        // slot rather than repeated: the muxer rejects a pts that does not
+        // increase, and dropping the frame instead would shorten the file.
+        let pts = pts.map(|p| p.max(self.next_pts)).unwrap_or(self.next_pts);
+        self.target.set_pts(Some(pts));
+        self.next_pts = pts + 1;
         self.encoder
             .send_frame(&self.target)
             .map_err(|e| ExportError::Encoder(format!("encoding a frame: {e}")))

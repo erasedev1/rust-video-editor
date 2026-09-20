@@ -184,6 +184,34 @@ impl Quality {
     }
 }
 
+/// How often the encoder writes a keyframe.
+///
+/// This is the difference between a file that is *small* and a file that is
+/// *quick to jump about in*, and the right answer is not the same for both jobs.
+/// A delivery is played from the beginning, so a group of pictures a second long
+/// costs nothing anyone notices. A file being scrubbed is asked for one frame
+/// from the middle over and over, and every one of those costs the whole group
+/// up to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Keyframes {
+    /// One a second. What a delivery wants.
+    #[default]
+    EverySecond,
+    /// Every frame, so no frame is decoded twice to reach another. Larger, and
+    /// the reason editing formats are intra-frame.
+    EveryFrame,
+}
+
+impl Keyframes {
+    /// The group size to give the encoder at `rate`.
+    pub fn gop(self, rate: Rate) -> u32 {
+        match self {
+            Keyframes::EverySecond => rate.as_f64().round().max(1.0) as u32,
+            Keyframes::EveryFrame => 1,
+        }
+    }
+}
+
 /// The sound half of an export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioSettings {
@@ -256,6 +284,9 @@ pub struct ExportSettings {
     /// `None` writes a file with no audio stream at all, rather than one with a
     /// silent one.
     pub audio: Option<AudioSettings>,
+    /// How often a keyframe is written. A delivery wants one a second; a file
+    /// that will be scrubbed wants every frame.
+    pub keyframes: Keyframes,
 }
 
 impl ExportSettings {
@@ -270,6 +301,7 @@ impl ExportSettings {
             video: VideoCodec::H264,
             quality: Quality::Standard,
             audio: Some(AudioSettings::for_sequence(sequence)),
+            keyframes: Keyframes::EverySecond,
         }
     }
 
@@ -285,6 +317,11 @@ impl ExportSettings {
 
     pub fn without_audio(mut self) -> Self {
         self.audio = None;
+        self
+    }
+
+    pub fn with_keyframes(mut self, keyframes: Keyframes) -> Self {
+        self.keyframes = keyframes;
         self
     }
 

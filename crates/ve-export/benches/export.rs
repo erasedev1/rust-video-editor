@@ -57,6 +57,7 @@ fn encode_frame(c: &mut Criterion) {
                 video: VideoCodec::H264,
                 quality: Quality::Standard,
                 audio: None,
+                keyframes: ve_export::Keyframes::EverySecond,
             };
             let mut writer = MediaWriter::create(&settings, size).expect("an encoder to open");
             b.iter(|| writer.write_frame(black_box(&pixels)).expect("encoding"));
