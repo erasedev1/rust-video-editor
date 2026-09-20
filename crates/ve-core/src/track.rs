@@ -131,6 +131,16 @@ impl Track {
         self.clips.iter_mut().find(|c| c.id == id)
     }
 
+    /// Mutable access to every clip, under the same contract as
+    /// [`Track::clip_mut`]: nothing positional may be changed through it.
+    ///
+    /// For sweeps that touch a property of every clip and cannot move any of
+    /// them — conforming effect parameters on load, say — where going through
+    /// [`Track::clip_mut`] per ID would mean collecting the IDs first.
+    pub fn clips_mut(&mut self) -> impl Iterator<Item = &mut Clip> {
+        self.clips.iter_mut()
+    }
+
     pub fn index_of(&self, id: ClipId) -> Option<usize> {
         self.clips.iter().position(|c| c.id == id)
     }

@@ -5,9 +5,10 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+use ve_core::registry::kinds;
 use ve_core::{
-    BlendMode, Clip, CompositionLayer, CompositionSettings, FadeCurve, Interpolation,
-    MediaInfo, Project, Size, Source, VideoStreamInfo,
+    builtin_registry, BlendMode, Clip, CompositionLayer, CompositionSettings, Effect,
+    FadeCurve, Interpolation, MediaInfo, ParamValue, Project, Size, Source, VideoStreamInfo,
 };
 use ve_project::{autosave, store, Autosave, ProjectError, FORMAT_MAGIC, FORMAT_VERSION};
 use ve_time::{Rate, Ticks};
@@ -336,6 +337,99 @@ fn a_hand_edited_file_with_overlapping_clips_opens_with_warnings() {
     assert!(loaded.warnings.iter().any(|w| w.contains("overlaps")), "{:?}", loaded.warnings);
     // Nothing is discarded: the user's data is still there to be fixed.
     assert_eq!(loaded.project.clip_count(), 2);
+}
+
+#[test]
+fn an_effect_chain_survives_a_round_trip_with_its_keyframes() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("m.mp4");
+    fs::write(&media, b"m").unwrap();
+    let path = dir.path().join("effects.verge");
+
+    let mut project = sample_project(&media);
+    let seq = project.active_sequence.unwrap();
+    let clip_id = project.sequence(seq).unwrap().tracks[0].clips()[0].id;
+    let blur_id = project.new_effect_id();
+    let colour_id = project.new_effect_id();
+    let registry = builtin_registry();
+    {
+        let clip = project.sequence_mut(seq).unwrap().find_clip_mut(clip_id).unwrap().1;
+        let mut blur = registry.instantiate(kinds::GAUSSIAN_BLUR, blur_id).unwrap();
+        if let Some(ParamValue::Scalar(radius)) = blur.param_mut("radius") {
+            radius.set_keyframe(Ticks::ZERO, 0.0, Interpolation::EaseInOut);
+            radius.set_keyframe(Ticks::from_seconds(2), 60.0, Interpolation::Linear);
+        }
+        let mut colour = registry.instantiate(kinds::COLOR_ADJUST, colour_id).unwrap();
+        colour.enabled = false;
+        clip.effects = vec![blur, colour];
+    }
+    store::save(&project, &path).unwrap();
+
+    let loaded = store::load(&path).unwrap().project;
+    let clip = loaded.sequence(seq).unwrap().tracks[0].clips()[0].clone();
+    assert_eq!(clip.effects.len(), 2);
+    // Order is the chain, so it has to survive exactly.
+    assert_eq!(clip.effects[0].kind, kinds::GAUSSIAN_BLUR);
+    assert_eq!(clip.effects[0].id, blur_id);
+    assert!(clip.effects[0].is_animated());
+    assert_eq!(
+        clip.effects[0].param("radius").unwrap().as_scalar_at(Ticks::from_seconds(2)),
+        Some(60.0)
+    );
+    assert_eq!(clip.effects[1].kind, kinds::COLOR_ADJUST);
+    assert!(!clip.effects[1].enabled, "a switched-off effect stays switched off");
+}
+
+#[test]
+fn a_hand_edited_effect_parameter_is_conformed_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("m.mp4");
+    fs::write(&media, b"m").unwrap();
+    let path = dir.path().join("conform.verge");
+
+    let mut project = sample_project(&media);
+    let seq = project.active_sequence.unwrap();
+    let clip_id = project.sequence(seq).unwrap().tracks[0].clips()[0].id;
+    let id = project.new_effect_id();
+    {
+        let clip = project.sequence_mut(seq).unwrap().find_clip_mut(clip_id).unwrap().1;
+        // A blur whose radius arrived as a switch, and which is missing the
+        // direction entirely — neither is reachable through the editor, and
+        // both are one text editor away.
+        clip.effects = vec![Effect::new(id, kinds::GAUSSIAN_BLUR, "Gaussian Blur")
+            .with_param("radius", ParamValue::Bool(true))];
+    }
+    store::save(&project, &path).unwrap();
+
+    let loaded = store::load(&path).unwrap().project;
+    let effect = loaded.sequence(seq).unwrap().tracks[0].clips()[0].effects[0].clone();
+    assert_eq!(effect.param("radius").unwrap().as_scalar_at(Ticks::ZERO), Some(8.0));
+    assert!(effect.param("direction").is_some(), "a missing parameter is filled in");
+}
+
+#[test]
+fn an_effect_from_a_plugin_this_build_lacks_survives_a_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("m.mp4");
+    fs::write(&media, b"m").unwrap();
+    let path = dir.path().join("plugin.verge");
+
+    let mut project = sample_project(&media);
+    let seq = project.active_sequence.unwrap();
+    let clip_id = project.sequence(seq).unwrap().tracks[0].clips()[0].id;
+    let id = project.new_effect_id();
+    {
+        let clip = project.sequence_mut(seq).unwrap().find_clip_mut(clip_id).unwrap().1;
+        clip.effects = vec![Effect::new(id, "someone.elses.glow", "Glow")
+            .with_param("intensity", ParamValue::scalar(3.0))];
+    }
+    store::save(&project, &path).unwrap();
+
+    let loaded = store::load(&path).unwrap();
+    let effect = loaded.project.sequence(seq).unwrap().tracks[0].clips()[0].effects[0].clone();
+    assert_eq!(effect.kind, "someone.elses.glow");
+    assert_eq!(effect.param("intensity").unwrap().as_scalar_at(Ticks::ZERO), Some(3.0));
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
 }
 
 #[test]

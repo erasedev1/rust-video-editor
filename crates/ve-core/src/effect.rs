@@ -5,14 +5,21 @@ use crate::animation::Property;
 use crate::fade::{Fade, FadeEdge};
 use crate::geometry::{Rgba, Vec2};
 use crate::id::EffectId;
+use crate::registry::EffectDescriptor;
 
 /// A single tunable input to an effect.
 ///
 /// Every animatable variant wraps a [`Property`], so effect parameters get
 /// keyframing from the shared animation system rather than from anything
 /// effect-specific.
+///
+/// Tagged **adjacently** — `{"type": "scalar", "value": …}` — rather than
+/// internally, because a switch and a choice hold a bare `bool` and `u32`, and
+/// an internal tag has nowhere to put a value that is not itself a map. Which
+/// is worth knowing before anyone tidies this into `tag = "type"`: it
+/// serialises those two variants at runtime rather than failing to compile.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ParamValue {
     Scalar(Property<f64>),
     Point(Property<Vec2>),
@@ -48,6 +55,113 @@ impl ParamValue {
             ParamValue::Color(p) => p.is_animated(),
             ParamValue::Bool(_) | ParamValue::Choice(_) => false,
         }
+    }
+
+    /// Resolves the parameter at clip-relative time `t`.
+    pub fn evaluate(&self, t: Ticks) -> ParamState {
+        match self {
+            ParamValue::Scalar(p) => ParamState::Scalar(p.evaluate(t)),
+            ParamValue::Point(p) => ParamState::Point(p.evaluate(t)),
+            ParamValue::Color(p) => ParamState::Color(p.evaluate(t)),
+            ParamValue::Bool(v) => ParamState::Bool(*v),
+            ParamValue::Choice(v) => ParamState::Choice(*v),
+        }
+    }
+}
+
+/// A [`ParamValue`] resolved to a concrete value at one instant.
+///
+/// Plain `Copy` data with no keyframes left in it, which is what crosses into
+/// the renderer: by the time a parameter reaches a shader, *when* is settled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ParamState {
+    Scalar(f64),
+    Point(Vec2),
+    Color(Rgba),
+    Bool(bool),
+    Choice(u32),
+}
+
+impl ParamState {
+    pub fn as_scalar(self) -> Option<f64> {
+        match self {
+            ParamState::Scalar(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_point(self) -> Option<Vec2> {
+        match self {
+            ParamState::Point(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_color(self) -> Option<Rgba> {
+        match self {
+            ParamState::Color(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(self) -> Option<bool> {
+        match self {
+            ParamState::Bool(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_choice(self) -> Option<u32> {
+        match self {
+            ParamState::Choice(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+/// One effect resolved at one instant: what to run, and with what numbers.
+///
+/// This is what the engine hands the renderer. It deliberately keeps the
+/// registry key rather than resolving to some enum of known effects, because
+/// dispatch happens where the shaders are — an effect the renderer has no pass
+/// for is skipped there, not made unrepresentable here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectState {
+    pub kind: String,
+    /// In the effect's own parameter order.
+    pub params: Vec<(String, ParamState)>,
+}
+
+impl EffectState {
+    /// A parameter by key, whatever type it turned out to be.
+    pub fn get(&self, key: &str) -> Option<ParamState> {
+        self.params.iter().find(|(k, _)| k == key).map(|(_, v)| *v)
+    }
+
+    /// A number, or `fallback` if the parameter is missing or of another type.
+    ///
+    /// Every accessor takes a fallback rather than returning an `Option`,
+    /// because the caller is a shader dispatch that has to produce *some*
+    /// picture: an effect whose radius went missing should blur by the default
+    /// amount, not fail to draw the frame.
+    pub fn scalar(&self, key: &str, fallback: f64) -> f64 {
+        self.get(key).and_then(ParamState::as_scalar).unwrap_or(fallback)
+    }
+
+    pub fn point(&self, key: &str, fallback: Vec2) -> Vec2 {
+        self.get(key).and_then(ParamState::as_point).unwrap_or(fallback)
+    }
+
+    pub fn color(&self, key: &str, fallback: Rgba) -> Rgba {
+        self.get(key).and_then(ParamState::as_color).unwrap_or(fallback)
+    }
+
+    pub fn flag(&self, key: &str, fallback: bool) -> bool {
+        self.get(key).and_then(ParamState::as_bool).unwrap_or(fallback)
+    }
+
+    pub fn choice(&self, key: &str, fallback: u32) -> u32 {
+        self.get(key).and_then(ParamState::as_choice).unwrap_or(fallback)
     }
 }
 
@@ -96,6 +210,35 @@ impl Effect {
     /// that this effect's output cannot be reused across frames.
     pub fn is_animated(&self) -> bool {
         self.params.iter().any(|(_, v)| v.is_animated())
+    }
+
+    /// Resolves every parameter at clip-relative time `t`.
+    ///
+    /// `descriptor` is what the registry knows about this kind, and is used
+    /// only to clamp numbers into their declared ranges. It is optional because
+    /// an effect from a plugin that is not installed still has to evaluate to
+    /// *something* — its parameters are then passed through as authored, which
+    /// is what will be saved back.
+    pub fn evaluate(&self, t: Ticks, descriptor: Option<&EffectDescriptor>) -> EffectState {
+        let params = self
+            .params
+            .iter()
+            .map(|(key, value)| {
+                let state = value.evaluate(t);
+                let clamped = match (descriptor.and_then(|d| d.param(key)), state) {
+                    (Some(p), ParamState::Scalar(v)) => {
+                        ParamState::Scalar(p.kind.clamp_scalar(v))
+                    }
+                    (Some(p), ParamState::Point(v)) => ParamState::Point(Vec2::new(
+                        p.kind.clamp_scalar(v.x),
+                        p.kind.clamp_scalar(v.y),
+                    )),
+                    (_, other) => other,
+                };
+                (key.clone(), clamped)
+            })
+            .collect();
+        EffectState { kind: self.kind.clone(), params }
     }
 }
 

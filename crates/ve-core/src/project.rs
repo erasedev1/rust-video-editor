@@ -404,6 +404,8 @@ impl Project {
             }
         }
 
+        self.conform_effects(crate::registry::builtin_registry());
+
         if let Some(active) = self.active_sequence {
             if self.sequence(active).is_none() {
                 warnings
@@ -415,6 +417,34 @@ impl Project {
         }
 
         warnings
+    }
+
+    /// Brings every effect parameter into line with what `registry` declares.
+    ///
+    /// A project file is untrusted input: a parameter can be missing, of the
+    /// wrong type, or named something this build has never declared. Conforming
+    /// on load means a shader is never handed a colour where it expects a
+    /// radius, while a parameter the registry does not know about is kept so
+    /// that a file written by a newer build survives a round trip through this
+    /// one. See [`EffectRegistry::conform`].
+    ///
+    /// Taken as an argument rather than always using the built-ins, so that a
+    /// host which has loaded plugin effects conforms against those too.
+    ///
+    /// [`EffectRegistry::conform`]: crate::registry::EffectRegistry::conform
+    pub fn conform_effects(&mut self, registry: &crate::registry::EffectRegistry) {
+        for sequence in &mut self.sequences {
+            for track in &mut sequence.tracks {
+                for clip in track.clips_mut() {
+                    registry.conform(&mut clip.effects);
+                }
+            }
+        }
+        for composition in &mut self.compositions {
+            for layer in &mut composition.layers {
+                registry.conform(&mut layer.effects);
+            }
+        }
     }
 
     /// Removes the layers that close a nesting cycle, reporting each one.

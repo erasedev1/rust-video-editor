@@ -24,6 +24,7 @@ pub mod geometry;
 pub mod id;
 pub mod motion;
 pub mod project;
+pub mod registry;
 pub mod sequence;
 pub mod source;
 pub mod track;
@@ -33,7 +34,9 @@ pub use asset::{AudioStreamInfo, MediaAsset, MediaInfo, VideoStreamInfo};
 pub use blend::BlendMode;
 pub use clip::{Clip, Speed};
 pub use composition::{Composition, CompositionLayer, CompositionSettings};
-pub use effect::{AudioProperties, Effect, ParamValue, Transform, TransformState};
+pub use effect::{
+    AudioProperties, Effect, EffectState, ParamState, ParamValue, Transform, TransformState,
+};
 pub use fade::{Fade, FadeCurve, FadeEdge};
 pub use geometry::{ColorSpace, Rgba, Size, Vec2};
 pub use id::{
@@ -42,6 +45,10 @@ pub use id::{
 };
 pub use motion::MotionBlur;
 pub use project::{Project, ProjectSettings};
+pub use registry::{
+    builtin_registry, EffectCategory, EffectDescriptor, EffectRegistry, ParamDescriptor,
+    ParamKind,
+};
 pub use sequence::{Marker, Sequence, SequenceSettings};
 pub use source::Source;
 pub use track::{Track, TrackKind};
