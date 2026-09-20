@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ve_core::{Clip, ClipId, Project, Property, SequenceId, Size, TrackId};
-use ve_export::{run, Cancel, ExportRange, ExportSettings};
+use ve_export::{run, Cancel, ExportRange, ExportSettings, VideoCodec};
 use ve_media::VideoDecoder;
 use ve_metrics::Metrics;
 use ve_render::GpuContext;
@@ -337,6 +337,63 @@ fn sound_stays_with_the_picture_at_a_rate_that_does_not_divide_evenly() {
     // the sound would run short by about two milliseconds a second.
     let drift = (audio.duration - video.duration).abs();
     assert!(drift < Ticks::from_millis(50), "streams drifted apart by {drift:?}");
+}
+
+#[test]
+fn every_codec_the_dialogue_offers_writes_a_file_that_says_what_it_is() {
+    // One frame each: this is about the encoder opening and the container
+    // taking what it was handed, not about how long anything takes.
+    let frame = Rate::FPS_30.frame_duration();
+    for (codec, container, expected) in [
+        (VideoCodec::H264, "mp4", "h264"),
+        (VideoCodec::H265, "mkv", "hevc"),
+        (VideoCodec::ProRes, "mov", "prores"),
+    ] {
+        let mut f = fixture();
+        f.add_video(Ticks::ZERO, Ticks::from_seconds(1));
+        let mut settings = f
+            .settings(&format!("codec.{container}"))
+            .with_video(codec)
+            .with_range(ExportRange::Span(TimeRange::new(Ticks::ZERO, frame * 2)));
+        settings.audio = None;
+
+        let report = f.export(&settings);
+        assert_eq!(report.frames, 2, "{}", codec.label());
+
+        let info = ve_media::probe(&settings.path).expect("the exported file to probe");
+        assert_eq!(info.video.expect("a video stream").codec, expected);
+    }
+}
+
+#[test]
+fn uncompressed_audio_is_refused_where_the_container_cannot_carry_it() {
+    let mut f = fixture();
+    f.add_video(Ticks::ZERO, Ticks::from_seconds(1));
+
+    let sequence = f.project.sequence(f.sequence).unwrap();
+    let mut settings = ExportSettings::for_sequence(sequence, f.path("pcm.mp4"));
+    settings.audio = Some(ve_export::AudioSettings {
+        codec: ve_export::AudioCodec::Pcm16,
+        ..ve_export::AudioSettings::for_sequence(sequence)
+    });
+
+    let error =
+        run(&f.project, f.sequence, &settings, gpu(), &Metrics::new(), &Cancel::new(), |_| {})
+            .expect_err("MP4 does not carry PCM");
+    assert!(error.to_string().contains("uncompressed"), "{error}");
+
+    // ...and the same thing in a container that can carry it works.
+    let settings = ExportSettings {
+        path: f.path("pcm.mov"),
+        range: ExportRange::Span(TimeRange::new(
+            Ticks::ZERO,
+            Rate::FPS_30.frame_duration() * 2,
+        )),
+        ..settings
+    };
+    let report = f.export(&settings);
+    assert_eq!(report.audio_encoder.as_deref(), Some("pcm_s16le"));
+    assert!(ve_media::probe(&settings.path).unwrap().audio.is_some());
 }
 
 #[test]

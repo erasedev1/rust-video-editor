@@ -241,7 +241,7 @@ says so in the performance overlay, and keeps cutting.
 ## Testing
 
 ```sh
-cargo test --workspace     # 749 tests
+cargo test --workspace     # 751 tests
 cargo bench                # measured, not estimated
 ```
 

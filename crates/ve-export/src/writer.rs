@@ -655,6 +655,11 @@ fn encoder_options(settings: &ExportSettings, encoder: &str) -> ffmpeg::Dictiona
                     _ => "medium",
                 },
             );
+            if encoder == "libx265" {
+                // x265 writes a banner and a per-frame summary to stderr on
+                // its own account, which FFmpeg's log level does not govern.
+                options.set("x265-params", "log-level=error");
+            }
         }
         "prores_ks" => {
             // Profile 2 is "standard" 422, the ProRes flavour intended for
