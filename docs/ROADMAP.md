@@ -222,12 +222,13 @@ blur's cost stops growing with its radius.
 
 - Export: render a sequence to a file ✅ — H.264, H.265 and ProRes, with sound
 - Proxies ✅ — built in the background, switchable, never used for a delivery
-- Multicam, captions, advanced audio, colour grading
+- Colour grading ✅ — three-way, white balance, an HSL secondary, and scopes
+- Multicam, captions, advanced audio
 - Hardware encoders
 
-**Export and proxies are done; the rest of the phase is not.** An editor that
-cannot produce a file is a demonstration rather than a tool, so export came
-first.
+**Export, proxies and grading are done; the rest of the phase is not.** An
+editor that cannot produce a file is a demonstration rather than a tool, so
+export came first.
 
 What an export is, is the editor run with nobody watching. The same `evaluate`
 the preview calls resolves each instant; the same compositor draws it — one
@@ -338,6 +339,84 @@ reason given above — a sequence shown half at one resolution and half at anoth
 is lying about what it looks like. And nothing rebuilds a proxy when the footage
 behind it changes on disk: "Rebuild All Proxies" is the answer, and a file
 watcher that noticed by itself is a different piece of machinery.
+
+### Colour grading
+
+Three effects and four instruments, and the effects are the smaller half of
+that sentence.
+
+**The three effects needed no new machinery.** A three-way corrector, a white
+balance and an HSL secondary are registry entries and shader entry points; the
+inspector built their controls, the animation system keyframed their
+parameters, the render cache keyed their passes and the project format saved
+them, all without changing. Phase 6 claimed that the registry would let an
+effect arrive with working controls and keyframes for nothing. This is the
+first effect added *since* that claim, and it is the evidence for it.
+
+A three-way corrector is lift, gamma and gain per channel: `out = (in · slope +
+lift) ^ exponent`, where an input of 0 comes out at `lift` and an input of 1 at
+`gain`. The six controls the user sees resolve into those three vectors on the
+CPU, so the shader is a multiply, an add and a `pow`, and a full grade costs
+what a touched one does. The neutral of a wheel is the *middle* of its range,
+because a wheel is an offset rather than a colour to push towards; every
+control at neutral gives exactly the identity, which a test asserts rather than
+assumes.
+
+A white balance is drawn by the **colour adjust** program. A temperature and a
+tint are a per-channel multiply, which that shader already does, so what the
+kind adds is the arithmetic between two intuitive controls and three gains —
+divided by their own Rec. 709 luma, so a cooling is not also a darkening. Two
+kinds, one program: the list the edit model names and the list the GPU runs are
+deliberately not the same list, which is what will let a plugin reuse a
+built-in program later.
+
+The secondary selects a band of hue above a saturation floor and grades only
+that. Hue is carried in turns so the wrap is `fract` — red sits at both ends of
+the circle and a band centred on it has to reach across the seam — and the
+floor is what keeps greys, whose hue is whatever the arithmetic happened to
+produce, out of the key. `Show Matte` draws the selection in black and white,
+because dialling a qualifier by looking at the graded picture means guessing at
+the edges of the key from the other side of a grade.
+
+**The scopes are the half that needed building.** A waveform in luma, RGB
+overlay or parade; a vectorscope; a histogram. They read the composited
+frame — after the grade, after every effect, after the blend — because what is
+being judged is the picture that will be delivered rather than an estimate
+assembled from the parameters that made it.
+
+They read it small: scaled into a target 256 across and read back from there. A
+scope is a statistic, and thirty thousand samples locate a black level far
+better than the width of a line on screen; reading an HD target back instead
+costs eight megabytes over the bus and a stall to wait for it, every frame. So
+the cost of a scope is bounded by the scope rather than by the resolution of
+the sequence — a 4K timeline counts the same 36,864 pixels. The consequence is
+said out loud rather than hidden: a scope here will not show a single stray hot
+pixel. It is an instrument for judging a grade, not for auditing a delivery.
+
+Nothing is read back while the panel is closed, which is the default, and a
+picture already sampled is not sampled again — which is the common case,
+because a grade is dialled in on a held frame and the same composite is
+presented on every repaint.
+
+What is **not** here. There is no **curve** — the tone curve is the other half
+of a grading toolkit, and it needs a parameter kind that is not a number, a
+point or a colour, and a control that is not a slider. That is a change to the
+registry's shape rather than one more entry in it, which is why it waits rather
+than being bolted on. There is no **LUT**, which needs a 3D texture and a file
+reference in the edit model, and brings the question of what happens when the
+file moves — the same question proxies answer and that a LUT would have to
+answer differently. There are no **tracked** secondaries, and no shot matching:
+both are analysis over time rather than a shader, and belong with the
+professional work the rest of this phase is. And the scopes have no **graticule
+of primary targets**, for the reason given in
+[ARCHITECTURE.md](ARCHITECTURE.md#scopes): those boxes are 75% bars under one
+standard, and drawing them over a Rec. 709 plot would invite a reading they do
+not support.
+
+See [BENCHMARKS.md](BENCHMARKS.md#grading) for what a grading pass costs
+against a plain composite, and [the scopes table](BENCHMARKS.md#scopes) for
+what reading the picture back and counting it costs — including the `f64::round`
+that turned out to be most of the second one.
 
 ## Phase 8 — Motion graphics
 

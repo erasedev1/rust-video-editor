@@ -24,3 +24,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "compositing"
 harness = false
+
+[[bench]]
+name = "scopes"
+harness = false

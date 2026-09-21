@@ -356,6 +356,16 @@ fn effect_passes(c: &mut Criterion) {
         ),
         ("mask", effect(kinds::SHAPE_MASK, &[])),
         ("luma_key", effect(kinds::LUMA_KEY, &[])),
+        // The three-way corrector resolves to three vectors on the CPU, so the
+        // shader is a multiply, an add and a `pow` — which is what this is
+        // measuring against the colour adjustment beside it.
+        ("three_way", effect(kinds::THREE_WAY, &[("shadow_level", ParamValue::scalar(0.3))])),
+        // The secondary is the expensive one: two colour space conversions per
+        // pixel, which is what a qualifier costs anywhere.
+        (
+            "hsl_secondary",
+            effect(kinds::HSL_SECONDARY, &[("saturation_scale", ParamValue::scalar(1.5))]),
+        ),
     ];
 
     let mut group = c.benchmark_group("effect_pass_1080p");

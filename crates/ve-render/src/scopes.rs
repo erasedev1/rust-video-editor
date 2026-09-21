@@ -97,14 +97,24 @@ impl ScopeSample {
     /// because a waveform is the only scope that cares where a pixel was, and
     /// it only cares about one axis.
     fn opaque_pixels(&self) -> impl Iterator<Item = (u32, [f64; 3])> + '_ {
-        let width = self.size.width;
-        self.pixels.as_chunks::<4>().0.iter().enumerate().filter_map(move |(i, px)| {
-            let a = px[3] as f64;
-            if a <= 0.0 {
+        let width = self.size.width.max(1);
+        // The column is counted rather than derived from the index. `i % width`
+        // reads better and is an integer division per pixel of every sample of
+        // every scope, which measured as most of what counting a waveform cost.
+        let mut column = 0;
+        self.pixels.as_chunks::<4>().0.iter().filter_map(move |px| {
+            let x = column;
+            column += 1;
+            if column == width {
+                column = 0;
+            }
+            if px[3] == 0 {
                 return None;
             }
-            let column = (i as u32) % width.max(1);
-            Some((column, [px[0] as f64 / a, px[1] as f64 / a, px[2] as f64 / a]))
+            // One reciprocal and three multiplies rather than three divisions,
+            // for the same reason.
+            let inv = 1.0 / px[3] as f64;
+            Some((x, [px[0] as f64 * inv, px[1] as f64 * inv, px[2] as f64 * inv]))
         })
     }
 }
@@ -160,6 +170,19 @@ impl WaveformMode {
     }
 }
 
+/// Rounds a non-negative number to the nearest whole one, as an index.
+///
+/// `f64::round` is not one instruction: it rounds half *away from zero*, which
+/// the hardware's rounding mode does not do, so it compiles to a call. Adding a
+/// half and truncating is the same answer for a number that cannot be negative,
+/// and it is the single `cvttsd2si` the hardware does have. Measured as most of
+/// what counting a scope cost — every plot rounds at least once per pixel of
+/// every sample.
+#[inline]
+fn round_index(v: f64) -> u32 {
+    (v + 0.5) as u32
+}
+
 /// How many pixels have to land in one cell for it to read full brightness.
 ///
 /// A fraction of the sample's height rather than a constant, so the plot looks
@@ -170,11 +193,11 @@ fn saturation_count(rows: u32) -> f64 {
 }
 
 /// Adds one count to a cell of an accumulating plot, in the given channels.
-fn plot(counts: &mut [f64], size: Size, x: u32, y: u32) {
+fn plot(counts: &mut [u32], size: Size, x: u32, y: u32) {
     if x >= size.width || y >= size.height {
         return;
     }
-    counts[(y * size.width + x) as usize] += 1.0;
+    counts[(y * size.width + x) as usize] += 1;
 }
 
 /// Turns accumulated counts into an image, tinted `colour` and added into
@@ -184,13 +207,13 @@ fn plot(counts: &mut [f64], size: Size, x: u32, y: u32) {
 /// one plot, and where they coincide the result should be the white a
 /// neutral frame gives — which is what addition says and what replacement
 /// would not.
-fn compose_counts(image: &mut ScopeImage, counts: &[f64], colour: [f64; 3], rows: u32) {
+fn compose_counts(image: &mut ScopeImage, counts: &[u32], colour: [f64; 3], rows: u32) {
     let full = saturation_count(rows);
     for (i, count) in counts.iter().enumerate() {
-        if *count <= 0.0 {
+        if *count == 0 {
             continue;
         }
-        let intensity = (count / full).min(1.0);
+        let intensity = (*count as f64 / full).min(1.0);
         for (c, weight) in colour.iter().enumerate() {
             let added = intensity * weight * 255.0;
             let existing = image.pixels[i * 4 + c] as f64;
@@ -229,8 +252,12 @@ pub fn waveform(sample: &ScopeSample, mode: WaveformMode, size: Size) -> ScopeIm
     let band_count = if mode == WaveformMode::Parade { 3 } else { 1 };
     let band_width = size.width / band_count as u32;
 
+    // One buffer for every band, cleared between them: a parade is three
+    // passes over the same grid, and allocating a megabyte per pass to zero it
+    // again is most of what counting a waveform would otherwise cost.
+    let mut counts = vec![0u32; cells];
     for (index, (colour, band)) in bands.iter().enumerate() {
-        let mut counts = vec![0.0f64; cells];
+        counts.fill(0);
         for (column, rgb) in sample.opaque_pixels() {
             let value = match mode {
                 WaveformMode::Luma => LUMA[0] * rgb[0] + LUMA[1] * rgb[1] + LUMA[2] * rgb[2],
@@ -242,7 +269,7 @@ pub fn waveform(sample: &ScopeSample, mode: WaveformMode, size: Size) -> ScopeIm
             let level = value.clamp(0.0, 1.0);
             let y = size.height
                 - 1
-                - ((level * (size.height - 1) as f64).round() as u32).min(size.height - 1);
+                - round_index(level * (size.height - 1) as f64).min(size.height - 1);
 
             // A source column covers a *span* of the plot's columns, not one of
             // them. When the plot is wider than the sample — which it is
@@ -276,7 +303,7 @@ pub fn vectorscope(sample: &ScopeSample, size: Size) -> ScopeImage {
         return image;
     }
     let cells = (size.width as usize) * (size.height as usize);
-    let mut counts = vec![0.0f64; cells];
+    let mut counts = vec![0u32; cells];
 
     for (_, rgb) in sample.opaque_pixels() {
         let (cb, cr) = chroma(rgb);
@@ -290,13 +317,16 @@ pub fn vectorscope(sample: &ScopeSample, size: Size) -> ScopeImage {
         // last bit of rounding noise in a grey would then scatter what should
         // be one dot across a smudge.
         let centre = (size.width as f64 / 2.0, size.height as f64 / 2.0);
-        let x = (centre.0 + cb * (size.width - 1) as f64)
-            .round()
-            .clamp(0.0, (size.width - 1) as f64);
-        let y = (centre.1 - cr * (size.height - 1) as f64)
-            .round()
-            .clamp(0.0, (size.height - 1) as f64);
-        plot(&mut counts, size, x as u32, y as u32);
+        // Clamped before rounding, because the rounding here only holds for a
+        // number that is already inside the plot.
+        let x = (centre.0 + cb * (size.width - 1) as f64).clamp(0.0, (size.width - 1) as f64);
+        let y = (centre.1 - cr * (size.height - 1) as f64).clamp(0.0, (size.height - 1) as f64);
+        plot(
+            &mut counts,
+            size,
+            round_index(x).min(size.width - 1),
+            round_index(y).min(size.height - 1),
+        );
     }
     compose_counts(&mut image, &counts, [0.4, 1.0, 0.5], sample.size.height);
     image
@@ -307,8 +337,8 @@ pub fn chroma(rgb: [f64; 3]) -> (f64, f64) {
     let luma = LUMA[0] * rgb[0] + LUMA[1] * rgb[1] + LUMA[2] * rgb[2];
     // The standard normalisations, which are what put the six primary targets
     // on a circle rather than on an ellipse.
-    let cb = (rgb[2] - luma) / 1.8556;
-    let cr = (rgb[0] - luma) / 1.5748;
+    let cb = (rgb[2] - luma) * (1.0 / 1.8556);
+    let cr = (rgb[0] - luma) * (1.0 / 1.5748);
     (cb, cr)
 }
 
@@ -334,7 +364,7 @@ impl Histogram {
     pub fn of(sample: &ScopeSample) -> Self {
         let mut histogram = Histogram::default();
         for (_, rgb) in sample.opaque_pixels() {
-            let bin = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as usize;
+            let bin = |v: f64| round_index(v.clamp(0.0, 1.0) * 255.0) as usize;
             histogram.red[bin(rgb[0])] += 1;
             histogram.green[bin(rgb[1])] += 1;
             histogram.blue[bin(rgb[2])] += 1;

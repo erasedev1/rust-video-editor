@@ -58,6 +58,12 @@ The first vertical slice is complete and tested end to end:
 - Build proxies for the imported footage — smaller, all-intra stand-ins that
   make scrubbing 72× cheaper on this machine — switch the editor between them
   and the real pictures with one control, and export the originals regardless
+- Grade: a three-way corrector with a colour wheel and a level for the shadows,
+  the midtones and the highlights, a white balance, and an HSL secondary that
+  grades one band of hue and shows its own matte while it is being dialled in
+- Judge the grade against instruments rather than against a monitor — a
+  waveform in luma, RGB or parade, a vectorscope and a histogram, all reading
+  the composited picture and costing nothing while they are closed
 - Undo and redo on every edit, with drags collapsed into single steps
 - Save and reopen projects, with autosave and crash recovery
 - A development performance overlay reporting real measurements
@@ -109,6 +115,22 @@ the switch is the single control deciding whether the editor is looking at the
 stand-ins or at the real pictures. An export ignores it either way. A badge
 reading `proxy?` would mean the file had been built and then deleted — in which
 case that clip quietly carries on at full resolution rather than going offline.
+
+![The scopes panel beside a graded shot](docs/images/scopes.png)
+
+Grading: a three-way corrector in the inspector — a warm swatch on the shadows,
+a cool one on the highlights, a level beside each — and the RGB parade reading
+the picture that came out. The scopes read the *composited* frame, after the
+grade and after every effect, because what is being judged is what will be
+delivered rather than an estimate assembled from the parameters that made it.
+
+![The vectorscope](docs/images/vectorscope.png)
+
+The same shot on the vectorscope: distance from the centre is saturation and
+the angle is hue, so the six patches of a colour bar sit as six dots and a cast
+shows as the whole plot leaning one way. The rings say how saturated; there are
+no primary target boxes, because those are 75% bars under one standard and
+drawing them over a Rec. 709 plot would invite a reading they do not support.
 
 The development overlay reports what the frame actually cost, broken down by
 stage, so a regression is visible while editing rather than weeks later:
@@ -252,7 +274,7 @@ says so in the performance overlay, and keeps cutting.
 ## Testing
 
 ```sh
-cargo test --workspace     # 792 tests
+cargo test --workspace     # 840 tests
 cargo bench                # measured, not estimated
 ```
 
@@ -276,6 +298,17 @@ first real export bug was found: packets written without a duration left every
 file claiming a frame rate slightly too high, so reading one back landed
 between frames — which a test that only checked "a file was written" would
 never have noticed.
+
+The grading tests are in two halves, because the two can disagree silently: one
+half checks what is *packed* into a pass and the other renders it and reads the
+pixels back. A lift moves black and pins white, a gain does the reverse, a gamma
+fixes both ends, opposite levels cancel to within 1e-12, a white balance holds
+the luma of white, a hue band centred on red selects both magenta and orange,
+and a 120° shift turns red into green. The scopes are tested the same way — the
+counting against painted frames, the readback against a real device — including
+the cases that are easy to get quietly wrong: a half-covered white pixel is
+white, a pixel with no coverage is not black, and a neutral frame is one dot
+rather than a smudge across four.
 
 ## Documentation
 

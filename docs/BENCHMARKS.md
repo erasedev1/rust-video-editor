@@ -9,6 +9,7 @@ cargo bench                                   # everything
 cargo bench -p ve-core --bench timeline       # edit model
 cargo bench -p ve-project --bench project_io  # save and load
 cargo bench -p ve-render --bench compositing  # GPU, including effect passes
+cargo bench -p ve-render --bench scopes       # reading the picture back and counting it
 cargo bench -p ve-media  --bench waveforms    # audio analysis and display
 cargo bench -p ve-engine --bench audio        # mixing, metering and fades
 cargo bench -p ve-export --bench export       # encoding, readback and a whole second
@@ -284,6 +285,98 @@ about 19 texels apart, which is a coarse approximation of a Gaussian that wide.
 That is the trade every real-time blur makes, and it is why the parameter is
 called a radius rather than a promise — but it is a trade in *quality*, not in
 cost, which is what this table is here to show.
+
+#### Grading
+
+Re-measured in one run when the grading passes were added — a third container,
+so the whole table is fresh rather than two runs laid beside each other.
+`--sample-size 10`:
+
+| Benchmark                           |     Time | Against one composite |
+|-------------------------------------|---------:|----------------------:|
+| `composite_1080p/1`                 |  4.22 ms |                    1× |
+| `effect_pass_1080p/transform`       |  4.02 ms |                 0.95× |
+| `effect_pass_1080p/mask`            |  4.18 ms |                 0.99× |
+| `effect_pass_1080p/luma_key`        |  4.65 ms |                  1.1× |
+| `effect_pass_1080p/hsl_secondary`   |  6.25 ms |                  1.5× |
+| `effect_pass_1080p/three_way`       |  6.41 ms |                  1.5× |
+| `effect_pass_1080p/color`           |  6.89 ms |                  1.6× |
+| `effect_pass_1080p/sharpen`         |  14.0 ms |                  3.3× |
+| `effect_pass_1080p/blur_one_axis`   |   184 ms |                   44× |
+| `chain_passes_3_effects`            |   104 ns |                       |
+
+Two things are worth reading off it.
+
+**A three-way corrector costs less than a colour adjustment.** Lift, gamma and
+gain is a multiply, an add and a `pow` per channel; the colour adjustment is all
+of that plus a saturation mix and a tint. The six controls the user sees are
+resolved into three vectors on the CPU — see `three_way_response` — so none of
+that arithmetic is in the shader at all. Nothing here scales with how many
+controls are moved away from neutral, which is why a full grade costs what a
+touched one does.
+
+**A secondary is not the expensive thing it sounds like.** Two colour-space
+conversions per pixel land at 1.5×, level with the three-way and *under* the
+colour adjustment, because RGB↔HSL is comparisons and a handful of multiplies
+while the colour adjustment has a three-component `pow`. A qualifier is one
+pass, not a mask pipeline, which is what keeps it there.
+
+A white balance is not in the table because there is nothing separate to
+measure: it is drawn by the `color` program, so it costs that row exactly. The
+arithmetic that turns a temperature and a tint into three gains happens once
+per frame on the CPU rather than once per pixel.
+
+### Scopes
+
+Reading the composited picture back and counting it, on the same container,
+default sample size:
+
+| Benchmark                              |     Time |
+|----------------------------------------|---------:|
+| `scope_readback/sample_256_wide`       |   402 µs |
+| `scope_readback/read_1080p_target`     |  1.33 ms |
+| `scope_count_256x144/histogram`        |   266 µs |
+| `scope_count_256x144/vectorscope`      |   321 µs |
+| `scope_count_256x144/waveform_luma`    |   434 µs |
+| `scope_count_256x144/waveform_parade`  |   822 µs |
+| `scope_held_frame`                     |  2.46 ns |
+
+**Sampling small is worth 3.3× on the readback alone**, and that is the
+conservative half of the argument: the counting that follows is proportional to
+the sample, so reading the 1080p target would have multiplied the 266 µs
+histogram by 56 as well. What the table shows is that the cost of a scope is
+bounded by the scope rather than by the resolution of the sequence being cut —
+a 4K timeline reads back the same 256×144 and counts the same 36,864 pixels.
+
+**The number that matters most is the last one.** A grade is dialled in on a
+held frame, so the same composite is presented on every repaint; noticing that
+and doing nothing costs 2.46 ns, against the ~700 µs of reading and counting it
+would otherwise repeat sixty times a second. The panel does the same for the
+upload: an unchanged trace is not re-uploaded.
+
+During playback, where every frame *is* a new composite, a waveform costs about
+840 µs of a 33 ms frame at 30 fps — around 2.5%, on a software rasteriser. A
+parade counts three traces rather than one and comes to 1.22 ms, half again as
+much.
+
+#### Rounding was most of it
+
+The counting figures above are after one change. They began at 745 µs for the
+histogram, 548 µs for the vectorscope and 537 µs for the luma waveform, which
+is 20 ns per pixel for four array increments — far too slow to be the
+arithmetic.
+
+It was `f64::round`. Rust rounds half *away from zero*, which is not a rounding
+mode the hardware has, so `round()` is a call rather than an instruction — and
+every plot rounds at least once per pixel, the histogram four times. Adding a
+half and truncating is the same answer for a number that cannot be negative and
+is the single instruction the hardware does have. That took the histogram to
+**2.8×** faster, the vectorscope to 1.7× and the waveform to 1.2×.
+
+Two other suspects were measured and found innocent, and are not in the code
+because of it: hoisting the per-pixel integer modulo that derives a column out
+of an index bought under 5%, and replacing the span's two integer divisions
+with a float multiply bought nothing at all.
 
 ## Waveforms
 
@@ -579,6 +672,11 @@ Named because their absence is a gap, not because they are unimportant:
   are hits — which is exactly where the cache should matter most
 - Effects at 4K, where the decision to run a chain at the source's own
   resolution rather than the canvas's is at its most expensive
+- The scopes during sustained playback. Each stage is measured and the
+  arithmetic says a waveform is about 2.5% of a 30 fps frame, but nothing here
+  has run the editor for a minute with a scope open and counted dropped frames
+- The scope readback on real hardware, where a map-and-wait behaves quite
+  differently from one on a software rasteriser that has nothing to stall on
 - The animation editor as an interaction: the property evaluation under it is
   measured, the drawing of a few hundred keyframes and a sampled curve is not
 - Thumbnail generation (not written yet)

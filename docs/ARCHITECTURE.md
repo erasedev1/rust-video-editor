@@ -385,6 +385,120 @@ number of times, so past a certain radius the taps spread out rather than
 multiply — see [BENCHMARKS.md](BENCHMARKS.md#effects) for what that costs and
 where it stops costing more.
 
+#### Grading
+
+The three grading effects — a three-way corrector, a white balance and an HSL
+secondary — needed no new machinery at all. They are registry entries and
+shader entry points, and the inspector, the keyframes, the graph editor, the
+render cache and the project format picked them up without changing. That was
+the claim the registry was written to make good on, and it is the only evidence
+that matters for it.
+
+Two decisions in them are worth stating.
+
+**The controls are not the arithmetic.** A three-way corrector has six
+controls — a colour wheel and a level for each of the shadows, the midtones and
+the highlights. What the shader gets is three vectors, and the conversion is
+`three_way_response` on the CPU:
+
+```
+out = (in · slope + lift) ^ exponent      slope = gain − lift
+```
+
+An input of 0 comes out at `lift` and an input of 1 at `gain`, so the two ends
+of the range are dialled directly and the exponent bends what lies between them.
+Every control at neutral gives `(1, 0, 1)`, which is the identity — asserted
+rather than assumed, because a grade that moved the picture the moment it was
+added would make "what did I do?" unanswerable. The neutral of a wheel is the
+*middle* of its range rather than either end, because a wheel is an offset;
+white would mean "push everything towards white", which is what a tint means.
+
+The no-op check is on the resolved response and not on whether the user touched
+a control, so a wheel keyframed back to the centre costs nothing, exactly like
+one that was never moved — and a control added later cannot be forgotten in it.
+
+**Kinds and programs are not the same list.** A white balance is a per-channel
+multiply, and `fs_color` already is one, so the `verge.color.balance` kind
+dispatches to the *colour adjust* program with a computed tint. What the kind
+adds is the arithmetic between two intuitive controls and three gains, divided
+by their own Rec. 709 luma so that white comes out at the brightness it went in
+at. Without that, every cooling is also a darkening, and a colourist correcting
+one would spend the rest of the grade undoing the other.
+
+The HSL secondary carries hue in **turns** rather than degrees, so the wrap is
+`fract`: red sits at both ends of the circle, and a band centred on it has to
+reach across that seam rather than stopping dead at it. A saturation floor
+gates the selection, because grey's hue is whatever the arithmetic happened to
+produce and without the floor a band centred anywhere would select every
+neutral in the frame. `Show Matte` draws the selection in black and white —
+dialling a qualifier by looking at the graded picture means guessing at the
+edges of the key from the other side of a grade.
+
+What is **not** here is a curve. A tone curve is the other half of a grading
+toolkit and it needs a parameter kind that is not a number, a point or a
+colour — a list of control points with handles, and a control that is not a
+slider. That is a change to the registry's shape rather than one more entry in
+it, which is the same reason a track matte waits rather than arriving as one
+more effect.
+
+### Scopes
+
+A grade cannot be judged by eye. A monitor's own contrast, the light in the
+room and the last ten minutes of looking at the same shot all move what
+"neutral" looks like; none of them move where the numbers are. So there are
+instruments: a waveform in luma, RGB overlay or parade, a vectorscope, and a
+histogram.
+
+**They read the composited frame** — after the grade, after every effect, after
+the blend with whatever is underneath. That is the only reading worth having:
+what is being judged is the picture that will be delivered, not an estimate
+assembled from the parameters that made it. It is the same argument as one
+compositor rather than two, applied to measurement instead of to rendering.
+
+**They read it small.** The picture is scaled into a target 256 pixels across
+and read back from there. A scope is a statistic, and thirty thousand samples
+locate a black level far better than the width of a line on screen; reading an
+HD target back instead costs eight megabytes over the bus and a stall to wait
+for the map, every frame. The consequence is stated rather than hidden: a scope
+here will not show a single stray hot pixel. It is an instrument for judging a
+grade, not for auditing a delivery.
+
+Three rules keep the cost where it belongs.
+
+- **Closed costs nothing.** The sampler is not idle while the panel is shut; it
+  does not exist. No readback, no stall, not even the small target.
+- **A picture already sampled is not sampled again**, which is the common case:
+  a grade is dialled in on a held frame, so the same composite is presented on
+  every repaint. Noticing that costs nanoseconds.
+- **The trace is an image and the graticule is not.** Tens of thousands of lit
+  cells is a picture, so it is counted into one and uploaded once; the lines
+  over it are stroked by the painter, so they stay crisp when the panel is
+  resized and do not have to be re-counted to be redrawn.
+
+Everything counts *straight* colour. A target holds premultiplied, so the alpha
+is divided back out first: a half-covered white pixel is white, and a scope
+plotting it at half would report a grade nobody made. A pixel with no coverage
+has no colour to report and is left out of the count entirely rather than
+counted as black — otherwise a title over nothing would bury its own waveform
+under a floor of zeros that is not in the picture.
+
+The vectorscope has rings and a neutral cross and no primary targets. The boxes
+on a broadcast vectorscope are the positions of 75% colour bars under one
+standard; drawing them over a Rec. 709 colour-difference plot would invite a
+reading they do not support. What the rings say is how saturated, which is what
+this instrument is for.
+
+This is the only place in the editor that reads back from the GPU
+interactively — everywhere else hands the view straight to the interface, and
+the export has nothing else to do while it waits. It is affordable because it
+is small and because it happens once per distinct composite rather than once
+per repaint. `FrameComposer` gains exactly one method for it, which hands back
+a scaled copy of one composite and nothing else, rather than exposing the
+renderer.
+
+See [BENCHMARKS.md](BENCHMARKS.md#scopes) for what each stage costs, and for
+the rounding that turned out to be most of it.
+
 ### The render cache
 
 A composited picture is cached on a **hash of everything the compositor read to
