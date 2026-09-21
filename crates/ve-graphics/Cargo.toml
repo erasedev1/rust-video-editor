@@ -17,3 +17,8 @@ ttf-parser = "0.25"
 
 [dev-dependencies]
 criterion = { workspace = true }
+ve-time = { workspace = true }
+
+[[bench]]
+name = "raster"
+harness = false

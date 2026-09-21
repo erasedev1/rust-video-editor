@@ -3902,6 +3902,7 @@ dependencies = [
  "tiny-skia",
  "ttf-parser",
  "ve-core",
+ "ve-time",
 ]
 
 [[package]]

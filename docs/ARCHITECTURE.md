@@ -1080,6 +1080,60 @@ same token they cannot fail an export that has already rendered: a caption file
 that could not be written is reported as a problem, like a layer that would not
 decode.
 
+## Graphics
+
+A **graphic** is a picture the project owns: a shape or a run of text, sitting
+beside compositions as a project-level object. A clip draws one through
+`Source::Graphic`, so editing the graphic changes every clip drawing it — which
+is what makes it one object rather than a copy per clip.
+
+### Nothing new in the model
+
+A graphic's values are `Property<T>`, the type every animated value in the
+editor uses. Keyframing a shape's size is therefore the same command, the same
+graph editor and the same evaluation as keyframing opacity.
+
+What that cost was generalising the keyframe commands, which had been written
+against a clip: `edit_property` now takes a `Property<T>` and a closure that
+unpacks a type-erased `PropertyValue` into it, and `PropertyRef::capture` is its
+read-side twin. Clips, composition layers and graphics all reach the same six
+cases. Capturing and restoring a property *whole* is also what makes undo
+exact — a retime that collapsed two keyframes onto one tick has no inverse to
+replay, so the list is put back rather than reversed.
+
+### Animatable and not
+
+Three commands, split by how they merge:
+
+* **Animatable values** — a size, a colour, a radius — merge, so a slider drag
+  is one undo step.
+* **Text** merges, so typing a sentence is one step rather than forty.
+* **Choices** — which shape, which font, how lines align — do not merge and are
+  not animatable. None has a halfway point, and putting them through the
+  property commands would mean inventing an interpolation for "rectangle to
+  ellipse".
+
+### Drawn on the CPU, paid for by the cache
+
+`ve-graphics` rasterises with `tiny-skia`, shapes text with `rustybuzz` and
+finds fonts with `fontdb`. This is the one place the per-frame path leaves the
+GPU, deliberately: outlining a glyph and filling a path are work that belongs
+where the fonts and the path library live, and the result is an ordinary RGBA
+image that the compositor then treats exactly like a decoded frame.
+
+Drawing is not cheap — a line of text at 72px is 1.7 ms — so what makes it
+affordable is that it almost never happens. A title is on screen for a hundred
+and fifty frames and drawn on one of them; the rest are cache hits at 108 ns.
+The key is a hash of the evaluated state, the same content-addressed approach
+the composite cache takes, so invalidation follows from the key rather than
+from a dependency list that can go out of date.
+
+The consequence is stated rather than hidden: an **animated** graphic misses
+that cache on every frame, because a keyframed size is a different picture each
+time. Animating a graphic's *transform* is cheap — the GPU applies it to a
+picture already drawn — while animating its *content* is not. That is why they
+are different controls.
+
 ## The project file
 
 See [PROJECT_FORMAT.md](PROJECT_FORMAT.md). In short: pretty-printed JSON behind

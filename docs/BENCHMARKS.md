@@ -13,6 +13,7 @@ cargo bench -p ve-render --bench scopes       # reading the picture back and cou
 cargo bench -p ve-media  --bench waveforms    # audio analysis and display
 cargo bench -p ve-engine --bench audio        # mixing, metering and fades
 cargo bench -p ve-media  --bench sync         # multicam syncing
+cargo bench -p ve-graphics --bench raster     # shapes and text
 cargo bench -p ve-caption --bench captions    # reading, writing and finding captions
 cargo bench -p ve-export --bench export       # encoding, readback and a whole second
 cargo bench -p ve-export --bench proxy        # what a proxy costs and what it buys
@@ -724,6 +725,61 @@ a scan, so the cost is in the *logarithm* of the track's length. At 19 ns a
 frame the overlay is about a millionth of a 30 fps frame budget, which is the
 answer to "should it be cached?" — there is nothing there to cache.
 
+## Shapes and text
+
+Same container, `cargo bench -p ve-graphics --bench raster`. A graphic is
+rasterised on the **CPU** — everything else the editor draws per frame is on the
+GPU, but outlining a glyph and filling a path belong where the fonts and the
+path library live — so what it costs is worth knowing exactly.
+
+| Drawn at 200px | Time | | Drawn at 800px | Time |
+|----------------|-----:|-|----------------|-----:|
+| Rectangle      | 55.1 µs | | Rectangle    | 1.01 ms |
+| Ellipse        | 139 µs  | | Ellipse      | 1.86 ms |
+| Five-point star| 234 µs  | | Five-point star | 3.41 ms |
+
+Two things are visible in that table. **Cost follows the area**: sixteen times
+the pixels costs thirteen to eighteen times as much, whatever the outline is.
+And **at the same size, a more intricate outline costs more** — a star is four
+times a rectangle — because more of its pixels are partly covered edge, and an
+antialiased edge is the expensive kind of pixel.
+
+Rounding a rectangle's corners turns four lines into four lines and four arcs,
+and costs 1.05 ms against 1.02 ms: about 3%, which is to say free.
+
+| Text at 72px | Time |
+|--------------|-----:|
+| A name       | 430 µs |
+| One line     | 1.71 ms |
+| Five lines   | 8.18 ms |
+
+Text is not shapes. Laying out a run means shaping it against the font's own
+tables before anything is filled, which is why a name costs eight times a
+rectangle of similar extent.
+
+### What it actually costs, which is the cache
+
+None of the figures above is what a timeline pays, because a title does not
+change on the frames it is on screen for. A lower third is up for five seconds
+— a hundred and fifty frames at 30 fps — and is drawn on one of them.
+
+| A held title, per frame | Time | |
+|-------------------------|-----:|--|
+| Drawn                   | 440 µs | 1× |
+| Found in the cache      | **108 ns** | 4,070× cheaper |
+
+That is the number that decides whether graphics belong on the frame path, and
+it is why the rasteriser is a cache with a budget rather than a function. The
+key is a hash of the state that produced the picture — the same
+content-addressed idea the composite cache uses — so invalidation is a
+consequence of the key rather than a list of dependencies that can go stale.
+
+An **animated** graphic is the case that misses: a title whose size is
+keyframed is a different picture on every frame, and pays the draw each time.
+That is a real cost and it is not hidden here — it is why animating a graphic's
+*transform* (which the GPU applies to a cached picture) is cheap while
+animating its *content* is not, and why the two are different controls.
+
 ## Live measurements
 
 The editor's own overlay reports what it is doing, measured the same way. From
@@ -780,3 +836,6 @@ Named because their absence is a gap, not because they are unimportant:
 - The angle viewer's per-frame cost. It decodes one frame per camera per
   instant through the same service the preview uses, so the cost is a decode
   and a thumbnail upload; neither is measured separately yet.
+- Font loading. The first graphic that needs a family pays for the system font
+  database to be scanned, once per process; the figures above are all measured
+  warm, which is what every frame after the first sees.

@@ -39,6 +39,9 @@ The first vertical slice is complete and tested end to end:
 - Multicam: group the cameras that covered one event, sync them on their sound
   or on timecode, and cut between them with the number keys while the angle
   viewer shows every camera at once
+- Shapes and titles made in the editor — rectangles, ellipses, polygons and
+  stars, and text with a font, a size, alignment and wrapping — each one an
+  object the project owns, so editing it changes every clip that draws it
 - Keyframe any transform, audio or effect property, with hold, linear and eased
   interpolation, from an animation editor that shares the timeline's own time
   axis
@@ -145,9 +148,12 @@ Captions: a lane per language under the tracks, the selected caption in the
 inspector with its text, its span and the reading speed a captioner works to,
 and the same caption drawn over the picture. That overlay is the *editor*
 drawing text, not the compositor: an export writes the captions as a file beside
-the delivery — `film.mp4` and `film.en.srt` — because burning them into the
-picture needs the text rendering the next phase brings. Press **C** for a
-caption at the playhead, **Shift+C** to show or hide the overlay.
+the delivery, `film.mp4` and `film.en.srt`. Burning them into the picture is a
+separate decision and remains unmade. Phase 8 brought the text rendering it
+would need, so what is left is the choice rather than the machinery: a sidecar
+is what a delivery is normally asked for, and a burn-in cannot be undone once
+written. Press **C** for a caption at the playhead, **Shift+C** to show or hide
+the overlay.
 
 ![The angle viewer, with a multicam clip cut between three cameras](docs/images/multicam.png)
 
@@ -156,6 +162,16 @@ preview with the camera on screen outlined, and a clip cut into three by pressin
 2 and then 3. The numbers on the tiles are the controls, so they are assigned
 over every angle rather than only the enabled ones — a grid that renumbered
 itself mid-shot would move them under your fingers.
+
+![A title and a shape made in the editor](docs/images/graphics.png)
+
+Graphics: a star on one track over a title on another, both made from the
+Graphic menu and both project-level objects rather than clips — so editing one
+changes every clip that draws it. The inspector shows the shape's own controls
+under the clip's transform, because selecting the clip is selecting what it
+shows. Only the controls a kind actually has are drawn: a star gets its notch
+depth, text gets its font and alignment, and fill and stroke are shared because
+they mean the same thing on both.
 
 The development overlay reports what the frame actually cost, broken down by
 stage, so a regression is visible while editing rather than weeks later:
@@ -299,7 +315,7 @@ says so in the performance overlay, and keeps cutting.
 ## Testing
 
 ```sh
-cargo test --workspace     # 1026 tests
+cargo test --workspace     # 1132 tests
 cargo bench                # measured, not estimated
 ```
 

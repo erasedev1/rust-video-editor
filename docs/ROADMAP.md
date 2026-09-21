@@ -548,7 +548,11 @@ of someone's corrections because the wrong lane was selected is not a mistake
 worth making possible.
 
 What is **not** here. There is no burn-in and no subtitle stream muxed into the
-container, for the reasons above. Captions carry no position, alignment or
+container, for the reasons above — and note that the *reason* for the first has
+changed since this was written: Phase 8 brought the text rendering a burn-in
+would need, so what is left is the decision rather than the machinery. A
+sidecar is what a delivery is normally asked for, and a burn-in cannot be
+undone once it is written. Captions carry no position, alignment or
 styling: a cue is text and a span, and a file that has those says so on import
 rather than being half-honoured. There is no speech recognition — that is a
 model, not an editor feature, and the file it would produce is one this already
@@ -560,7 +564,66 @@ captions costs, and what finding the one on screen costs per frame.
 
 ## Phase 8 — Motion graphics
 
-Shapes, text, text animation, nested compositions, motion paths, expressions.
+- Shapes ✅ — rectangles, ellipses, polygons and stars, with fill and stroke
+- Text ✅ — a font, a size, alignment and wrapping, shaped and drawn
+- Nested compositions ✅ — delivered in Phase 3
+- Text animation, motion paths, expressions
+
+**Shapes and text are done; the rest of the phase is not.**
+
+A **graphic** is the first thing in the project that is neither media nor an
+arrangement of it: it is the picture itself. So it sits beside compositions as
+a project-level object, a clip draws it through `Source::Graphic`, and editing
+it changes every clip drawing it — which is what makes it one object rather
+than a copy per clip.
+
+Everything the model already had, it kept. A graphic's values are
+`Property<T>`, the same type every animated value in the editor uses, so
+keyframing a shape's size needs no graphic-specific machinery: it is the same
+command, the same graph editor and the same evaluation as opacity. What that
+cost was making the keyframe commands generic — they were written against a
+clip — and the payment was one function taking a `Property<T>` and a way to
+unpack a value into it, shared now by clips, composition layers and graphics
+alike.
+
+**Three kinds of change, three commands**, because they merge differently. An
+animatable value merges, so a slider drag is one undo step. Text merges, so
+typing a sentence is one step rather than forty. And the choices that are not
+numbers — which shape, which font, how lines align — do not merge and are not
+animatable, because none of them has a halfway point and putting them through
+the property commands would mean inventing an interpolation for "rectangle to
+ellipse".
+
+Graphics are rasterised on the **CPU**, which is the one place this phase
+steps off the GPU path, and deliberately: outlining a glyph and filling a path
+are work that belongs where the fonts and the path library live. What makes
+that affordable is not the draw but the **cache** — a title is on screen for a
+hundred and fifty frames and drawn on one of them, and the other hundred and
+forty-nine cost 108 ns apiece instead of 440 µs. The key is a hash of the state
+that produced the picture, the same content-addressed idea the composite cache
+uses, so invalidation is a consequence of the key rather than a list that can
+go stale.
+
+The consequence is said out loud rather than hidden: an **animated** graphic
+misses that cache. A title whose size is keyframed is a different picture every
+frame and pays the draw each time. That is why animating a graphic's
+*transform* — which the GPU applies to a picture already drawn — is cheap while
+animating its *content* is not, and why the two are different controls rather
+than one list.
+
+What is **not** here. There is no **text animation** in the sense the phase
+means it: a title's characters cannot yet be animated individually, which needs
+a per-glyph transform the layout does not currently hand back. There are no
+**motion paths** — a position that follows a curve rather than interpolating
+between keyframes — which needs a path as a property kind, a change to the
+registry's shape rather than one more entry in it. There are no
+**expressions**, which need a language and a sandbox and belong with the
+ecosystem work rather than being smuggled in here. And there is no **gradient
+fill**: fill is a colour, and making it a colour *or* a ramp is a change to
+every place fill is read.
+
+See [BENCHMARKS.md](BENCHMARKS.md#shapes-and-text) for what drawing one costs
+and what the cache is worth against it.
 
 ## Phase 9 — Ecosystem
 
