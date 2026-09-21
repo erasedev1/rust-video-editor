@@ -4,6 +4,7 @@
 //! mutating anything, so the drawing pass stays free of edit logic and every
 //! operation goes through the one undoable path.
 
+pub mod angles;
 pub mod animation;
 pub mod curves;
 pub mod export;

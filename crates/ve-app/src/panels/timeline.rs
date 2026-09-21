@@ -805,7 +805,7 @@ fn waveform_area(
 }
 
 /// Truncates a label to fit, with an ellipsis.
-fn elide(text: &str, width: f32) -> String {
+pub(crate) fn elide(text: &str, width: f32) -> String {
     // Roughly 5.6 px per character at 10.5 pt proportional; close enough to
     // avoid measuring every label every frame.
     let max_chars = (width / 5.6).floor().max(1.0) as usize;

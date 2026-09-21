@@ -26,6 +26,7 @@ pub mod clock;
 mod cpal_sink;
 mod engine;
 pub mod mixer;
+pub mod multicam;
 pub mod output;
 pub mod plan;
 pub mod ring;
@@ -38,6 +39,7 @@ pub use engine::{
     Viewing,
 };
 pub use mixer::{AudioMixer, Meter, MixSource, MixStats};
+pub use multicam::{multicam_at, AngleView, MulticamAt};
 pub use output::{AudioLevels, AudioOutput};
 pub use plan::{
     evaluate, evaluate_composition, evaluate_frames, evaluate_project, AudibleItem, Draw,

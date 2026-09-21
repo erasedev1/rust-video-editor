@@ -215,6 +215,10 @@ impl WaveformService {
     }
 
     /// Runs `f` against an asset's peaks, if it has any.
+    ///
+    /// The registry lock is held for the duration, and it is **not** reentrant:
+    /// calling this again from inside `f` deadlocks the calling thread. Two
+    /// waveforms at once is what [`WaveformService::with_waveforms`] is for.
     pub fn with_waveform<R>(
         &self,
         asset: AssetId,
@@ -225,6 +229,33 @@ impl WaveformService {
         let entry = registry.entries.get_mut(&asset)?;
         entry.last_used = clock;
         Some(f(&entry.waveform))
+    }
+
+    /// Runs `f` against two assets' peaks under one lock.
+    ///
+    /// Exists because the obvious spelling — nesting one
+    /// [`WaveformService::with_waveform`] inside another — takes the registry
+    /// lock twice on one thread and hangs. Comparing two waveforms is what
+    /// syncing a multicam group does, so it gets a call that can express it.
+    ///
+    /// `None` if either asset has no peaks yet. Asking for the same asset twice
+    /// is allowed and hands the same waveform to both arguments.
+    pub fn with_waveforms<R>(
+        &self,
+        first: AssetId,
+        second: AssetId,
+        f: impl FnOnce(&Waveform, &Waveform) -> R,
+    ) -> Option<R> {
+        let mut registry = self.shared.registry.lock();
+        let clock = registry.tick();
+        // Both are touched for LRU before either is borrowed, so the borrows
+        // below can be shared and the same asset can be asked for twice.
+        for asset in [first, second] {
+            registry.entries.get_mut(&asset)?.last_used = clock;
+        }
+        let a = registry.entries.get(&first)?;
+        let b = registry.entries.get(&second)?;
+        Some(f(&a.waveform, &b.waveform))
     }
 
     /// Drops an asset's peaks, cancelling its analysis if one is running.

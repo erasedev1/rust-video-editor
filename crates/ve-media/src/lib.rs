@@ -47,7 +47,7 @@ pub use service::{
     budget, DecodeEvent, DecodeFailure, DecodeService, FrameReady, FrameRequest,
     RequestPriority,
 };
-pub use sync::{align, SyncMatch, DEFAULT_MAX_OFFSET, MIN_CONFIDENCE};
+pub use sync::{align, timecode_start, SyncMatch, DEFAULT_MAX_OFFSET, MIN_CONFIDENCE};
 pub use waveform::{
     analyse, analyse_file, Peak, Waveform, WaveformBuilder, ANALYSIS_CHANNELS, BUCKET_TICKS,
     PEAKS_PER_SECOND,

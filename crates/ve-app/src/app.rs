@@ -56,6 +56,7 @@ pub struct VergeApp {
     /// because it is an egui texture, and the state is deliberately free of
     /// egui types so the action layer can be driven without a window.
     scope_textures: panels::scopes::ScopeTextures,
+    angle_textures: panels::angles::AngleTextures,
     /// When the previous frame began, so the overlay can report the interval
     /// the user actually sees rather than the cost of any one stage.
     last_frame_at: Option<std::time::Instant>,
@@ -142,6 +143,7 @@ impl VergeApp {
             last_update: None,
             show_shortcuts: false,
             scope_textures: panels::scopes::ScopeTextures::default(),
+            angle_textures: panels::angles::AngleTextures::default(),
             last_frame_at: None,
         };
 
@@ -599,6 +601,15 @@ impl VergeApp {
                         actions_out.push(Action::ToggleScopes);
                         ui.close();
                     }
+                    let mut angles = self.state.show_angle_viewer;
+                    if ui
+                        .checkbox(&mut angles, "Angle Viewer    Ctrl+M")
+                        .on_hover_text("Every camera in the group under the playhead, at once")
+                        .clicked()
+                    {
+                        actions_out.push(Action::ToggleAngleViewer);
+                        ui.close();
+                    }
                     ui.menu_button("Scope", |ui| {
                         for kind in ScopeKind::ALL {
                             let on = self.state.scopes.open && self.state.scopes.kind == kind;
@@ -778,7 +789,11 @@ impl eframe::App for VergeApp {
         // 2. Keyboard, unless a text field has the keyboard.
         if !ctx.egui_wants_keyboard_input() {
             let width = root.max_rect().width();
-            pending_actions.extend(crate::shortcuts::collect(&ctx, width));
+            pending_actions.extend(crate::shortcuts::collect(
+                &ctx,
+                width,
+                self.state.show_angle_viewer,
+            ));
         }
 
         // 3. Interface.
@@ -852,6 +867,38 @@ impl eframe::App for VergeApp {
                         &self.state,
                         self.preview.as_ref().and_then(|p| p.scope_sample()),
                         &mut self.scope_textures,
+                        &mut pending_actions,
+                    );
+                });
+        }
+
+        // Under the preview rather than beside it: a viewer's tiles and the
+        // picture they are cut into want to be compared, and a column of them
+        // down one edge would be too narrow to judge anything by.
+        let multicam = self
+            .state
+            .active_sequence()
+            .and_then(|sequence| {
+                ve_engine::multicam_at(
+                    &self.state.project,
+                    sequence,
+                    position,
+                    self.state.selection.track,
+                )
+            })
+            .filter(|_| self.state.show_angle_viewer);
+        if let Some(view) = &multicam {
+            egui::Panel::bottom("angles")
+                .resizable(true)
+                .default_size(190.0)
+                .min_size(80.0)
+                .show(root, |ui| {
+                    panels::angles::show(
+                        ui,
+                        &self.state,
+                        view,
+                        self.engine.decode_service(),
+                        &mut self.angle_textures,
                         &mut pending_actions,
                     );
                 });
@@ -934,6 +981,9 @@ impl eframe::App for VergeApp {
         // 5. Housekeeping.
         self.poll_export();
         actions::poll_proxies(&mut self.state, &mut self.engine);
+        // A sync waiting on analysis finishes here, on whichever repaint the
+        // last waveform lands. Cheap while it waits: a state lookup per camera.
+        actions::finish_pending_sync(&mut self.state, &self.waveforms);
         self.maybe_autosave();
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.state.window_title()));
 
@@ -954,7 +1004,9 @@ impl eframe::App for VergeApp {
         // Repaint continuously while playing or while frames are still
         // decoding; otherwise egui sleeps until the next input, which is what
         // keeps an idle editor off the CPU entirely.
-        if playing || pending > 0 || waveform_progress {
+        // A pending sync waits on background analysis with no input event behind
+        // it either, so the frame that finishes it has to be asked for.
+        if playing || pending > 0 || waveform_progress || self.state.pending_sync.is_some() {
             ctx.request_repaint();
         } else if self.state.export.is_running() || self.state.proxies.is_running() {
             // An export or a proxy build reports about ten times a second and

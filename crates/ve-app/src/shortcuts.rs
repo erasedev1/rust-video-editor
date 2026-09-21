@@ -16,7 +16,11 @@ pub struct Binding {
 }
 
 /// Collects the actions the current frame's key presses call for.
-pub fn collect(ctx: &egui::Context, timeline_width: f32) -> Vec<Action> {
+pub fn collect(
+    ctx: &egui::Context,
+    timeline_width: f32,
+    angle_viewer_open: bool,
+) -> Vec<Action> {
     let mut actions = Vec::new();
 
     ctx.input_mut(|i| {
@@ -71,6 +75,33 @@ pub fn collect(ctx: &egui::Context, timeline_width: f32) -> Vec<Action> {
         if i.consume_key(ctrl, Key::Backspace) {
             actions.push(Action::CloseGapAtPlayhead);
         }
+        // Number keys cut to an angle while the viewer is open, which is the
+        // gesture multicam exists for. Shift switches the whole clip instead.
+        // Only consumed when the viewer is open, so a timeline with no
+        // multicam in it leaves the digits alone for whatever wants them next.
+        if angle_viewer_open {
+            for (number, key) in [
+                (1usize, Key::Num1),
+                (2, Key::Num2),
+                (3, Key::Num3),
+                (4, Key::Num4),
+                (5, Key::Num5),
+                (6, Key::Num6),
+                (7, Key::Num7),
+                (8, Key::Num8),
+                (9, Key::Num9),
+            ] {
+                if i.consume_key(shift, key) {
+                    actions.push(Action::SwitchToAngle(number));
+                } else if i.consume_key(plain, key) {
+                    actions.push(Action::CutToAngle(number));
+                }
+            }
+        }
+        if i.consume_key(ctrl, Key::M) {
+            actions.push(Action::ToggleAngleViewer);
+        }
+
         if i.consume_key(ctrl | shift, Key::F) {
             actions.push(Action::CrossfadeSelection(ve_core::FadeCurve::EqualPower));
         }
@@ -165,6 +196,9 @@ pub const BINDINGS: &[Binding] = &[
     Binding { label: "Ripple delete", keys: "Shift + Delete" },
     Binding { label: "Close gap at playhead", keys: "Ctrl + Backspace" },
     Binding { label: "Crossfade two overlapping clips", keys: "Ctrl + Shift + F" },
+    Binding { label: "Angle viewer", keys: "Ctrl + M" },
+    Binding { label: "Cut to an angle", keys: "1 – 9" },
+    Binding { label: "Switch to an angle without cutting", keys: "Shift + 1 – 9" },
     Binding { label: "Copy / cut / paste", keys: "Ctrl + C / X / V" },
     Binding { label: "Select all", keys: "Ctrl + A" },
     Binding { label: "Toggle clip enabled", keys: "E" },

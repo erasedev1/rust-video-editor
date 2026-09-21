@@ -19,6 +19,7 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
         });
     });
     proxy_bar(ui, state, actions);
+    multicam_bar(ui, state, actions);
     ui.separator();
 
     if state.project.assets.is_empty() {
@@ -49,6 +50,9 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
             let duration = asset.duration();
             let summary = summarise(asset);
             let proxy_badge = proxy_badge(asset, using_proxies);
+            let has_video = asset.info.has_video();
+            let picked = state.multicam_picks.contains(&asset_id);
+            let mut picked_now = false;
 
             let response = ui
                 .scope(|ui| {
@@ -62,6 +66,30 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
                             ui.set_width(ui.available_width());
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
+                                    // The tick that gathers cameras for a
+                                    // multicam group. Only offered for media
+                                    // that has a picture: an angle is a camera.
+                                    if has_video {
+                                        let mark = if picked { "◉" } else { "○" };
+                                        if ui
+                                            .add(
+                                                egui::Label::new(
+                                                    RichText::new(mark).small().color(
+                                                        if picked {
+                                                            theme::ACCENT
+                                                        } else {
+                                                            theme::TEXT_FAINT
+                                                        },
+                                                    ),
+                                                )
+                                                .sense(Sense::click()),
+                                            )
+                                            .on_hover_text("include in the next multicam group")
+                                            .clicked()
+                                        {
+                                            picked_now = true;
+                                        }
+                                    }
                                     if offline {
                                         ui.label(
                                             RichText::new("⚠").color(theme::OFFLINE).small(),
@@ -87,7 +115,9 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
                 .response
                 .interact(Sense::click());
 
-            if response.clicked() {
+            if picked_now {
+                actions.push(Action::ToggleMulticamPick(asset_id));
+            } else if response.clicked() {
                 state.selection.asset = Some(asset_id);
             }
             if response.double_clicked() {
@@ -246,4 +276,98 @@ fn proxy_badge(asset: &ve_core::MediaAsset, using_proxies: bool) -> Option<Proxy
             hover: format!("{} is built but switched off", proxy.path.display()),
         }
     })
+}
+
+/// The multicam groups this project has, and the one being assembled.
+///
+/// Sits with the media rather than on the timeline because a group is a fact
+/// about the footage — which cameras covered the same event — rather than about
+/// any particular cut of it.
+fn multicam_bar(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
+    let picks = state.multicam_picks.len();
+    if picks == 0 && state.project.multicams.is_empty() {
+        return;
+    }
+
+    ui.add_space(2.0);
+    if picks > 0 {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{picks} ticked")).small().color(theme::ACCENT));
+            if ui
+                .add_enabled(picks >= 2, egui::Button::new("Group"))
+                .on_hover_text("Make a multicam group from the ticked media")
+                .on_disabled_hover_text("Tick at least two cameras")
+                .clicked()
+            {
+                actions.push(Action::CreateMulticamGroup);
+            }
+        });
+    }
+
+    let target_track = default_track_for(state);
+    for group in &state.project.multicams {
+        let id = group.id;
+        egui::Frame::new()
+            .fill(theme::PANEL_RAISED)
+            .corner_radius(theme::RADIUS)
+            .inner_margin(egui::Margin::symmetric(6, 4))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&group.name).small().color(theme::TEXT));
+                    ui.label(
+                        RichText::new(format!(
+                            "{} cams · {}",
+                            group.len(),
+                            group.sync.label().to_lowercase()
+                        ))
+                        .small()
+                        .color(theme::TEXT_FAINT),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("Sync ♪")
+                        .on_hover_text("Measure the offsets by correlating the cameras' sound")
+                        .clicked()
+                    {
+                        actions.push(Action::SyncMulticam {
+                            group: id,
+                            method: ve_core::SyncMethod::Audio,
+                        });
+                    }
+                    if ui
+                        .small_button("Sync TC")
+                        .on_hover_text("Use the start timecode each file records")
+                        .clicked()
+                    {
+                        actions.push(Action::SyncMulticam {
+                            group: id,
+                            method: ve_core::SyncMethod::Timecode,
+                        });
+                    }
+                    if ui
+                        .add_enabled(target_track.is_some(), egui::Button::new("＋"))
+                        .on_hover_text("Add to the timeline at the playhead")
+                        .clicked()
+                    {
+                        if let Some(track) = target_track {
+                            let at =
+                                state.active_sequence().map(|s| s.playhead).unwrap_or_default();
+                            actions.push(Action::AddMulticamToTimeline {
+                                group: id,
+                                track,
+                                at,
+                            });
+                        }
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.small_button("✕").on_hover_text("Delete this group").clicked() {
+                            actions.push(Action::RemoveMulticamGroup(id));
+                        }
+                    });
+                });
+            });
+        ui.add_space(2.0);
+    }
 }

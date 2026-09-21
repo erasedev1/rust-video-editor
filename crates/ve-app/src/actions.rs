@@ -10,25 +10,27 @@ use std::path::PathBuf;
 
 use ve_command::{
     property_ref, AddClip, AddEffect, AddMarker, AddTrack, ClipProperty, Command, Compound,
-    CrossfadeClips, EditKeyframes, EffectHost, KeyframeEdit, KeyframePoint, MoveClip,
-    MoveEffect, MoveTrack, PropertyValue, RemoveClip, RemoveEffect, RemoveMarker, RemoveTrack,
-    RenameEffect, RollEdit, SetAssetProxy, SetClipBlendMode, SetClipEnabled, SetClipFade,
-    SetClipMotionBlur, SetClipProperty, SetClipSpeed, SetCompositionSettings, SetEffectEnabled,
-    SetEffectOption, SetSequenceColorSpace, SetSequenceFormat, SetSequenceMotionBlur,
-    SetTrackFlag, SetTrackLevel, SetUseProxies, ShiftClips, SlideClip, SlipClip, SplitClip,
-    TrackFlag, TrackLevel, TrimClip, TrimEdge,
+    CreateMulticamGroup, CrossfadeClips, CutToAngle, EditKeyframes, EffectHost, KeyframeEdit,
+    KeyframePoint, MoveClip, MoveEffect, MoveTrack, NewAngle, PropertyValue, RemoveClip,
+    RemoveEffect, RemoveMarker, RemoveMulticamGroup, RemoveTrack, RenameEffect,
+    ResyncMulticamGroup, RollEdit, SetAngleEnabled, SetAngleOffset, SetAssetProxy,
+    SetClipAngle, SetClipBlendMode, SetClipEnabled, SetClipFade, SetClipMotionBlur,
+    SetClipProperty, SetClipSpeed, SetCompositionSettings, SetEffectEnabled, SetEffectOption,
+    SetSequenceColorSpace, SetSequenceFormat, SetSequenceMotionBlur, SetTrackFlag,
+    SetTrackLevel, SetUseProxies, ShiftClips, SlideClip, SlipClip, SplitClip, TrackFlag,
+    TrackLevel, TrimClip, TrimEdge,
 };
 use ve_core::{
-    AssetId, BlendMode, Clip, ClipId, ColorSpace, EffectId, Fade, FadeCurve, FadeEdge,
-    Interpolation, MarkerId, MotionBlur, ParamValue, Project, SequenceId, Speed, TrackId,
-    TrackKind,
+    AngleId, AssetId, BlendMode, Clip, ClipId, ColorSpace, EffectId, Fade, FadeCurve, FadeEdge,
+    Interpolation, MarkerId, MotionBlur, MulticamId, ParamValue, Project, SequenceId, Source,
+    Speed, SyncMethod, TrackId, TrackKind,
 };
 use ve_engine::PlaybackEngine;
 use ve_media::WaveformService;
 use ve_project::{autosave, store};
 use ve_time::Ticks;
 
-use crate::state::{AnimationMode, EditorState, ScopeKind, Status, TimelineTool};
+use crate::state::{AnimationMode, EditorState, PendingSync, ScopeKind, Status, TimelineTool};
 use ve_render::WaveformMode;
 
 /// Something the user asked for.
@@ -128,6 +130,42 @@ pub enum Action {
     /// Applies to whatever canvas is being viewed: the sequence, or a
     /// composition when one is open.
     SetColorSpace(ColorSpace),
+
+    // Multicam
+    /// Ticks a piece of media for inclusion in the next group.
+    ToggleMulticamPick(AssetId),
+    /// Builds a group from the ticked media, starting every camera together.
+    CreateMulticamGroup,
+    RemoveMulticamGroup(MulticamId),
+    /// Measures the group's offsets. Audio syncing waits on analysis; timecode
+    /// syncing answers immediately.
+    SyncMulticam {
+        group: MulticamId,
+        method: SyncMethod,
+    },
+    SetAngleOffset {
+        group: MulticamId,
+        angle: AngleId,
+        offset: Ticks,
+        coalesce: bool,
+    },
+    SetAngleEnabled {
+        group: MulticamId,
+        angle: AngleId,
+        enabled: bool,
+    },
+    /// Places a multicam clip covering the group's whole length.
+    AddMulticamToTimeline {
+        group: MulticamId,
+        track: TrackId,
+        at: Ticks,
+    },
+    /// Splits the clip under the playhead and puts the rest on this camera.
+    CutToAngle(usize),
+    /// Changes which camera the clip under the playhead shows, over its whole
+    /// length, without cutting.
+    SwitchToAngle(usize),
+    ToggleAngleViewer,
     // Whether one clip is smeared across the shutter when it moves.
     SetClipMotionBlur {
         clip: ClipId,
@@ -1383,6 +1421,145 @@ pub fn dispatch(
             let on = state.timeline.snapping;
             state.set_status(Status::info(if on { "snapping on" } else { "snapping off" }));
         }
+        Action::ToggleMulticamPick(asset) => {
+            match state.multicam_picks.iter().position(|a| *a == asset) {
+                Some(index) => {
+                    state.multicam_picks.remove(index);
+                }
+                None => state.multicam_picks.push(asset),
+            }
+        }
+
+        Action::CreateMulticamGroup => {
+            let picks = state.multicam_picks.clone();
+            if picks.len() < 2 {
+                state.set_status(Status::warning(
+                    "tick at least two pieces of media to group them",
+                ));
+                return;
+            }
+            let angles: Vec<NewAngle> = picks
+                .iter()
+                .enumerate()
+                .map(|(index, asset)| {
+                    let name = state
+                        .project
+                        .asset(*asset)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| format!("Cam {}", index + 1));
+                    NewAngle::new(*asset, name)
+                })
+                .collect();
+            let number = state.project.multicams.len() + 1;
+            let command = Box::new(CreateMulticamGroup::new(
+                format!("Multicam {number}"),
+                angles,
+                // Nothing has been measured yet, so say so rather than claiming
+                // a sync that did not happen.
+                SyncMethod::Start,
+            ));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.multicam_picks.clear();
+                    let n = picks.len();
+                    state.set_status(Status::info(format!(
+                        "grouped {n} cameras — sync them from the project panel"
+                    )));
+                }
+                Err(e) => state.set_status(Status::error(e.to_string())),
+            }
+        }
+
+        Action::RemoveMulticamGroup(group) => {
+            match state
+                .history
+                .execute(&mut state.project, Box::new(RemoveMulticamGroup::new(group)))
+            {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.set_status(Status::info("multicam group deleted"));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SyncMulticam { group, method } => {
+            sync_multicam(state, waveforms, group, method);
+        }
+
+        Action::SetAngleOffset { group, angle, offset, coalesce } => {
+            let command = Box::new(SetAngleOffset::new(group, angle, offset));
+            let result = if coalesce {
+                state.history.execute_coalesced(&mut state.project, command)
+            } else {
+                state.history.execute(&mut state.project, command)
+            };
+            match result {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetAngleEnabled { group, angle, enabled } => {
+            let command = Box::new(SetAngleEnabled::new(group, angle, enabled));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::AddMulticamToTimeline { group, track, at } => {
+            let Some(angle) = state.project.multicam(group).and_then(|g| g.default_angle())
+            else {
+                state.set_status(Status::warning("that group has no cameras"));
+                return;
+            };
+            let duration = state.project.multicam_duration(group);
+            if duration.is_zero() {
+                state.set_status(Status::warning("that group has no footage"));
+                return;
+            }
+            let name = state
+                .project
+                .multicam(group)
+                .map(|g| g.name.clone())
+                .unwrap_or_else(|| "Multicam".into());
+            let id = state.project.new_clip_id();
+            let clip = Clip::new(
+                id,
+                Source::Multicam { group, angle },
+                name,
+                Ticks::ZERO,
+                at.clamp_non_negative(),
+                duration,
+            );
+            let command = Box::new(AddClip::new(sequence_id, track, clip));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.selection.select_only(id, track);
+                    state.set_status(Status::info("multicam clip added"));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::CutToAngle(number) => cut_to_angle(state, engine, sequence_id, number, true),
+
+        Action::SwitchToAngle(number) => {
+            cut_to_angle(state, engine, sequence_id, number, false)
+        }
+
+        Action::ToggleAngleViewer => {
+            state.show_angle_viewer = !state.show_angle_viewer;
+            state.set_status(Status::info(if state.show_angle_viewer {
+                "angle viewer open — press 1-9 to cut"
+            } else {
+                "angle viewer closed"
+            }));
+        }
+
         Action::TogglePerformanceOverlay => {
             state.show_performance_overlay = !state.show_performance_overlay;
         }
@@ -1402,6 +1579,233 @@ pub fn dispatch(
 }
 
 /// The "s" in "3 clips".
+/// Cuts, or switches, the multicam clip under the playhead to a numbered angle.
+///
+/// `cut` is what separates the two: cutting splits at the playhead and leaves
+/// what came before on the camera it was already on, while switching changes
+/// the whole clip. Both go through the same resolution, so a number means the
+/// same camera whichever gesture is used.
+fn cut_to_angle(
+    state: &mut EditorState,
+    engine: &PlaybackEngine,
+    sequence_id: SequenceId,
+    number: usize,
+    cut: bool,
+) {
+    let at = engine.clock().position();
+    let Some(sequence) = state.project.sequence(sequence_id) else { return };
+    let Some(view) =
+        ve_engine::multicam_at(&state.project, sequence, at, state.selection.track)
+    else {
+        state.set_status(Status::warning("no multicam clip under the playhead"));
+        return;
+    };
+    let Some(angle) = view.numbered(number) else {
+        state.set_status(Status::warning(format!(
+            "this group has {} camera{}",
+            view.angles.len(),
+            plural(view.angles.len())
+        )));
+        return;
+    };
+    if !angle.enabled {
+        state.set_status(Status::warning(format!("angle {number} is switched off")));
+        return;
+    }
+
+    let (angle_id, name) = (angle.angle, angle.name.clone());
+    let command: Box<dyn Command> = if cut {
+        Box::new(CutToAngle::new(sequence_id, view.track, view.clip, at, angle_id, number))
+    } else {
+        Box::new(SetClipAngle::new(sequence_id, view.clip, angle_id))
+    };
+
+    match state.history.execute(&mut state.project, command) {
+        Ok(()) => {
+            state.mark_edited();
+            state.set_status(Status::info(format!(
+                "{} angle {number} — {name}",
+                if cut { "cut to" } else { "switched to" }
+            )));
+        }
+        Err(e) => state.set_status(Status::warning(e.to_string())),
+    }
+}
+
+/// Starts a sync, and finishes it on the spot when it can.
+///
+/// Timecode syncing is a metadata read, so it answers immediately. Audio
+/// syncing needs every camera analysed, which the same background workers that
+/// draw the timeline's waveforms already do — so this asks for the waveforms it
+/// is missing and leaves a note in [`EditorState::pending_sync`] for
+/// [`finish_pending_sync`] to pick up once they exist.
+fn sync_multicam(
+    state: &mut EditorState,
+    waveforms: &WaveformService,
+    group: MulticamId,
+    method: SyncMethod,
+) {
+    let Some(g) = state.project.multicam(group) else { return };
+    if g.len() < 2 {
+        state.set_status(Status::warning("a group needs two cameras to sync"));
+        return;
+    }
+    let assets: Vec<AssetId> = g.angles.iter().map(|a| a.asset).collect();
+
+    match method {
+        SyncMethod::Start => {
+            let offsets = g.angles.iter().map(|a| (a.id, Ticks::ZERO)).collect();
+            apply_sync(state, group, offsets, SyncMethod::Start);
+        }
+        SyncMethod::Timecode => {
+            let angles: Vec<(AngleId, Option<Ticks>)> = g
+                .angles
+                .iter()
+                .map(|a| {
+                    let start = state
+                        .project
+                        .asset(a.asset)
+                        .and_then(|asset| ve_media::timecode_start(&asset.info));
+                    (a.id, start)
+                })
+                .collect();
+            let missing = angles.iter().filter(|(_, t)| t.is_none()).count();
+            if missing > 0 {
+                state.set_status(Status::warning(format!(
+                    "{missing} of {} cameras record no timecode",
+                    angles.len()
+                )));
+                return;
+            }
+            // The earliest timecode becomes the group's zero, so every offset
+            // is how far into that camera the shared zero falls.
+            let earliest = angles.iter().filter_map(|(_, t)| *t).min().unwrap_or(Ticks::ZERO);
+            let offsets = angles
+                .into_iter()
+                .map(|(id, t)| (id, earliest - t.unwrap_or(Ticks::ZERO)))
+                .collect();
+            apply_sync(state, group, offsets, SyncMethod::Timecode);
+        }
+        SyncMethod::Audio => {
+            let mut requested = 0usize;
+            for asset in &assets {
+                let Some(media) = state.project.asset(*asset) else { continue };
+                let Some(audio) = media.info.audio.as_ref() else { continue };
+                if waveforms.state(*asset).is_missing() && !media.offline {
+                    waveforms.request(*asset, &media.path, audio.sample_rate);
+                    requested += 1;
+                }
+            }
+            state.pending_sync = Some(PendingSync { group, method, assets });
+            state.set_status(Status::info(if requested > 0 {
+                "analysing the cameras' sound…".to_string()
+            } else {
+                "syncing on sound…".to_string()
+            }));
+        }
+        SyncMethod::Manual => {}
+    }
+}
+
+/// Finishes an audio sync once every camera has been analysed.
+///
+/// Called once a repaint. Cheap while it is waiting — a state lookup per
+/// camera — and it does the correlation exactly once, on the frame the last
+/// waveform lands.
+pub fn finish_pending_sync(state: &mut EditorState, waveforms: &WaveformService) {
+    let Some(pending) = state.pending_sync.clone() else { return };
+    if state.project.multicam(pending.group).is_none() {
+        state.pending_sync = None;
+        return;
+    }
+
+    let mut failed = Vec::new();
+    for asset in &pending.assets {
+        match waveforms.state(*asset) {
+            ve_media::WaveformState::Ready => {}
+            ve_media::WaveformState::Failed(message) => failed.push((*asset, message)),
+            // Still going, or never started because the file has no sound.
+            _ => {
+                if state.project.asset(*asset).is_some_and(|a| a.info.has_audio()) {
+                    return;
+                }
+                failed.push((*asset, "no sound to sync on".to_string()));
+            }
+        }
+    }
+
+    state.pending_sync = None;
+    if let Some((asset, message)) = failed.first() {
+        state.set_status(Status::warning(format!("cannot sync {asset}: {message}")));
+        return;
+    }
+
+    let Some(group) = state.project.multicam(pending.group) else { return };
+    let angles: Vec<(AngleId, AssetId)> =
+        group.angles.iter().map(|a| (a.id, a.asset)).collect();
+    let Some((reference_angle, reference_asset)) = angles.first().copied() else { return };
+
+    let mut offsets = vec![(reference_angle, Ticks::ZERO)];
+    let mut weakest = 1.0f32;
+    for (angle, asset) in angles.iter().skip(1) {
+        // One lock for both: nesting two `with_waveform` calls takes the
+        // registry lock twice on this thread and hangs.
+        let found = waveforms.with_waveforms(reference_asset, *asset, |a, b| {
+            ve_media::align(a, b, ve_media::DEFAULT_MAX_OFFSET)
+        });
+        match found.flatten() {
+            Some(m) => {
+                weakest = weakest.min(m.confidence);
+                offsets.push((*angle, m.angle_offset()));
+            }
+            // Nothing correlated: leave that camera where it was rather than
+            // moving it to a number nobody measured.
+            None => {
+                weakest = 0.0;
+                offsets.push((
+                    *angle,
+                    group.angle(*angle).map(|a| a.offset).unwrap_or(Ticks::ZERO),
+                ));
+            }
+        }
+    }
+
+    apply_sync(state, pending.group, offsets, SyncMethod::Audio);
+    // The weakest pair is what the group is worth: one camera that did not
+    // match makes the whole sync suspect, and averaging would hide it.
+    let percent = (weakest * 100.0).round() as i32;
+    if weakest < ve_media::MIN_CONFIDENCE {
+        state.set_status(Status::warning(format!(
+            "synced on sound, but the weakest match is only {percent}% — check it"
+        )));
+    } else {
+        state.set_status(Status::info(format!(
+            "synced on sound ({percent}% on the weakest pair)"
+        )));
+    }
+}
+
+fn apply_sync(
+    state: &mut EditorState,
+    group: MulticamId,
+    offsets: Vec<(AngleId, Ticks)>,
+    method: SyncMethod,
+) {
+    let command = Box::new(ResyncMulticamGroup::new(group, offsets, method));
+    match state.history.execute(&mut state.project, command) {
+        Ok(()) => {
+            state.mark_edited();
+            if method != SyncMethod::Audio {
+                state.set_status(Status::info(format!(
+                    "synced by {}",
+                    method.label().to_lowercase()
+                )));
+            }
+        }
+        Err(e) => state.set_status(Status::warning(e.to_string())),
+    }
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""

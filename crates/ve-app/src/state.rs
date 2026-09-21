@@ -605,6 +605,15 @@ pub enum TrimEdgeKind {
     End,
 }
 
+/// A multicam sync that cannot finish until analysis has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingSync {
+    pub group: ve_core::MulticamId,
+    pub method: ve_core::SyncMethod,
+    /// Every camera the sync is waiting on.
+    pub assets: Vec<ve_core::AssetId>,
+}
+
 /// A message shown in the status bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusLevel {
@@ -750,6 +759,19 @@ pub struct EditorState {
     /// about the sequence — which is what "open a composition" has to mean for
     /// it to be editable at all.
     pub open_composition: Option<CompositionId>,
+    /// Whether the angle viewer is open. Off by default: it costs a decode per
+    /// camera per frame, which is not a price to pay for a timeline that has no
+    /// multicam in it.
+    pub show_angle_viewer: bool,
+    /// Media ticked in the browser to go into the next multicam group.
+    ///
+    /// Interface state rather than project data — it is a half-finished
+    /// sentence, and nothing about it is worth saving or undoing.
+    pub multicam_picks: Vec<ve_core::AssetId>,
+    /// A sync waiting on analysis. Audio syncing needs every camera's waveform,
+    /// which the same background workers that draw the timeline produce; this
+    /// is what remembers to finish the job once they have.
+    pub pending_sync: Option<PendingSync>,
     /// Bumped whenever the project changes.
     ///
     /// The audio mixer runs on its own thread and cannot borrow the project, so
@@ -782,6 +804,9 @@ impl EditorState {
             export: ExportState::default(),
             proxies: ProxyState::default(),
             open_composition: None,
+            show_angle_viewer: false,
+            multicam_picks: Vec::new(),
+            pending_sync: None,
             revision: 0,
         }
     }
