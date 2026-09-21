@@ -27,6 +27,7 @@ fn video_info(seconds: i64) -> MediaInfo {
             codec: "aac".into(),
         }),
         container: "mp4".into(),
+        timecode: None,
     }
 }
 

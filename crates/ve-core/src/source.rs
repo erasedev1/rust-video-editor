@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::{AssetId, CompositionId};
+use crate::id::{AngleId, AssetId, CompositionId, MulticamId};
 
 /// The thing a clip or a composition layer draws from.
 ///
@@ -23,6 +23,16 @@ pub enum Source {
     /// Another composition, rendered into a texture and then treated exactly
     /// like a decoded frame.
     Composition(CompositionId),
+    /// One angle of a multicam group.
+    ///
+    /// Both halves are carried here rather than the angle alone, so a source
+    /// says what it means without a lookup: an `AngleId` on its own would need
+    /// the whole project scanned to find the group it belongs to, on every
+    /// decode and every draw.
+    ///
+    /// Cutting between angles changes `angle` and nothing else — see
+    /// [`crate::multicam`] for why that is the point rather than a convenience.
+    Multicam { group: MulticamId, angle: AngleId },
 }
 
 impl Source {
@@ -31,17 +41,47 @@ impl Source {
     /// Most call sites want this rather than a match: decoding, relinking and
     /// the media browser are all about assets specifically, and a nested
     /// composition is simply not their business.
+    /// The asset this draws from directly.
+    ///
+    /// A multicam source answers `None`: which file it reads depends on the
+    /// group table, which a `Source` does not carry. Callers that need it go
+    /// through [`crate::Project::resolve_source`], and the ones that do not —
+    /// the media browser, relinking — are asking about files a clip names
+    /// itself, which is exactly the distinction this keeps.
     pub fn asset(self) -> Option<AssetId> {
         match self {
             Source::Asset(id) => Some(id),
-            Source::Composition(_) => None,
+            Source::Composition(_) | Source::Multicam { .. } => None,
         }
     }
 
     pub fn composition(self) -> Option<CompositionId> {
         match self {
             Source::Composition(id) => Some(id),
-            Source::Asset(_) => None,
+            Source::Asset(_) | Source::Multicam { .. } => None,
+        }
+    }
+
+    /// The group and angle this draws, or `None` when it is not multicam.
+    pub fn multicam(self) -> Option<(MulticamId, AngleId)> {
+        match self {
+            Source::Multicam { group, angle } => Some((group, angle)),
+            Source::Asset(_) | Source::Composition(_) => None,
+        }
+    }
+
+    pub fn is_multicam(self) -> bool {
+        matches!(self, Source::Multicam { .. })
+    }
+
+    /// The same source showing a different angle.
+    ///
+    /// Returns `None` for anything that is not multicam, which is what stops a
+    /// stray angle change from quietly turning a plain clip into one.
+    pub fn with_angle(self, angle: AngleId) -> Option<Source> {
+        match self {
+            Source::Multicam { group, .. } => Some(Source::Multicam { group, angle }),
+            _ => None,
         }
     }
 
@@ -71,6 +111,9 @@ impl std::fmt::Display for Source {
         match self {
             Source::Asset(id) => write!(f, "asset {id}"),
             Source::Composition(id) => write!(f, "composition {id}"),
+            Source::Multicam { group, angle } => {
+                write!(f, "multicam {group} angle {angle}")
+            }
         }
     }
 }

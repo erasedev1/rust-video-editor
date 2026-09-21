@@ -83,6 +83,7 @@ fn audio_sequence(tracks: usize, faded: bool) -> (Project, SequenceId) {
                 codec: "pcm_s16le".into(),
             }),
             container: "wav".into(),
+            timecode: None,
         },
     );
     let sequence_id = project.active_sequence.unwrap();

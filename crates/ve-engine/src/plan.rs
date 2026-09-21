@@ -411,6 +411,16 @@ impl Evaluator<'_> {
     ) -> Option<PlanItem> {
         let draw = match source {
             Source::Asset(asset) => Draw::Media { asset, source_time },
+            // The one place the angle indirection is undone for the picture.
+            // Resolving here rather than at the clip means a multicam clip is
+            // an ordinary media draw by the time anything downstream sees it —
+            // the decode scheduler, the cache and the renderer never learn that
+            // multicam exists.
+            Source::Multicam { .. } => {
+                let project = self.project?;
+                let (asset, at) = project.resolve_source(source, source_time)?;
+                Draw::Media { asset, source_time: at }
+            }
             Source::Composition(id) => {
                 let project = self.project?;
                 if depth > MAX_NESTING_DEPTH {
@@ -524,6 +534,25 @@ impl Evaluator<'_> {
                     origin,
                     asset,
                     source_time,
+                    gain,
+                    pan: pan.clamp(-1.0, 1.0),
+                    track: None,
+                });
+            }
+            // A multicam clip's sound follows its picture: the angle on screen
+            // is the angle being heard. Cutting to another camera therefore
+            // cuts the sound too, which is what a multicam cut means and why a
+            // production that wants one continuous soundtrack lays that track
+            // separately rather than expecting the cut not to take it along.
+            Source::Multicam { .. } => {
+                let Some(project) = self.project else { return };
+                let Some((asset, at)) = project.resolve_source(source, source_time) else {
+                    return;
+                };
+                audio.push(AudibleItem {
+                    origin,
+                    asset,
+                    source_time: at,
                     gain,
                     pan: pan.clamp(-1.0, 1.0),
                     track: None,

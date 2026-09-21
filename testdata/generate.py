@@ -92,6 +92,73 @@ def make_av(name, seconds, fps, rate):
     print(f"  {name}: {frames} frames + audio")
 
 
+def sync_event(seconds, rate, seed):
+    """A recording of one event: a quiet floor with claps at irregular times.
+
+    Irregular is the point. A periodic event correlates nearly as well at every
+    multiple of its period, so a fixture built that way would test the search on
+    material that does not occur.
+    """
+    import math
+    import random
+
+    rng = random.Random(seed)
+    n = int(seconds * rate)
+    samples = [rng.uniform(-0.01, 0.01) for _ in range(n)]
+
+    at = 0.0
+    while at < seconds:
+        at += rng.uniform(0.15, 0.9)
+        if at >= seconds:
+            break
+        start = int(at * rate)
+        level = rng.uniform(0.3, 0.9)
+        length = int(rng.uniform(0.04, 0.25) * rate)
+        freq = rng.uniform(200, 2000)
+        for k in range(length):
+            if start + k >= n:
+                break
+            fade = (1.0 - k / length) ** 2
+            samples[start + k] += level * fade * math.sin(2 * math.pi * freq * k / rate)
+    return samples
+
+
+def write_wav(name, samples, rate, gain):
+    """Writes a signal as a 16-bit mono WAV, scaled by `gain`.
+
+    Mono and 16 kHz because what these fixtures exist to test is the *envelope*
+    — when the loud parts happen — and analysis reduces to 200 buckets a second
+    regardless. A stereo 48 kHz pair would be six times the bytes in the
+    repository and would not test one thing more.
+    """
+    import struct
+    import wave
+
+    with wave.open(str(OUT / name), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(rate)
+        frames = bytearray()
+        for value in samples:
+            v = int(max(-1.0, min(1.0, value * gain)) * 32767)
+            frames += struct.pack("<h", v)
+        f.writeframes(bytes(frames))
+    print(f"  {name}: {len(samples) / rate:.1f}s at gain {gain}")
+
+
+def make_sync_pair(rate=16000, seconds=6.0, late=1.5):
+    """Two cameras at one event: the second joins `late` seconds in, quieter.
+
+    Written with the standard library rather than through ffmpeg, so these two
+    need no external tool to regenerate.
+    """
+    event = sync_event(seconds, rate, seed=20260921)
+    write_wav("sync_cam_a.wav", event, rate, gain=0.8)
+    # The same event, recorded by a camera that was not rolling for the first
+    # `late` seconds and whose levels were set far lower.
+    write_wav("sync_cam_b.wav", event[int(late * rate):], rate, gain=0.15)
+
+
 if __name__ == "__main__":
     if subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0:
         sys.exit("the ffmpeg command-line tool is required to regenerate fixtures")
@@ -101,4 +168,5 @@ if __name__ == "__main__":
     make_video("counter_25fps.mp4", 25, 1, 50)
     make_audio("tone_48k.wav", 1, 48000, 440)
     make_av("av_30fps.mp4", 2, 30, 48000)
+    make_sync_pair()
     print("done")

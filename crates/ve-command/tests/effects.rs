@@ -26,6 +26,7 @@ fn fixture() -> (Project, SequenceId, ClipId, History) {
             }),
             audio: None,
             container: "mp4".into(),
+            timecode: None,
         },
     );
     let seq = p.active_sequence.unwrap();

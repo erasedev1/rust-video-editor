@@ -31,6 +31,7 @@ fn fixture() -> (Project, SequenceId, TrackId, AssetId) {
                 codec: "aac".into(),
             }),
             container: "mov".into(),
+            timecode: None,
         },
     );
     let track = p.sequence(seq).unwrap().tracks[0].id;

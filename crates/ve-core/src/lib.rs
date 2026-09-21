@@ -23,6 +23,7 @@ pub mod fade;
 pub mod geometry;
 pub mod id;
 pub mod motion;
+pub mod multicam;
 pub mod project;
 pub mod registry;
 pub mod sequence;
@@ -42,10 +43,11 @@ pub use effect::{
 pub use fade::{Fade, FadeCurve, FadeEdge};
 pub use geometry::{ColorSpace, Rgba, Size, Vec2};
 pub use id::{
-    AssetId, ClipId, CompositionId, EffectId, Id, IdAllocator, LayerId, MarkerId, SequenceId,
-    TrackId,
+    AngleId, AssetId, ClipId, CompositionId, EffectId, Id, IdAllocator, LayerId, MarkerId,
+    MulticamId, SequenceId, TrackId,
 };
 pub use motion::MotionBlur;
+pub use multicam::{MulticamAngle, MulticamGroup, SyncMethod};
 pub use project::{Project, ProjectSettings};
 pub use registry::{
     builtin_registry, EffectCategory, EffectDescriptor, EffectRegistry, ParamDescriptor,
@@ -83,6 +85,18 @@ pub enum CoreError {
     CompositionInUse { id: CompositionId, places: usize },
     #[error("a composition cannot contain itself, even indirectly")]
     CompositionCycle,
+    #[error("multicam group {0} not found")]
+    MulticamNotFound(MulticamId),
+    #[error("angle {0} not found")]
+    AngleNotFound(AngleId),
+    #[error("multicam group {id} is still used in {places} place(s)")]
+    MulticamInUse { id: MulticamId, places: usize },
+    #[error("asset {0} is already an angle in this group")]
+    AngleDuplicated(AssetId),
+    #[error("a multicam group needs at least two angles")]
+    MulticamTooFewAngles,
+    #[error("asset {0} is a camera in a multicam group")]
+    AssetIsAnAngle(AssetId),
     #[error("clips may not overlap on a track")]
     ClipOverlap,
     #[error("track is locked")]

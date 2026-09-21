@@ -31,6 +31,7 @@ fn tone_info(seconds: i64) -> MediaInfo {
             codec: "pcm_s16le".into(),
         }),
         container: "wav".into(),
+        timecode: None,
     }
 }
 

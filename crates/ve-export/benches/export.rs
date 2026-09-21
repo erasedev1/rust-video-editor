@@ -142,6 +142,7 @@ fn one_clip_project(size: Size) -> (Project, ve_core::SequenceId) {
         }),
         audio: None,
         container: "mp4".into(),
+        timecode: None,
     };
     let asset = project.add_asset(testdata("counter_30fps.mp4"), info);
     let sequence = project.active_sequence.unwrap();

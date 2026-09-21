@@ -28,6 +28,7 @@ fn video_info(seconds: i64) -> MediaInfo {
         }),
         audio: None,
         container: "mp4".into(),
+        timecode: None,
     }
 }
 

@@ -581,3 +581,89 @@ fn seeking_backwards_does_not_rewind_to_the_beginning() {
          rewinding to the start of the file rather than seeking"
     );
 }
+
+// ---- resampling ---------------------------------------------------------
+
+/// The regression this file exists to keep: a decoder asked for 48 kHz has to
+/// *deliver* 48 kHz, not relabel whatever rate the file happened to hold.
+///
+/// Getting this wrong is silent. The samples are real, the buffers say what
+/// rate they are, and every consumer believes them — so a 44.1 kHz file plays
+/// 8.8% fast and draws its waveform 8.8% short, with nothing to show for it but
+/// audio that is subtly wrong. It survived until a 16 kHz fixture was added,
+/// where the error is a factor of three and impossible to miss.
+#[test]
+fn a_file_below_the_output_rate_is_resampled_up_to_it() {
+    let path = testdata("sync_cam_a.wav");
+    let info = probe(&path).expect("the fixture probes");
+    let audio = info.audio.as_ref().expect("the fixture has audio");
+    assert_eq!(audio.sample_rate, SampleRate::new(16_000).unwrap(), "fixture changed");
+    let seconds = info.duration.as_secs_f64();
+
+    let mut decoder = AudioDecoder::open(&path, SampleRate::HZ_48000, 2).unwrap();
+    assert_eq!(decoder.sample_rate(), SampleRate::HZ_48000);
+
+    let mut frames = 0usize;
+    while let Some(buffer) = decoder.next_buffer().unwrap() {
+        assert_eq!(buffer.sample_rate(), SampleRate::HZ_48000);
+        assert_eq!(buffer.channels(), 2);
+        frames += buffer.frame_count();
+    }
+
+    let decoded_seconds = frames as f64 / 48_000.0;
+    assert!(
+        (decoded_seconds - seconds).abs() < 0.01,
+        "a {seconds}s file decoded to {decoded_seconds}s of 48 kHz audio \
+         ({frames} frames); before this was fixed it came back as {}s",
+        frames as f64 / 16_000.0
+    );
+}
+
+/// The other direction has to be right too, and it is the one every editor
+/// meets: 44.1 kHz music laid against 48 kHz camera sound.
+#[test]
+fn a_file_above_the_output_rate_is_resampled_down_to_it() {
+    let path = testdata("tone_48k.wav");
+    let seconds = probe(&path).unwrap().duration.as_secs_f64();
+
+    let mut decoder = AudioDecoder::open(&path, SampleRate::HZ_44100, 2).unwrap();
+    let mut frames = 0usize;
+    while let Some(buffer) = decoder.next_buffer().unwrap() {
+        assert_eq!(buffer.sample_rate(), SampleRate::HZ_44100);
+        frames += buffer.frame_count();
+    }
+
+    let decoded_seconds = frames as f64 / 44_100.0;
+    assert!(
+        (decoded_seconds - seconds).abs() < 0.01,
+        "a {seconds}s file decoded to {decoded_seconds}s at 44.1 kHz"
+    );
+}
+
+/// A file already at the output rate must pass through untouched — the same
+/// count, not a count that happens to be close.
+#[test]
+fn a_file_already_at_the_output_rate_is_not_disturbed() {
+    let path = testdata("tone_48k.wav");
+    let mut decoder = AudioDecoder::open(&path, SampleRate::HZ_48000, 2).unwrap();
+    let mut frames = 0usize;
+    while let Some(buffer) = decoder.next_buffer().unwrap() {
+        frames += buffer.frame_count();
+    }
+    assert_eq!(frames, 48_000, "one second at 48 kHz, exactly");
+}
+
+/// And the waveform built from a resampled file has to cover the file, which is
+/// what a timeline draws against.
+#[test]
+fn a_waveform_of_a_resampled_file_covers_the_whole_file() {
+    let path = testdata("sync_cam_a.wav");
+    let seconds = probe(&path).unwrap().duration.as_secs_f64();
+    let waveform = analyse_file(&path).expect("the fixture analyses");
+
+    let analysed = waveform.analysed_duration().as_secs_f64();
+    assert!(
+        (analysed - seconds).abs() < 0.02,
+        "a {seconds}s file produced {analysed}s of peaks"
+    );
+}

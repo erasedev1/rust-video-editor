@@ -391,6 +391,14 @@ impl VideoDecoder {
     }
 }
 
+/// How many extra sample frames to allow for when sizing a resampled block.
+///
+/// The resampler carries a little of each block into the next, so the count it
+/// returns for one block can exceed that block's own arithmetic. A hundred and
+/// twenty-eight frames is under three milliseconds at 48 kHz and far more than
+/// any filter's latency.
+const RESAMPLE_SLACK_FRAMES: i64 = 128;
+
 /// Decodes audio from one file, resampled to a fixed output format.
 ///
 /// The output rate and channel count are fixed at open time so that the mixer
@@ -592,7 +600,44 @@ impl AudioDecoder {
 
     fn resample(&mut self, decoded: &ffmpeg::frame::Audio) -> Result<AudioBuffer, MediaError> {
         self.ensure_resampler(decoded)?;
+
+        // The output frame is allocated here, at the size the *output* rate
+        // needs, rather than being left to `ffmpeg-next` — which allocates it
+        // for `input.samples()`, the count at the **input** rate.
+        //
+        // Upsampling into a buffer that size cannot work: swresample fills what
+        // it is given and keeps the rest, and since every call hands it another
+        // input-sized buffer it never catches up. The result is not a failure.
+        // It is a buffer that holds 44,100 frames a second, is labelled 48 kHz,
+        // and is believed by everything downstream — so the file plays 8.8%
+        // fast and its waveform is drawn 8.8% short, with nothing to show for
+        // it but audio that is subtly wrong.
+        //
+        // Every committed fixture was 48 kHz, where input and output rates
+        // agree and the bug is invisible. It surfaced the moment a 16 kHz one
+        // was added for multicam syncing and analysed to exactly a third of its
+        // length.
         let mut out = ffmpeg::frame::Audio::empty();
+        let in_rate = decoded.rate().max(1) as i64;
+        let scaled = decoded.samples() as i64 * self.out_rate.hz() as i64;
+        let wanted = (scaled + in_rate - 1) / in_rate;
+        // Slack for the resampler's own latency: it may hand back a few more
+        // frames than this block's arithmetic implies, having held some of the
+        // previous one.
+        let wanted = (wanted + RESAMPLE_SLACK_FRAMES) as usize;
+        // SAFETY: `alloc` sets the format, layout and sample count and then
+        // allocates a buffer for exactly them, which is what the resampler is
+        // about to write into. The frame owns that buffer and frees it on drop.
+        unsafe {
+            out.alloc(
+                ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+                wanted,
+                ffmpeg::ChannelLayout::default(self.out_channels as i32),
+            );
+        }
+        // `swr_convert_frame` writes at most the allocated count and then sets
+        // the frame's own count to what it actually produced, so `out.samples()`
+        // below is the truth rather than the ceiling asked for here.
         self.resampler.as_mut().expect("just ensured").run(decoded, &mut out)?;
 
         let raw_pts = decoded.pts().or_else(|| decoded.timestamp()).unwrap_or(0);

@@ -25,6 +25,7 @@ fn fixture() -> (Project, SequenceId, TrackId, AssetId) {
                 codec: "pcm_s16le".into(),
             }),
             container: "wav".into(),
+            timecode: None,
         },
     );
     let seq = p.active_sequence.unwrap();

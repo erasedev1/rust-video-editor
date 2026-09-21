@@ -6,9 +6,10 @@ use ve_time::Ticks;
 use crate::asset::{MediaAsset, MediaInfo};
 use crate::composition::{Composition, CompositionSettings};
 use crate::id::{
-    AssetId, ClipId, CompositionId, EffectId, IdAllocator, LayerId, MarkerId, SequenceId,
-    TrackId,
+    AngleId, AssetId, ClipId, CompositionId, EffectId, IdAllocator, LayerId, MarkerId,
+    MulticamId, SequenceId, TrackId,
 };
+use crate::multicam::{MulticamAngle, MulticamGroup};
 use crate::sequence::{Sequence, SequenceSettings};
 use crate::source::Source;
 use crate::track::TrackKind;
@@ -74,6 +75,10 @@ pub struct Project {
     /// read, so a project written before compositions existed still opens.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compositions: Vec<Composition>,
+    /// Camera groups a clip can cut between. Defaulted on read, so a project
+    /// written before multicam existed opens with none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub multicams: Vec<MulticamGroup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_sequence: Option<SequenceId>,
     pub ids: IdAllocator,
@@ -87,6 +92,7 @@ impl Project {
             assets: Vec::new(),
             sequences: Vec::new(),
             compositions: Vec::new(),
+            multicams: Vec::new(),
             active_sequence: None,
             ids: IdAllocator::new(),
         }
@@ -134,6 +140,12 @@ impl Project {
         let uses = self.clips_using_asset(id).count();
         if uses > 0 {
             return Err(CoreError::AssetInUse { id, clips: uses });
+        }
+        // A camera in a group is a use even with nothing on a timeline: losing
+        // the file would leave an angle pointing at nothing, and the group is
+        // where that would be discovered — in the middle of a cut.
+        if self.asset_is_an_angle(id) {
+            return Err(CoreError::AssetIsAnAngle(id));
         }
         let idx =
             self.assets.iter().position(|a| a.id == id).ok_or(CoreError::AssetNotFound(id))?;
@@ -202,6 +214,80 @@ impl Project {
     pub fn active_mut(&mut self) -> Option<&mut Sequence> {
         let id = self.active_sequence?;
         self.sequence_mut(id)
+    }
+
+    // ---- multicam -----------------------------------------------------
+
+    pub fn add_multicam_group(&mut self, name: impl Into<String>) -> MulticamId {
+        let id = self.ids.alloc::<crate::id::MulticamTag>();
+        self.multicams.push(MulticamGroup::new(id, name));
+        id
+    }
+
+    pub fn multicam(&self, id: MulticamId) -> Option<&MulticamGroup> {
+        self.multicams.iter().find(|g| g.id == id)
+    }
+
+    pub fn multicam_mut(&mut self, id: MulticamId) -> Option<&mut MulticamGroup> {
+        self.multicams.iter_mut().find(|g| g.id == id)
+    }
+
+    /// Mints an angle for a group without adding it, so a command can capture
+    /// the ID it is about to use before mutating anything.
+    pub fn new_angle_id(&mut self) -> AngleId {
+        self.ids.alloc::<crate::id::AngleTag>()
+    }
+
+    /// One angle, reached through its group.
+    pub fn multicam_angle(&self, group: MulticamId, angle: AngleId) -> Option<&MulticamAngle> {
+        self.multicam(group)?.angle(angle)
+    }
+
+    /// How many clips and layers draw any angle of a group.
+    ///
+    /// Counted across angles rather than per angle, because what a delete has
+    /// to refuse over is the group disappearing, and a clip on angle 2 is just
+    /// as stranded by that as one on angle 1.
+    pub fn uses_of_multicam(&self, id: MulticamId) -> usize {
+        let on_group = |s: &Source| s.multicam().is_some_and(|(g, _)| g == id);
+        self.sequences
+            .iter()
+            .flat_map(|s| s.tracks.iter())
+            .flat_map(|t| t.clips().iter())
+            .filter(|c| on_group(&c.source))
+            .count()
+            + self
+                .compositions
+                .iter()
+                .flat_map(|c| c.layers.iter())
+                .filter(|l| on_group(&l.source))
+                .count()
+    }
+
+    /// Removes a group, refusing while anything still cuts with it.
+    pub fn remove_multicam_group(
+        &mut self,
+        id: MulticamId,
+    ) -> Result<MulticamGroup, CoreError> {
+        let places = self.uses_of_multicam(id);
+        if places > 0 {
+            return Err(CoreError::MulticamInUse { id, places });
+        }
+        let index = self
+            .multicams
+            .iter()
+            .position(|g| g.id == id)
+            .ok_or(CoreError::MulticamNotFound(id))?;
+        Ok(self.multicams.remove(index))
+    }
+
+    /// Whether an asset is a camera in any group.
+    ///
+    /// Separate from [`Project::clips_using_asset`] because an angle is not a
+    /// clip: nothing is on a timeline, but deleting the file out from under the
+    /// group would leave an angle pointing at nothing all the same.
+    pub fn asset_is_an_angle(&self, id: AssetId) -> bool {
+        self.multicams.iter().any(|g| g.angles.iter().any(|a| a.asset == id))
     }
 
     // ---- compositions -------------------------------------------------
@@ -323,6 +409,53 @@ impl Project {
             Source::Composition(id) => {
                 self.composition(id).map(|c| c.duration()).unwrap_or(Ticks::ZERO)
             }
+            // A multicam clip is trimmed against the *group*, not against the
+            // angle it happens to be showing. Bounding it by the current angle
+            // would make the same clip trimmable to different lengths depending
+            // on which camera was on screen when the trim began.
+            Source::Multicam { group, .. } => self.multicam_duration(group),
+        }
+    }
+
+    /// How much group time a multicam group covers: from zero to the last frame
+    /// any of its angles recorded.
+    ///
+    /// The **union** rather than the intersection. Cameras in a real shoot start
+    /// and stop at different moments, and bounding the group to the stretch
+    /// every camera covers would refuse edits over footage that plainly exists.
+    /// An angle with nothing at a given instant draws nothing, and the viewer
+    /// says which those are.
+    pub fn multicam_duration(&self, id: MulticamId) -> Ticks {
+        let Some(group) = self.multicam(id) else { return Ticks::ZERO };
+        group
+            .angles
+            .iter()
+            .map(|a| a.coverage(self.asset_duration(a.asset)).end())
+            .max()
+            .unwrap_or(Ticks::ZERO)
+            .clamp_non_negative()
+    }
+
+    /// Turns a source and a time in that source's own domain into the file to
+    /// decode and the instant to decode from.
+    ///
+    /// The one place the multicam indirection is resolved. Everything
+    /// downstream — the plan, the decode scheduler, the exporter — asks this
+    /// rather than matching on [`Source`] itself, so there is exactly one copy
+    /// of the offset arithmetic and exactly one answer to "which camera is this
+    /// clip showing".
+    ///
+    /// `None` when the group, the angle or the camera is missing, and when the
+    /// angle was not rolling yet at that instant.
+    pub fn resolve_source(&self, source: Source, at: Ticks) -> Option<(AssetId, Ticks)> {
+        match source {
+            Source::Asset(id) => Some((id, at)),
+            Source::Composition(_) => None,
+            Source::Multicam { group, angle } => {
+                let group = self.multicam(group)?;
+                let source_time = group.source_time_at(angle, at)?;
+                Some((group.angle(angle)?.asset, source_time))
+            }
         }
     }
 
@@ -345,6 +478,9 @@ impl Project {
         let source_raw = |source: Source| match source {
             Source::Asset(id) => id.raw(),
             Source::Composition(id) => id.raw(),
+            // Both halves, because both are IDs from the same allocator and
+            // either could be the highest one the file mentions.
+            Source::Multicam { group, angle } => group.raw().max(angle.raw()),
         };
         for s in &self.sequences {
             max_id = max_id.max(s.id.raw());
@@ -372,7 +508,34 @@ impl Project {
                 }
             }
         }
+        for g in &self.multicams {
+            max_id = max_id.max(g.id.raw());
+            for a in &g.angles {
+                max_id = max_id.max(a.id.raw());
+                max_id = max_id.max(a.asset.raw());
+            }
+        }
         self.ids.bump_past(max_id);
+
+        // Groups first, so a clip's report of a missing angle reflects any angle
+        // this pass drops rather than contradicting it.
+        for group in &mut self.multicams {
+            warnings.extend(group.normalise());
+        }
+        let known_assets: Vec<AssetId> = self.assets.iter().map(|a| a.id).collect();
+        for group in &mut self.multicams {
+            let name = group.name.clone();
+            group.angles.retain(|angle| {
+                let kept = known_assets.contains(&angle.asset);
+                if !kept {
+                    warnings.push(format!(
+                        "multicam '{name}': angle '{}' names missing asset {}; removed",
+                        angle.name, angle.asset
+                    ));
+                }
+                kept
+            });
+        }
 
         // Compositions first: breaking a nesting cycle can only be done with
         // every composition in view, and a sequence's report of a missing source
@@ -387,6 +550,9 @@ impl Project {
             .iter()
             .map(|a| Source::Asset(a.id))
             .chain(self.compositions.iter().map(|c| Source::Composition(c.id)))
+            .chain(self.multicams.iter().flat_map(|g| {
+                g.angles.iter().map(move |a| Source::Multicam { group: g.id, angle: a.id })
+            }))
             .collect();
 
         for seq in &mut self.sequences {

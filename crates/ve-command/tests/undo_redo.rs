@@ -27,6 +27,7 @@ fn fixture() -> (Project, SequenceId, TrackId, ve_core::AssetId) {
             }),
             audio: None,
             container: "mp4".into(),
+            timecode: None,
         },
     );
     let seq = p.active_sequence.unwrap();

@@ -86,7 +86,27 @@ pub fn probe(path: impl AsRef<Path>) -> Result<MediaInfo, MediaError> {
         return Err(MediaError::NoDecodableStreams(path.to_path_buf()));
     }
 
-    Ok(MediaInfo { duration, video, audio, container: input.format().name().to_string() })
+    // Containers disagree about where the start timecode lives: QuickTime puts
+    // it on a track of its own that FFmpeg surfaces as stream metadata, MXF and
+    // broadcast formats put it on the container. Both are looked at, the
+    // container first, because a file carrying both means the container's.
+    let timecode = metadata_timecode(input.metadata())
+        .or_else(|| input.streams().find_map(|s| metadata_timecode(s.metadata())));
+
+    Ok(MediaInfo {
+        duration,
+        video,
+        audio,
+        container: input.format().name().to_string(),
+        timecode,
+    })
+}
+
+/// The `timecode` entry of a metadata dictionary, if it holds one that is not
+/// blank.
+fn metadata_timecode(metadata: ffmpeg::util::dictionary::Ref<'_>) -> Option<String> {
+    let value = metadata.get("timecode")?.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn probe_video(stream: &ffmpeg::format::stream::Stream) -> Result<VideoStreamInfo, MediaError> {

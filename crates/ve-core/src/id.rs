@@ -135,4 +135,6 @@ id_types! {
     LayerTag => LayerId,
     MarkerTag => MarkerId,
     EffectTag => EffectId,
+    MulticamTag => MulticamId,
+    AngleTag => AngleId,
 }

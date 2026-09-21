@@ -64,6 +64,7 @@ fn video_info(seconds: i64) -> MediaInfo {
         }),
         audio: None,
         container: "mp4".into(),
+        timecode: None,
     }
 }
 
@@ -750,6 +751,7 @@ fn the_audio_renderer_mixes_a_clip_into_the_ring() {
                 codec: "pcm_s16le".into(),
             }),
             container: "wav".into(),
+            timecode: None,
         },
     );
     let sequence = project.active_sequence.unwrap();

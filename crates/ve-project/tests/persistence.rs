@@ -30,6 +30,7 @@ fn sample_project(media: &Path) -> Project {
             }),
             audio: None,
             container: "mp4".into(),
+            timecode: None,
         },
     );
     let seq = p.active_sequence.unwrap();
@@ -851,6 +852,7 @@ fn project_with_audio(media: &Path) -> Project {
                 codec: "pcm_s16le".into(),
             }),
             container: "wav".into(),
+            timecode: None,
         },
     );
     let seq = p.active_sequence.unwrap();
@@ -989,6 +991,7 @@ fn keyframes_and_their_easing_survive_a_round_trip() {
             video: None,
             audio: None,
             container: "mp4".into(),
+            timecode: None,
         },
     );
     let sequence = project.active_sequence.unwrap();
@@ -1054,6 +1057,7 @@ fn a_project_written_before_motion_blur_loads_with_it_off() {
             video: None,
             audio: None,
             container: "mp4".into(),
+            timecode: None,
         },
     );
     let sequence = project.active_sequence.unwrap();

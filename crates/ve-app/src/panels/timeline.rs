@@ -555,6 +555,15 @@ fn draw_clip(
             state.project.asset(id).map(|a| a.offline).unwrap_or(true)
         }
         ve_core::Source::Composition(id) => state.project.composition(id).is_none(),
+        // A multicam clip is offline when the camera it is currently showing
+        // is: the angle is what it is drawing, and the others being fine is no
+        // comfort while this one is on screen.
+        ve_core::Source::Multicam { group, angle } => {
+            match state.project.multicam_angle(group, angle) {
+                Some(a) => state.project.asset(a.asset).map(|a| a.offline).unwrap_or(true),
+                None => true,
+            }
+        }
     };
     if offline {
         painter.rect_filled(rect, CornerRadius::same(3), theme::OFFLINE.gamma_multiply(0.45));

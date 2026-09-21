@@ -54,6 +54,15 @@ pub struct MediaInfo {
     pub audio: Option<AudioStreamInfo>,
     #[serde(default)]
     pub container: String,
+    /// The start timecode the file records, verbatim — `"01:00:00:00"`, or
+    /// `"09:14:22;03"` for drop frame.
+    ///
+    /// Kept as the string the container held rather than as a parsed position,
+    /// because parsing needs the frame rate and because a timecode nobody can
+    /// read back is worse than one this build did not understand. Syncing
+    /// parses it; the media browser shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timecode: Option<String>,
 }
 
 impl MediaInfo {
