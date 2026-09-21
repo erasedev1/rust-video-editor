@@ -63,10 +63,14 @@
 //! below what any blend can show.
 
 mod cache;
+mod fonts;
 mod shape;
+mod text;
 
 pub use cache::{RasterStats, Rasteriser};
+pub use fonts::FontLibrary;
 pub use shape::shape_path;
+pub use text::{measure, TextMetrics};
 
 use std::sync::Arc;
 
@@ -158,20 +162,38 @@ impl std::fmt::Debug for RasterImage {
     }
 }
 
-/// Draws a graphic, with no cache in front of it.
+/// Draws a graphic against the fonts installed on this machine.
 ///
 /// `None` when there is nothing to draw: a shape with no area, a colour that is
-/// fully transparent with no stroke, a size past [`MAX_DIMENSION`]. Nothing to
-/// draw is an ordinary state rather than an error — a title whose fill is
-/// keyframed from transparent starts there — so the caller draws no layer and
-/// carries on.
+/// fully transparent with no stroke, an empty string, a size past
+/// [`MAX_DIMENSION`]. Nothing to draw is an ordinary state rather than an error
+/// — a title whose fill is keyframed from transparent starts there — so the
+/// caller draws no layer and carries on.
 pub fn draw(state: &GraphicState) -> Option<RasterImage> {
+    draw_with(state, &FontLibrary::shared())
+}
+
+/// Draws a graphic against a particular set of fonts.
+///
+/// What [`draw`] is, with the library named rather than taken from the machine
+/// — which is what a test needs, and what a project shipping its own fonts
+/// would need.
+pub fn draw_with(state: &GraphicState, fonts: &FontLibrary) -> Option<RasterImage> {
     match state {
         GraphicState::Shape(shape) => shape::draw_shape(shape),
-        // Text lands next; a state that cannot be drawn yet draws nothing
-        // rather than drawing something wrong.
-        GraphicState::Text(_) => None,
+        GraphicState::Text(run) => text::draw_text(run, fonts),
     }
+}
+
+/// The fonts the tests draw with: one committed file, so that what a glyph
+/// measures does not depend on which machine is asking.
+#[cfg(test)]
+pub(crate) fn test_library() -> FontLibrary {
+    let mut library = FontLibrary::empty();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/LiberationSans-Regular.ttf");
+    assert!(library.load_file(&path), "the test font is committed at {}", path.display());
+    library
 }
 
 /// Turns a `tiny-skia` pixmap into a [`RasterImage`].

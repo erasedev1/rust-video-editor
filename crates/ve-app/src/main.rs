@@ -11,6 +11,15 @@ fn main() -> eframe::Result<()> {
     .format_timestamp_millis()
     .init();
 
+    // Reading every font on the machine takes long enough to notice, and the
+    // answer is the same whoever asks, so it is worked out on a thread of its
+    // own before anyone types a title rather than in front of them when they
+    // do. Nothing waits on this: a rasterisation that arrives first simply
+    // blocks until the scan is done.
+    std::thread::spawn(|| {
+        let _ = ve_graphics::FontLibrary::shared();
+    });
+
     let open = std::env::args().nth(1).map(PathBuf::from);
 
     let options = eframe::NativeOptions {

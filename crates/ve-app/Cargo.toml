@@ -24,6 +24,7 @@ ve-caption = { workspace = true }
 ve-media = { workspace = true }
 ve-render = { workspace = true }
 ve-engine = { workspace = true }
+ve-graphics = { workspace = true }
 ve-export = { workspace = true }
 ve-metrics = { workspace = true }
 

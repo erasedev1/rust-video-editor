@@ -1,0 +1,12 @@
+The font in this directory is a test fixture, not part of the editor.
+
+LiberationSans-Regular.ttf
+  Digitized data copyright (c) 2010 Google Corporation with Reserved Font
+  Arimo, Tinos and Cousine.
+  Copyright (c) 2012 Red Hat, Inc. with Reserved Font Name Liberation.
+  Licensed under the SIL Open Font License, Version 1.1:
+  https://scripts.sil.org/OFL
+
+It is committed so that the text tests measure the same glyphs on every
+machine. Nothing in the editor loads it; a project names a family and the
+rasteriser resolves that against whatever the machine has installed.

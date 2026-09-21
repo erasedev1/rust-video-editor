@@ -11,6 +11,9 @@ repository.workspace = true
 ve-core = { workspace = true }
 log = { workspace = true }
 tiny-skia = "0.12"
+fontdb = { version = "0.24", default-features = false, features = ["fs", "memmap"] }
+rustybuzz = "0.20"
+ttf-parser = "0.25"
 
 [dev-dependencies]
 criterion = { workspace = true }

@@ -13,10 +13,11 @@
 //! full-canvas ones.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ve_core::GraphicState;
 
-use crate::RasterImage;
+use crate::{FontLibrary, RasterImage};
 
 /// The default budget: enough for a handful of full-canvas graphics and a great
 /// many ordinary ones.
@@ -58,6 +59,10 @@ impl RasterStats {
 /// more than one frame — which is every title anyone has ever made.
 pub struct Rasteriser {
     entries: HashMap<u64, Entry>,
+    /// Shared rather than owned: which fonts exist is a property of the
+    /// machine, and scanning them twice because there are two rasterisers
+    /// would cost a visible pause for an answer that is already known.
+    fonts: Arc<FontLibrary>,
     capacity_bytes: usize,
     bytes: usize,
     clock: u64,
@@ -76,6 +81,7 @@ impl Rasteriser {
     pub fn new(capacity_bytes: usize) -> Self {
         Rasteriser {
             entries: HashMap::new(),
+            fonts: FontLibrary::shared(),
             capacity_bytes: capacity_bytes.max(1),
             bytes: 0,
             clock: 0,
@@ -87,6 +93,17 @@ impl Rasteriser {
 
     pub fn with_budget_mb(mb: usize) -> Self {
         Rasteriser::new(mb * 1024 * 1024)
+    }
+
+    /// The same rasteriser drawing against a particular set of fonts.
+    pub fn with_fonts(mut self, fonts: Arc<FontLibrary>) -> Self {
+        self.fonts = fonts;
+        self.clear();
+        self
+    }
+
+    pub fn fonts(&self) -> &Arc<FontLibrary> {
+        &self.fonts
     }
 
     /// The picture this state draws, drawing it if it has not been drawn.
@@ -106,7 +123,7 @@ impl Rasteriser {
         }
         self.misses += 1;
 
-        let image = crate::draw(state)?;
+        let image = crate::draw_with(state, &self.fonts)?;
         self.insert(key, image.clone());
         Some(image)
     }
