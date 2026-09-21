@@ -28,7 +28,8 @@ use ve_media::WaveformService;
 use ve_project::{autosave, store};
 use ve_time::Ticks;
 
-use crate::state::{AnimationMode, EditorState, Status, TimelineTool};
+use crate::state::{AnimationMode, EditorState, ScopeKind, Status, TimelineTool};
+use ve_render::WaveformMode;
 
 /// Something the user asked for.
 #[derive(Debug, Clone)]
@@ -303,6 +304,11 @@ pub enum Action {
     ZoomToFit(f32),
     ToggleSnapping,
     TogglePerformanceOverlay,
+
+    // Scopes
+    ToggleScopes,
+    ShowScope(ScopeKind),
+    SetWaveformMode(WaveformMode),
 }
 
 /// Applies an action.
@@ -1380,6 +1386,18 @@ pub fn dispatch(
         Action::TogglePerformanceOverlay => {
             state.show_performance_overlay = !state.show_performance_overlay;
         }
+
+        Action::ToggleScopes => {
+            state.scopes.open = !state.scopes.open;
+        }
+        Action::ShowScope(kind) => {
+            // Picking a scope opens the panel, so the menu entry for one is
+            // also the way to get to it rather than a setting that does nothing
+            // until the panel is opened separately.
+            state.scopes.kind = kind;
+            state.scopes.open = true;
+        }
+        Action::SetWaveformMode(mode) => state.scopes.waveform = mode,
     }
 }
 

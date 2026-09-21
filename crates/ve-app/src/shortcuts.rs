@@ -101,6 +101,9 @@ pub fn collect(ctx: &egui::Context, timeline_width: f32) -> Vec<Action> {
         if i.consume_key(plain, Key::M) {
             actions.push(Action::AddMarkerAtPlayhead);
         }
+        if i.consume_key(plain, Key::W) {
+            actions.push(Action::ToggleScopes);
+        }
         if i.consume_key(plain, Key::A) {
             actions.push(Action::ToggleAnimationEditor);
         }
@@ -170,6 +173,7 @@ pub const BINDINGS: &[Binding] = &[
     Binding { label: "Select / roll / slip / slide tool", keys: "V / N / Y / U" },
     Binding { label: "Add marker", keys: "M" },
     Binding { label: "Animation editor", keys: "A" },
+    Binding { label: "Scopes", keys: "W" },
     Binding { label: "Keyframe / delete keyframes", keys: "♦ button / Del" },
     Binding { label: "Copy / paste keyframes", keys: "Ctrl + C / V" },
     Binding { label: "Previous / next marker", keys: "Ctrl + ← / →" },

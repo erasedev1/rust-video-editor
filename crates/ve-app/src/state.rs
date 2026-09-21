@@ -9,7 +9,7 @@ use ve_engine::{Timebase, Viewing};
 use ve_export::{ExportJob, ExportSettings, ProxyJob, ProxyScale};
 use ve_metrics::Metrics;
 use ve_project::Autosave;
-use ve_render::GpuContext;
+use ve_render::{GpuContext, WaveformMode};
 use ve_time::Ticks;
 
 /// What the user currently has selected.
@@ -383,6 +383,45 @@ pub struct AnimationView {
     pub drag: Option<KeyframeGesture>,
 }
 
+/// Which instrument the scopes panel is showing.
+///
+/// One at a time rather than all at once. Three scopes tiled into the space
+/// beside a preview are three scopes too small to read, and the reading a
+/// colourist wants is almost never all three at the same instant: exposure is a
+/// waveform question, a cast is a vectorscope question, and range is a
+/// histogram question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ScopeKind {
+    #[default]
+    Waveform,
+    Vectorscope,
+    Histogram,
+}
+
+impl ScopeKind {
+    pub const ALL: [ScopeKind; 3] =
+        [ScopeKind::Waveform, ScopeKind::Vectorscope, ScopeKind::Histogram];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ScopeKind::Waveform => "Waveform",
+            ScopeKind::Vectorscope => "Vectorscope",
+            ScopeKind::Histogram => "Histogram",
+        }
+    }
+}
+
+/// What the scopes panel is showing, and whether it is open at all.
+///
+/// Closed is the default and closed costs nothing: the picture is only read
+/// back off the GPU while a scope is on screen to read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScopeView {
+    pub open: bool,
+    pub kind: ScopeKind,
+    pub waveform: WaveformMode,
+}
+
 /// How the timeline is scrolled and zoomed.
 #[derive(Debug, Clone)]
 pub struct TimelineView {
@@ -700,6 +739,8 @@ pub struct EditorState {
     /// Non-fatal problems from the last open, shown until dismissed.
     pub warnings: Vec<String>,
     pub show_performance_overlay: bool,
+    /// The video scopes, and which one is on screen.
+    pub scopes: ScopeView,
     /// The export dialogue, and the export it may have started.
     pub export: ExportState,
     /// The proxy build that may be running.
@@ -737,6 +778,7 @@ impl EditorState {
             drag: TimelineDrag::None,
             warnings: Vec::new(),
             show_performance_overlay: cfg!(debug_assertions),
+            scopes: ScopeView::default(),
             export: ExportState::default(),
             proxies: ProxyState::default(),
             open_composition: None,

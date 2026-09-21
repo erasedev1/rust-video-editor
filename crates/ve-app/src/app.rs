@@ -12,7 +12,7 @@ use ve_metrics::{spans, Metrics};
 use crate::actions::{self, Action};
 use crate::panels;
 use crate::preview::Preview;
-use crate::state::{EditorState, Status, StatusLevel};
+use crate::state::{EditorState, ScopeKind, Status, StatusLevel};
 use crate::theme;
 
 /// Frames cached on the CPU, in megabytes.
@@ -52,6 +52,10 @@ pub struct VergeApp {
     software_gpu: bool,
     last_update: Option<EngineUpdate>,
     show_shortcuts: bool,
+    /// The uploaded scope trace. Held here rather than in the editor state
+    /// because it is an egui texture, and the state is deliberately free of
+    /// egui types so the action layer can be driven without a window.
+    scope_textures: panels::scopes::ScopeTextures,
     /// When the previous frame began, so the overlay can report the interval
     /// the user actually sees rather than the cost of any one stage.
     last_frame_at: Option<std::time::Instant>,
@@ -137,6 +141,7 @@ impl VergeApp {
             software_gpu,
             last_update: None,
             show_shortcuts: false,
+            scope_textures: panels::scopes::ScopeTextures::default(),
             last_frame_at: None,
         };
 
@@ -163,14 +168,19 @@ impl VergeApp {
 
         if let (Some(preview), Some(render_state)) = (self.preview.as_mut(), render_state) {
             let decode = self.engine.decode_service().clone();
-            preview.render(render_state, &update, |item| match item.draw {
-                ve_engine::Draw::Media { asset, source_time } => {
-                    decode.key_for(asset, source_time)
-                }
-                // A nested composition has no decoded frame to key; the preview
-                // finds its picture in the render cache instead.
-                ve_engine::Draw::Nested { .. } => None,
-            });
+            preview.render(
+                render_state,
+                &update,
+                |item| match item.draw {
+                    ve_engine::Draw::Media { asset, source_time } => {
+                        decode.key_for(asset, source_time)
+                    }
+                    // A nested composition has no decoded frame to key; the preview
+                    // finds its picture in the render cache instead.
+                    ve_engine::Draw::Nested { .. } => None,
+                },
+                self.state.scopes.open,
+            );
         }
         self.last_update = Some(update);
     }
@@ -584,6 +594,20 @@ impl VergeApp {
                         actions_out.push(Action::ToggleAnimationEditor);
                         ui.close();
                     }
+                    let mut scopes = self.state.scopes.open;
+                    if ui.checkbox(&mut scopes, "Scopes    W").clicked() {
+                        actions_out.push(Action::ToggleScopes);
+                        ui.close();
+                    }
+                    ui.menu_button("Scope", |ui| {
+                        for kind in ScopeKind::ALL {
+                            let on = self.state.scopes.open && self.state.scopes.kind == kind;
+                            if ui.radio(on, kind.label()).clicked() {
+                                actions_out.push(Action::ShowScope(kind));
+                                ui.close();
+                            }
+                        }
+                    });
                 });
 
                 ui.menu_button("Help", |ui| {
@@ -814,6 +838,24 @@ impl eframe::App for VergeApp {
                     &mut pending_actions,
                 );
             });
+
+        // Inboard of the inspector, so the instruments sit next to the picture
+        // they are reading rather than at the far edge of the window.
+        if self.state.scopes.open {
+            egui::Panel::right("scopes")
+                .resizable(true)
+                .default_size(300.0)
+                .min_size(180.0)
+                .show(root, |ui| {
+                    panels::scopes::show(
+                        ui,
+                        &self.state,
+                        self.preview.as_ref().and_then(|p| p.scope_sample()),
+                        &mut self.scope_textures,
+                        &mut pending_actions,
+                    );
+                });
+        }
 
         // The darkest surface surrounds the picture, so the preview is judged
         // against the most neutral thing on screen.

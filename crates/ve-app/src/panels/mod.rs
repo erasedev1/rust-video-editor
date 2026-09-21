@@ -11,5 +11,6 @@ pub mod inspector;
 pub mod overlay;
 pub mod preview_panel;
 pub mod project_panel;
+pub mod scopes;
 pub mod timeline;
 pub mod waveform;

@@ -40,7 +40,7 @@ use ve_media::CacheKey;
 use ve_metrics::{counters, Metrics};
 use ve_render::{
     chain_passes, CompositeCache, CompositeCacheStats, CompositeKey, GpuTexture, Layer,
-    RenderTarget, Renderer, TextureCache,
+    RenderTarget, Renderer, ScopeSampler, TextureCache,
 };
 
 /// Composites resolved instants, holding the caches that make repeats cheap.
@@ -116,6 +116,29 @@ impl FrameComposer {
     /// The target a key's picture is in, for as long as it is not evicted.
     pub fn picture(&self, key: &CompositeKey) -> Option<&RenderTarget> {
         self.composites.peek(key)
+    }
+
+    /// Reads a composited picture back, small, for the video scopes.
+    ///
+    /// Narrow on purpose: the scopes need a scaled copy of one composite and
+    /// nothing else, so what is exposed is that and not the renderer. Returns
+    /// whether anything was read — `false` for a picture that has been evicted,
+    /// and for the common case of one already sampled.
+    ///
+    /// The scopes are the only interactive reader-back in the editor. It is
+    /// affordable because it is small and because it happens once per distinct
+    /// composite rather than once per repaint; see `ve_render::scopes`.
+    pub fn sample_scopes(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        sampler: &mut ScopeSampler,
+        key: &CompositeKey,
+        color_space: ve_core::ColorSpace,
+    ) -> bool {
+        let Some(target) = self.composites.peek(key) else { return false };
+        let texture = self.renderer.bind_target(device, target, *key);
+        sampler.read(device, queue, &mut self.renderer, color_space, &texture, *key)
     }
 
     /// Composites one node, reusing a cached picture where the contents match.
