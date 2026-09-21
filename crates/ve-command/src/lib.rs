@@ -25,6 +25,7 @@ mod edit_commands;
 mod effect_commands;
 mod history;
 mod keyframe_commands;
+mod multicam_commands;
 mod property_commands;
 mod proxy_commands;
 mod structure_commands;
@@ -45,6 +46,10 @@ pub use history::{History, HistoryEntry};
 pub use keyframe_commands::{
     animatable_properties, property_ref, Animated, EditKeyframes, KeyframeEdit, KeyframePoint,
     PropertyRef, PropertyState,
+};
+pub use multicam_commands::{
+    CreateMulticamGroup, CutToAngle, NewAngle, RemoveMulticamGroup, ResyncMulticamGroup,
+    SetAngleEnabled, SetAngleOffset, SetClipAngle,
 };
 pub use property_commands::{
     ClipProperty, PropertyValue, RemoveClipKeyframe, SetClipKeyframe, SetClipProperty,
