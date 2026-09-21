@@ -225,10 +225,12 @@ blur's cost stops growing with its radius.
 - Colour grading ✅ — three-way, white balance, an HSL secondary, and scopes
 - Multicam ✅ — grouped cameras, synced on sound or timecode, cut with the
   number keys
-- Captions, advanced audio
+- Captions ✅ — written on the timeline, imported and exported as SubRip and
+  WebVTT, and written beside a delivery
+- Advanced audio
 - Hardware encoders
 
-**Export, proxies, grading and multicam are done; captions, advanced audio and
+**Export, proxies, grading, multicam and captions are done; advanced audio and
 hardware encoders are not.** An editor that cannot produce a file is a
 demonstration rather than a tool, so export came first.
 
@@ -486,6 +488,75 @@ output frame for the input's sample count, so upsampling never caught up. A
 44.1 kHz file played 8.8% fast and drew its waveform 8.8% short, believed by
 everything downstream. Every committed fixture was 48 kHz, where the bug cannot
 show. Fixed, with regression tests in both directions.
+
+### Captions
+
+A cue is text with a span, and that is all it is. Written as a clip it would
+arrive carrying a source window, a speed, a transform, a blend mode, an effect
+chain and a pair of audio properties, every one of which would need a rule
+saying it means nothing here — so captions are their own small type on the
+sequence, and the code that walks clips is not made to understand a clip that is
+not one.
+
+What is kept from the clip model is the **invariant**: cues are sorted and never
+overlap, so what is on screen at an instant is a binary search with exactly one
+answer. Two speakers at once is one cue of two lines, which is what every
+captioning standard asks for and what a reader can actually follow. A second
+caption *track* is for a second language, and carries a BCP 47 tag because that
+tag names the file the track exports to.
+
+**Captions are the one part of an edit people routinely author elsewhere** — a
+transcription service, a captioner working to a broadcaster's style guide, a
+colleague with a text editor — so SubRip and WebVTT are not a convenience beside
+the feature. They are how captions get into an edit and how they leave it. One
+reader accepts both formats and the writer emits exactly one: the two differ in
+a header line, a separator and three block keywords, and files in the wild
+ignore even those differences. Liberal in, exact out, so a round trip through
+another tool does not degrade a file a little more each time. A file that is not
+valid UTF-8 is read as Latin-1 rather than refused, and a malformed cue costs
+its own block rather than the file.
+
+Both formats count milliseconds, which divide the tick base exactly, so reading
+is lossless and writing rounds by at most half a millisecond — a sixtieth of a
+frame at 29.97. Cues are deliberately **not** snapped to the frame grid: a
+caption is text rather than a picture, and snapping would shift every imported
+cue and make the round trip lossy.
+
+Four decisions are worth stating.
+
+**The preview draws an overlay, not a burn-in.** The interface draws the current
+cue over the picture with its own text; the compositor never sees it. Burning
+captions into the frame needs a glyph rasteriser in the render graph, which is
+the next phase's work, and claiming it here would mean a preview showing
+something the delivery would not have.
+
+**Whether captions are drawn is a view setting, never project data.** A track
+that could be hidden from the preview *and* from an export would be a trap: hide
+it to check a shot, deliver without it, hear about it from the client. So the
+editor has a switch and an export writes every track it is asked for.
+
+**An export writes them beside the file**, timed from the start of the exported
+range — a ten-minute delivery from the middle of a cut is its own file starting
+at zero — and after the trailer, so a cancelled export cannot leave caption
+files behind for a delivery that no longer exists. A cue straddling the in point
+is clipped rather than dropped, because half that line is spoken inside the
+range.
+
+**An import lands on a track of its own** rather than replacing the selected
+one. An import is usually a language arriving, and quietly overwriting an hour
+of someone's corrections because the wrong lane was selected is not a mistake
+worth making possible.
+
+What is **not** here. There is no burn-in and no subtitle stream muxed into the
+container, for the reasons above. Captions carry no position, alignment or
+styling: a cue is text and a span, and a file that has those says so on import
+rather than being half-honoured. There is no speech recognition — that is a
+model, not an editor feature, and the file it would produce is one this already
+imports. And a ripple does not carry cues with it, because a ripple here is
+per-track and a caption lane is not the track being rippled.
+
+See [BENCHMARKS.md](BENCHMARKS.md#captions) for what reading a film's worth of
+captions costs, and what finding the one on screen costs per frame.
 
 ## Phase 8 — Motion graphics
 

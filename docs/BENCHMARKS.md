@@ -13,6 +13,7 @@ cargo bench -p ve-render --bench scopes       # reading the picture back and cou
 cargo bench -p ve-media  --bench waveforms    # audio analysis and display
 cargo bench -p ve-engine --bench audio        # mixing, metering and fades
 cargo bench -p ve-media  --bench sync         # multicam syncing
+cargo bench -p ve-caption --bench captions    # reading, writing and finding captions
 cargo bench -p ve-export --bench export       # encoding, readback and a whole second
 cargo bench -p ve-export --bench proxy        # what a proxy costs and what it buys
 ```
@@ -674,6 +675,54 @@ What it costs is the usual risk of a coarse-to-fine search — a coarse level th
 picks the wrong peak cannot be talked out of it by the finer ones. That is what
 the confidence figure on every match is for, and what the interface reports as
 "the weakest pair".
+
+## Captions
+
+Same container, `cargo bench -p ve-caption --bench captions`. The fixture is a
+caption every three seconds, two lines each, which is roughly what continuous
+dialogue comes to: 1,000 cues is about fifty minutes of it and 4,000 is a long
+feature.
+
+### Reading a file
+
+| Cues  |     SubRip |     WebVTT |
+|-------|-----------:|-----------:|
+| 100   |    44.7 µs |    47.5 µs |
+| 1,000 |     433 µs |     448 µs |
+| 4,000 |    1.80 ms |    1.87 ms |
+
+Linear in the cues, as a parse of a line-oriented format should be, and about
+450 ns a cue either way. A feature's worth of transcription therefore imports in
+under two milliseconds — which is worth knowing mainly because it settles the
+question: an import needs no progress bar, no background thread and no
+incremental parse. The two formats cost within 4% of each other, because the
+reader is the same reader.
+
+Writing is cheaper than reading, as it always is when there is nothing to
+discover:
+
+| Cues  |     SubRip |
+|-------|-----------:|
+| 100   |    28.9 µs |
+| 1,000 |     266 µs |
+| 4,000 |    1.10 ms |
+
+### Finding the caption on screen
+
+This is the one on a hot path: the preview overlay asks for it on every drawn
+frame, and so does the caption lane for every cue it paints.
+
+| Cues in the track | `cue_at` |
+|-------------------|---------:|
+| 100               |  10.0 ns |
+| 1,000             |  14.8 ns |
+| 4,000             |  19.0 ns |
+
+Forty times the captions for less than twice the time, which is what the
+sort-and-never-overlap invariant buys: the lookup is a binary search rather than
+a scan, so the cost is in the *logarithm* of the track's length. At 19 ns a
+frame the overlay is about a millionth of a 30 fps frame budget, which is the
+answer to "should it be cached?" — there is nothing there to cache.
 
 ## Live measurements
 

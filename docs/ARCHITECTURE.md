@@ -18,16 +18,20 @@ attached to the clock.
 ## Crate graph
 
 ```
-ve-app  ──────────────┬──────────┬──────────┬───────────┐
-   │                  │          │          │           │
-ve-export ──┬─────────┤     ve-command  ve-project  ve-metrics
-   │        │         │          │          │
-ve-engine   │         │          │          │
-   │        │         │          │          │
-ve-media  ve-render   │       ve-core ──────┘
+ve-app  ──────────────┬──────────┬──────────┬───────────┬──────────────┐
+   │                  │          │          │           │              │
+ve-export ──┬─────────┤     ve-command  ve-project  ve-metrics    ve-caption
+   │        │         │          │          │                         │
+ve-engine   │         │          │          │                         │
+   │        │         │          │          │                         │
+ve-media  ve-render   │       ve-core ──────┴─────────────────────────┘
    │        │         │          │
    └────────┴─────────┴──────► ve-time
 ```
+
+`ve-caption` reads and writes SubRip and WebVTT and knows nothing else; it is
+where a timestamp parser lives so that nowhere else has one. `ve-export` depends
+on it to write a delivery's captions beside the file.
 
 `ve-export` sits where it does because it is the one thing that needs both
 halves: the engine to say what an instant contains, and the renderer to draw it.
@@ -981,6 +985,101 @@ a camera that was not rolling keeps its tile. Both for the same reason: the
 numbers are the controls, and a grid that renumbered itself mid-shot would move
 them under the user's fingers.
 
+## Captions
+
+### A cue is not a clip
+
+A `Clip` is a window onto a source, placed in time. A `Cue` is text with a span.
+Written as a clip, a caption would arrive carrying `source_in`, `speed`, a
+transform, a blend mode, an effect chain and a pair of audio properties, and
+every one of them would need a rule saying it means nothing here — while the
+compositor, the mixer and every edit command would have to learn about a clip
+that is not one. So `CaptionTrack` and `Cue` are their own small types on the
+sequence, beside `tracks` rather than among them.
+
+What is kept from the clip model is the **invariant**, because it is the
+invariant rather than the payload that makes a lane fast and predictable. Cues
+are sorted by start and never overlap, so "what is on screen at this instant" is
+a binary search with exactly one answer — which is what the preview overlay asks
+on every drawn frame.
+
+Two people talking at once is one cue of two lines, which is what captioning
+standards ask for and what a reader can follow. A second caption **track** is
+for a second language, and carries a BCP 47 tag because that tag names the file
+the track exports to.
+
+### Overlap from outside is repaired, not reported
+
+A track of clips that overlap on load is a broken edit, and the loader says so.
+A caption file whose cues overlap by a few milliseconds is an ordinary Tuesday —
+hand-corrected subtitles do it constantly, and every player resolves it by
+cutting the earlier cue short. `CaptionTrack::normalise` does the same. The only
+cue it can drop is one left with no span at all, which means another cue starts
+at the very instant it does.
+
+### Interchange is a crate of its own
+
+`ve-caption` is the only place that knows what a caption file looks like.
+`ve-core` holds the cues, `ve-command` edits them, `ve-export` writes them beside
+a delivery, and none of them contains a timestamp parser.
+
+The reader accepts the **union** of SubRip and WebVTT and the writer emits
+exactly one of them. The two formats differ in a header line, a separator and
+three block keywords, and files in the wild ignore even those differences: `.srt`
+files written with full stops, `.vtt` files with numbered cues. A reader that
+insisted on the specification its extension implied would refuse files every
+player opens. Liberal in, exact out, so a round trip through another tool does
+not degrade a file a little more each time.
+
+Both formats count **milliseconds**, which divide the tick base exactly, so
+reading is lossless. Writing rounds by at most half a millisecond — a sixtieth
+of a frame at 29.97, where a frame boundary does not land on a whole
+millisecond. Cues are therefore *not* snapped to the frame grid, on import or on
+a drag: a caption is text rather than a picture and has no reason to sit on a
+frame boundary, and snapping would shift every imported cue and make the round
+trip lossy.
+
+Two robustness decisions are worth naming. A file that is not valid UTF-8 is
+decoded as **Latin-1** rather than refused, because a `.srt` from a broadcast
+workflow is as likely to be Latin-1 as not and every byte maps to a character. A
+malformed cue costs **its own block** and not the file: three hundred good cues
+should not be lost to one bad timestamp, and what went wrong is reported rather
+than swallowed.
+
+Inline markup (`<i>…</i>`) is kept in the text verbatim, because throwing it away
+could not be undone on the way back out. The preview strips it for drawing and
+nowhere else.
+
+### The preview draws an overlay, not a burn-in
+
+The interface draws the current cue over the picture with the interface's own
+text. The compositor never sees it. Burning captions into the frame needs a
+glyph rasteriser in the render graph — the text work Phase 8 brings — and
+claiming it here would mean a preview showing something the delivery would not
+have.
+
+Which track is drawn is the **selected** one, or the first. Only one language is
+being written at any moment, and stacking three over the picture would show a
+state no viewer will ever see. Whether it is drawn at all is a view setting in
+the editor rather than a field on the track: a track that could be hidden from
+the preview *and* from an export would be a trap, discovered by whoever played
+the delivery.
+
+### A delivery's captions go beside it
+
+An export writes one file per caption track: `film.mp4` and `film.en.srt`. The
+timings count from the start of the **exported range**, so a delivery of ten
+minutes from the middle of a cut is its own file starting at zero; a cue
+straddling the in point is clipped rather than dropped, because half that line
+is spoken inside the range.
+
+They are written **after the trailer**, never before. A cancelled export deletes
+its file, and caption files beside a delivery that no longer exists would be
+worse than none — so there is no window in which they can outlive it. By the
+same token they cannot fail an export that has already rendered: a caption file
+that could not be written is reported as a problem, like a layer that would not
+decode.
+
 ## The project file
 
 See [PROJECT_FORMAT.md](PROJECT_FORMAT.md). In short: pretty-printed JSON behind
@@ -1065,4 +1164,10 @@ Honest gaps, not oversights:
   [Motion blur](#motion-blur).
 - **No loudness measurement.** The meters are peak meters. LUFS is a different
   measurement with a different purpose and belongs with the delivery work.
-- **Non-linear compositing only**, as described above.
+- **No caption burn-in, and no subtitle stream in the container.** Captions
+  leave as sidecar files and are drawn over the preview by the interface.
+  Burning them into the picture needs a glyph rasteriser in the render graph;
+  muxing them needs subtitle packets interleaved with the picture and the sound.
+- **Captions carry no position, alignment or styling.** Both formats can express
+  some of it and a cue here is text and a span. A file that has it says so on
+  import rather than pretending, and nothing invents it on the way out.

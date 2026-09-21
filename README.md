@@ -67,6 +67,10 @@ The first vertical slice is complete and tested end to end:
 - Judge the grade against instruments rather than against a monitor — a
   waveform in luma, RGB or parade, a vectorscope and a histogram, all reading
   the composited picture and costing nothing while they are closed
+- Caption the cut: a caption lane per language, a caption at the playhead with
+  one key, drag and trim them like clips, see them over the preview, import and
+  export SubRip and WebVTT, and get a caption file written beside every
+  delivery
 - Undo and redo on every edit, with drags collapsed into single steps
 - Save and reopen projects, with autosave and crash recovery
 - A development performance overlay reporting real measurements
@@ -134,6 +138,16 @@ the angle is hue, so the six patches of a colour bar sit as six dots and a cast
 shows as the whole plot leaning one way. The rings say how saturated; there are
 no primary target boxes, because those are 75% bars under one standard and
 drawing them over a Rec. 709 plot would invite a reading they do not support.
+
+![A caption selected on its lane, drawn over the preview](docs/images/captions.png)
+
+Captions: a lane per language under the tracks, the selected caption in the
+inspector with its text, its span and the reading speed a captioner works to,
+and the same caption drawn over the picture. That overlay is the *editor*
+drawing text, not the compositor: an export writes the captions as a file beside
+the delivery — `film.mp4` and `film.en.srt` — because burning them into the
+picture needs the text rendering the next phase brings. Press **C** for a
+caption at the playhead, **Shift+C** to show or hide the overlay.
 
 ![The angle viewer, with a multicam clip cut between three cameras](docs/images/multicam.png)
 
@@ -285,7 +299,7 @@ says so in the performance overlay, and keeps cutting.
 ## Testing
 
 ```sh
-cargo test --workspace     # 949 tests
+cargo test --workspace     # 1026 tests
 cargo bench                # measured, not estimated
 ```
 
@@ -309,6 +323,14 @@ first real export bug was found: packets written without a duration left every
 file claiming a frame rate slightly too high, so reading one back landed
 between frames — which a test that only checked "a file was written" would
 never have noticed.
+
+The caption tests read the files people actually have rather than the files the
+specifications describe: an `.srt` written with full stops, a `.vtt` with
+numbered cues, a Latin-1 file with an accent in it, cues that overlap by a few
+hundred milliseconds, and one cue in the middle whose timing line is nonsense —
+which costs that cue and not the other three hundred. A file from another tool
+goes out again through Verge and comes back saying the same thing, markup
+included.
 
 The grading tests are in two halves, because the two can disagree silently: one
 half checks what is *packed* into a pass and the other renders it and reads the
@@ -337,6 +359,7 @@ rather than a smudge across four.
 | `ve-core`    | Project, sequence, track, clip, properties, keyframes     |
 | `ve-project` | Versioned project file, atomic saves, autosave            |
 | `ve-command` | Undoable editing commands                                 |
+| `ve-caption` | SubRip and WebVTT, read and written                       |
 | `ve-media`   | FFmpeg decoding, frame cache, decode scheduling           |
 | `ve-render`  | wgpu compositor                                           |
 | `ve-engine`  | Playback clock, composition evaluation, audio mixing      |
