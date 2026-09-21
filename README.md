@@ -55,6 +55,9 @@ The first vertical slice is complete and tested end to end:
 - Export the sequence to a file — H.264, H.265 or ProRes, with AAC or PCM
   sound, at the canvas's size or a fraction of it, over the whole sequence or a
   range — rendered on a background thread while editing carries on
+- Build proxies for the imported footage — smaller, all-intra stand-ins that
+  make scrubbing 72× cheaper on this machine — switch the editor between them
+  and the real pictures with one control, and export the originals regardless
 - Undo and redo on every edit, with drags collapsed into single steps
 - Save and reopen projects, with autosave and crash recovery
 - A development performance overlay reporting real measurements
@@ -98,6 +101,14 @@ runs on its own thread from a snapshot of the project, so the editor keeps
 playing and keeps being edited while it works — and says how far it has got:
 
 ![An export in progress](docs/images/export-progress.png)
+
+![The media panel with proxies built](docs/images/proxies.png)
+
+Proxies: two clips have one and the third does not, so the count says 2/3, and
+the switch is the single control deciding whether the editor is looking at the
+stand-ins or at the real pictures. An export ignores it either way. A badge
+reading `proxy?` would mean the file had been built and then deleted — in which
+case that clip quietly carries on at full resolution rather than going offline.
 
 The development overlay reports what the frame actually cost, broken down by
 stage, so a regression is visible while editing rather than weeks later:
@@ -241,7 +252,7 @@ says so in the performance overlay, and keeps cutting.
 ## Testing
 
 ```sh
-cargo test --workspace     # 751 tests
+cargo test --workspace     # 792 tests
 cargo bench                # measured, not estimated
 ```
 
@@ -256,7 +267,11 @@ how three real decoder bugs were caught.
 
 The export tests encode real files and then decode them again, asserting frame
 by frame that what came out is the frame the timeline showed, at the right size,
-over the right range, with the sound still in step at 29.97. That is how the
+over the right range, with the sound still in step at 29.97. The proxy tests do
+the same in reverse — walking every frame of a built proxy against its original
+to prove the two show the same picture at the same instant — and one of them
+measures *decode cost* rather than pixels, which is how a seek that had never
+worked was found. That is how the
 first real export bug was found: packets written without a duration left every
 file claiming a frame rate slightly too high, so reading one back landed
 between frames — which a test that only checked "a file was written" would
@@ -281,7 +296,7 @@ never have noticed.
 | `ve-media`   | FFmpeg decoding, frame cache, decode scheduling           |
 | `ve-render`  | wgpu compositor                                           |
 | `ve-engine`  | Playback clock, composition evaluation, audio mixing      |
-| `ve-export`  | Offline rendering, encoding and muxing                    |
+| `ve-export`  | Offline rendering, encoding, muxing and proxies           |
 | `ve-metrics` | Performance instrumentation                               |
 | `ve-app`     | The editor shell                                          |
 

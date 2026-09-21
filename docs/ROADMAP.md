@@ -221,11 +221,13 @@ blur's cost stops growing with its radius.
 ## Phase 7 — Professional editing
 
 - Export: render a sequence to a file ✅ — H.264, H.265 and ProRes, with sound
-- Proxies, multicam, captions, advanced audio, colour grading
+- Proxies ✅ — built in the background, switchable, never used for a delivery
+- Multicam, captions, advanced audio, colour grading
 - Hardware encoders
 
-**Export is done; the rest of the phase is not.** An editor that cannot produce
-a file is a demonstration rather than a tool, so it came first.
+**Export and proxies are done; the rest of the phase is not.** An editor that
+cannot produce a file is a demonstration rather than a tool, so export came
+first.
 
 What an export is, is the editor run with nobody watching. The same `evaluate`
 the preview calls resolves each instant; the same compositor draws it — one
@@ -274,6 +276,68 @@ image-sequence or audio-only output, both of which are a container away rather
 than a feature.
 
 See [BENCHMARKS.md](BENCHMARKS.md#export) for what a written frame costs.
+
+### Proxies
+
+A proxy is a smaller stand-in for one file's **picture**. It carries no sound —
+the mixer and the waveforms read the original whether or not one exists — so
+building one never re-encodes audio and there are never two sound tracks that
+could drift apart. There is no code keeping them in step because there is
+nothing to keep in step.
+
+What a proxy buys is not disk space; it adds to that. It buys latency, and in
+two parts that are easy to run together. A quarter on each axis is a sixteenth
+of the pixels. But a proxy is also written **all-intra**, so a jump into the
+middle of the file costs that frame rather than every frame back to the last
+keyframe — and on this container that second part is worth about two and a half
+times again on top of the resolution. Playing forward gets 28× cheaper;
+scrubbing gets 72×. The gap between those two numbers *is* the intra-frame
+decision, which is why editing formats have always been intra-frame and why a
+proxy that was merely a downscaled re-encode would leave most of the benefit
+unclaimed. See [BENCHMARKS.md](BENCHMARKS.md#proxies).
+
+Four rules are worth stating.
+
+**An export always renders the originals.** A proxy exists so the editor can
+keep up with a hand on a mouse; a delivery has nowhere to be and every reason to
+be right. A delivery rendered from the stand-in would be a soft file nobody
+asked for, and whoever was handed it would be the one to discover that. So the
+exporter reads the original path directly and does not consult the setting at
+all — asserted by a test that fails if it is ever changed to.
+
+**Using them is a switch, not a consequence of one existing.** The whole point
+of building a proxy is to be able to turn it off and look at the real picture —
+checking focus, checking a key — without throwing it away. The switch lives on
+the project, so reopening a cut resumes at the resolution it was being cut at.
+
+**A missing proxy is not a missing asset.** A proxy is a convenience the editor
+built for itself, so one that has been deleted — a cleared folder, a project
+moved without it — falls back to the original and carries on at full
+resolution. Going offline over it would lose the user's footage because the
+editor lost its own scratch file. The reference is kept rather than dropped, so
+restoring or rebuilding the file simply works again.
+
+**Source timestamps are preserved rather than recounted.** A proxy that showed
+a different frame from its original at the same instant would have the cut made
+against one picture and delivered from another. For constant-rate footage the
+frame index and the timestamp are the same number; for variable-rate footage
+they are not, and recounting would silently re-time the file. A test walks all
+ninety frames of the fixture through both files and asserts they agree, at 30
+and at 29.97.
+
+Building runs on its own thread, one file at a time, and the editor keeps
+playing and keeps being edited while it works. One unreadable clip does not stop
+the batch. A build refuses to start until the project has been saved, because
+proxies live beside the project file and writing them anywhere else would leave
+a folder of files nothing ever points at again.
+
+What is **not** here. There is no automatic proxy on import: transcoding a card
+the moment it is dragged in is a decision to spend an hour of someone's machine,
+and it should be asked for. There is no per-clip override of the switch, for the
+reason given above — a sequence shown half at one resolution and half at another
+is lying about what it looks like. And nothing rebuilds a proxy when the footage
+behind it changes on disk: "Rebuild All Proxies" is the answer, and a file
+watcher that noticed by itself is a different piece of machinery.
 
 ## Phase 8 — Motion graphics
 

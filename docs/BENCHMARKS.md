@@ -12,6 +12,7 @@ cargo bench -p ve-render --bench compositing  # GPU, including effect passes
 cargo bench -p ve-media  --bench waveforms    # audio analysis and display
 cargo bench -p ve-engine --bench audio        # mixing, metering and fades
 cargo bench -p ve-export --bench export       # encoding, readback and a whole second
+cargo bench -p ve-export --bench proxy        # what a proxy costs and what it buys
 ```
 
 ## The machine these were taken on
@@ -449,6 +450,95 @@ is already the fastest thing in its class at this quality. That is the argument
 for the hardware encoders listed in Phase 7 — not that software encoding is
 slow, but that everything else has somewhere to go and it does not.
 
+## Proxies
+
+`cargo bench -p ve-export --bench proxy`. The committed fixtures are 160×120,
+which is below the size at which a proxy is worth having, so this suite writes
+its own 1080p source first: ninety frames of noise at 30 fps, encoded long-GOP
+with a keyframe a second, which is what a camera produces. The proxy is a
+quarter on each axis — 480×270, a **sixteenth of the pixels** — and all-intra.
+
+### Scrubbing
+
+Eight jumps to scattered frames, forwards and backwards, through one open
+decoder. This is what dragging a playhead does, over and over.
+
+| File                     | 8 jumps  | Per jump  |
+|--------------------------|---------:|----------:|
+| Original, 1080p long-GOP |  2.51 s  |   314 ms  |
+| Proxy, 270p all-intra    | 34.7 ms  |  4.34 ms  |
+
+**72× faster.** Three hundred milliseconds is a playhead that lags visibly
+behind the mouse; four is one that does not.
+
+### Playing forward
+
+Thirty frames in order, no seeking:
+
+| File                     | 30 frames | Per frame |
+|--------------------------|----------:|----------:|
+| Original, 1080p long-GOP |    746 ms |   24.9 ms |
+| Proxy, 270p all-intra    |   26.7 ms |  0.89 ms  |
+
+**28× faster**, against a sixteenth of the pixels. More than the pixel count
+alone because a proxy is also a smaller bitstream to read and a smaller
+conversion to RGBA on the way out.
+
+### What the two numbers say together
+
+This is the part worth reading twice. Playing forward improves **28×**;
+scrubbing improves **72×**. Sequential decoding never pays the
+group-of-pictures cost — each frame follows the one before it — so playback's
+28× is what the *smaller picture* buys and nothing else.
+
+The gap between 28× and 72× is therefore what **all-intra** buys, and it is
+roughly two and a half times again on top of the resolution. A jump into the
+middle of a one-second group costs every frame back to the last keyframe; in an
+all-intra file it costs one. That is why a proxy is written intra-frame rather
+than simply small, and why a "proxy" that was merely a downscaled long-GOP
+re-encode would leave most of the benefit on the table.
+
+It is also the number that made a bug visible. Before the seek unit was fixed —
+see the [decoder's own note](#a-third-bug-this-suite-caught) — every seek landed
+at the start of the file, so this table read the same for both and the all-intra
+half of the benefit was invisible.
+
+### Building one
+
+The price of the two tables above, paid once per file while the editor carries
+on:
+
+| Size                  |  90 frames of 1080p | Per frame | Against real time |
+|-----------------------|--------------------:|----------:|------------------:|
+| Half (960×540)        |             1.60 s  |   17.8 ms |             1.7×  |
+| Quarter (480×270)     |             1.03 s  |   11.5 ms |             2.6×  |
+
+So on four cores with no GPU, proxying an hour of 1080p footage at a quarter
+takes a little over twenty minutes — and the editor is usable throughout,
+because it runs on its own thread. The floor is the decode of the original,
+which both rows pay in full: the difference between them is only the scale and
+the encode.
+
+### A third bug this suite caught
+
+Writing the scrub table is what turned up a seek that had never worked.
+`VideoDecoder::seek` converted its target into the **stream's** time base and
+handed that to `avformat_seek_file`, which is called with a stream index of -1
+and documents its timestamp as being in `AV_TIME_BASE` units — microseconds. For
+the fixtures, whose time base is 1/15360, a request for 1.667 seconds asked for
+0.0002 of one.
+
+It produced no wrong frames, which is why none of the seek tests caught it: a
+seek that lands too early is still *before* the target, and the decode that
+follows walks forward to exactly the right frame. What it produced was a seek
+that did nothing — every backward scrub decoding the file from its beginning,
+at a cost that grew with how far into the footage the user had got rather than
+with how far they had moved.
+
+The two regression tests added with the fix assert on **where the seek put the
+reader** rather than on which frame came back, which is the thing the existing
+tests could not see.
+
 ## Live measurements
 
 The editor's own overlay reports what it is doing, measured the same way. From
@@ -478,8 +568,11 @@ cheerfully reported 610,128 FPS.
 
 Named because their absence is a gap, not because they are unimportant:
 
-- Seeking through 4K footage (no 4K fixture; the committed fixtures are small
-  deliberately)
+- Seeking through 4K footage. The proxy suite generates its own 1080p source
+  rather than relying on the committed fixtures, which are small deliberately;
+  the same trick would extend to 4K, and 4K is where a proxy earns most
+- Proxies of **long** files. The build figures are throughput per frame and
+  should hold, but nothing here has transcoded an hour to find out
 - Effect chains **through the render cache**. A pass is measured on its own and
   the cache is measured without effects; what is not measured is a realistic
   edit where a chain is re-run on one parameter change and the passes before it
@@ -488,7 +581,6 @@ Named because their absence is a gap, not because they are unimportant:
   resolution rather than the canvas's is at its most expensive
 - The animation editor as an interaction: the property evaluation under it is
   measured, the drawing of a few hundred keyframes and a sampled curve is not
-- Export (not written yet)
 - Thumbnail generation (not written yet)
 - Timeline scrolling and zoom as interactions, as opposed to the queries
   underneath them

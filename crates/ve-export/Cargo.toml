@@ -26,3 +26,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "export"
 harness = false
+
+[[bench]]
+name = "proxy"
+harness = false

@@ -206,6 +206,17 @@ originally discarded (so single-frame steps landed one frame late), and the
 lookahead reset across calls (so a request one tick before a boundary returned
 the next frame).
 
+A third lived in the **unit**. `avformat_seek_file` is called with a stream
+index of -1, which documents its timestamp as being in `AV_TIME_BASE` units —
+microseconds — and the decoder was converting into the stream's own time base
+instead. Every seek landed at the start of the file. It returned the right
+frames throughout, because landing early is still landing *before* the target
+and the forward decode walks to the right place, so no frame-accuracy test
+could see it; what it cost was a scrub whose price grew with how far into the
+footage the user had got rather than with how far they moved. The regression
+tests assert on where the seek put the reader rather than on which frame came
+back, which is the only way to observe it.
+
 ### Caching
 
 The frame cache is bounded by **bytes, not entries**: a 4K frame is thirty times
@@ -215,6 +226,36 @@ resource and evicting a texture only costs a re-upload, not a re-decode.
 
 Frames are `Arc`-shared, so handing one to the cache, the uploader and the UI
 costs three pointer copies.
+
+### Proxies
+
+A proxy is a smaller, all-intra stand-in for one file's picture. Three things
+about where it sits are worth knowing.
+
+**It is chosen once, at open.** Which file a worker decodes is fixed when the
+worker is created, so switching proxies on or off means *replacing* the workers
+rather than redirecting them. `MediaAsset::picture_source` is the single place
+that decides, and it returns which file *and* whether that file is a proxy, so
+no call site has to re-derive the one subtle case — a proxy whose file has gone,
+which falls back to the original rather than taking the footage offline.
+
+**The cache key already knew.** `CacheKey` carries the frame's width, so a
+proxy frame can never satisfy a full-resolution request and the two resolutions
+coexist safely. Closing a worker on a switch drops its frames anyway, not for
+correctness but because they would occupy a budget the new ones need.
+
+**Only the editor consults it.** `ve_export::SourceFrames` reads an asset's own
+path and never the setting: a delivery rendered from a stand-in would be a soft
+file discovered by whoever was handed it. The two paths differ here on purpose,
+and a test fails if they are ever unified.
+
+Building one lives in `ve-export` rather than `ve-media`, because it needs both
+halves — a decoder and an encoder — and the encoder is already there. It reuses
+`MediaWriter` through `write_frame_at`, which states a presentation time instead
+of counting frames: an export renders a range in order so the index *is* the
+time, but a transcode has real source timestamps, and recounting them would
+silently re-time a variable-frame-rate file into showing a different frame from
+its original at the same instant.
 
 ## Rendering
 
