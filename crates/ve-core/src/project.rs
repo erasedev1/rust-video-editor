@@ -5,9 +5,10 @@ use ve_time::Ticks;
 
 use crate::asset::{MediaAsset, MediaInfo};
 use crate::composition::{Composition, CompositionSettings};
+use crate::graphic::{Graphic, GraphicContent};
 use crate::id::{
-    AngleId, AssetId, CaptionTrackId, ClipId, CompositionId, CueId, EffectId, IdAllocator,
-    LayerId, MarkerId, MulticamId, SequenceId, TrackId,
+    AngleId, AssetId, CaptionTrackId, ClipId, CompositionId, CueId, EffectId, GraphicId,
+    IdAllocator, LayerId, MarkerId, MulticamId, SequenceId, TrackId,
 };
 use crate::multicam::{MulticamAngle, MulticamGroup};
 use crate::sequence::{Sequence, SequenceSettings};
@@ -79,6 +80,11 @@ pub struct Project {
     /// written before multicam existed opens with none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub multicams: Vec<MulticamGroup>,
+    /// Shapes and titles, referenced by clips and by composition layers.
+    /// Defaulted on read, so a project written before graphics existed opens
+    /// with none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graphics: Vec<Graphic>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_sequence: Option<SequenceId>,
     pub ids: IdAllocator,
@@ -93,6 +99,7 @@ impl Project {
             sequences: Vec::new(),
             compositions: Vec::new(),
             multicams: Vec::new(),
+            graphics: Vec::new(),
             active_sequence: None,
             ids: IdAllocator::new(),
         }
@@ -290,6 +297,57 @@ impl Project {
         self.multicams.iter().any(|g| g.angles.iter().any(|a| a.asset == id))
     }
 
+    // ---- graphics -----------------------------------------------------
+
+    pub fn add_graphic(
+        &mut self,
+        name: impl Into<String>,
+        content: GraphicContent,
+    ) -> GraphicId {
+        let id = self.ids.alloc::<crate::id::GraphicTag>();
+        self.graphics.push(Graphic { id, name: name.into(), content });
+        id
+    }
+
+    pub fn graphic(&self, id: GraphicId) -> Option<&Graphic> {
+        self.graphics.iter().find(|g| g.id == id)
+    }
+
+    pub fn graphic_mut(&mut self, id: GraphicId) -> Option<&mut Graphic> {
+        self.graphics.iter_mut().find(|g| g.id == id)
+    }
+
+    /// Removes a graphic, refusing while anything still draws it.
+    ///
+    /// The same rule as an asset or a composition in use: a source pointing at
+    /// nothing would render as a hole in someone's edit, and the count is what
+    /// makes the refusal actionable rather than mysterious.
+    pub fn remove_graphic(&mut self, id: GraphicId) -> Result<Graphic, CoreError> {
+        let places = self.uses_of(Source::Graphic(id));
+        if places > 0 {
+            return Err(CoreError::GraphicInUse { id, places });
+        }
+        let index = self
+            .graphics
+            .iter()
+            .position(|g| g.id == id)
+            .ok_or(CoreError::GraphicNotFound(id))?;
+        Ok(self.graphics.remove(index))
+    }
+
+    /// Copies a graphic into a new one that nothing yet draws.
+    ///
+    /// The answer to the one surprise a shared graphic holds: two clips drawing
+    /// the same title show the same title, so making one of them say something
+    /// else starts here. Keyframes come with it — a duplicate of an animated
+    /// graphic is animated the same way.
+    pub fn duplicate_graphic(&mut self, id: GraphicId) -> Result<GraphicId, CoreError> {
+        let source = self.graphic(id).ok_or(CoreError::GraphicNotFound(id))?;
+        let name = format!("{} copy", source.name);
+        let content = source.content.clone();
+        Ok(self.add_graphic(name, content))
+    }
+
     // ---- compositions -------------------------------------------------
 
     pub fn add_composition(
@@ -420,6 +478,14 @@ impl Project {
             // would make the same clip trimmable to different lengths depending
             // on which camera was on screen when the trim began.
             Source::Multicam { group, .. } => self.multicam_duration(group),
+            // A drawn picture has no last frame, so the bound exists only so
+            // that trim arithmetic has a number to compare against. A graphic
+            // that is missing still answers zero, which is what makes a
+            // dangling source behave like any other.
+            Source::Graphic(id) => match self.graphic(id) {
+                Some(_) => Ticks::from_seconds(Graphic::MAX_DURATION_HOURS * 3600),
+                None => Ticks::ZERO,
+            },
         }
     }
 
@@ -456,7 +522,8 @@ impl Project {
     pub fn resolve_source(&self, source: Source, at: Ticks) -> Option<(AssetId, Ticks)> {
         match source {
             Source::Asset(id) => Some((id, at)),
-            Source::Composition(_) => None,
+            // Neither has a file behind it: one is composited, the other drawn.
+            Source::Composition(_) | Source::Graphic(_) => None,
             Source::Multicam { group, angle } => {
                 let group = self.multicam(group)?;
                 let source_time = group.source_time_at(angle, at)?;
@@ -487,6 +554,7 @@ impl Project {
             // Both halves, because both are IDs from the same allocator and
             // either could be the highest one the file mentions.
             Source::Multicam { group, angle } => group.raw().max(angle.raw()),
+            Source::Graphic(id) => id.raw(),
         };
         for s in &self.sequences {
             max_id = max_id.max(s.id.raw());
@@ -519,6 +587,9 @@ impl Project {
                     max_id = max_id.max(e.id.raw());
                 }
             }
+        }
+        for g in &self.graphics {
+            max_id = max_id.max(g.id.raw());
         }
         for g in &self.multicams {
             max_id = max_id.max(g.id.raw());
@@ -565,6 +636,7 @@ impl Project {
             .chain(self.multicams.iter().flat_map(|g| {
                 g.angles.iter().map(move |a| Source::Multicam { group: g.id, angle: a.id })
             }))
+            .chain(self.graphics.iter().map(|g| Source::Graphic(g.id)))
             .collect();
 
         for seq in &mut self.sequences {

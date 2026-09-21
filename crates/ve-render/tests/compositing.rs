@@ -408,7 +408,7 @@ fn rendering_records_metrics() {
 fn the_texture_cache_evicts_under_its_budget() {
     use ve_core::AssetId;
     use ve_media::CacheKey;
-    use ve_render::TextureCache;
+    use ve_render::{TextureCache, TextureKey};
 
     let gpu = gpu();
     let renderer = Renderer::new(&gpu.device);
@@ -416,7 +416,7 @@ fn the_texture_cache_evicts_under_its_budget() {
     let bytes_each = 64 * 64 * 4;
     let mut cache = TextureCache::new(bytes_each * 2);
 
-    let key = |i| CacheKey::new(AssetId::from_raw(1), i, 64);
+    let key = |i| TextureKey::from(CacheKey::new(AssetId::from_raw(1), i, 64));
     for i in 0..3 {
         let texture = renderer.upload(&gpu.device, &gpu.queue, &solid_frame(size, RED));
         cache.insert(key(i), texture);
@@ -432,7 +432,7 @@ fn the_texture_cache_evicts_under_its_budget() {
 fn the_texture_cache_drops_an_assets_textures_on_request() {
     use ve_core::AssetId;
     use ve_media::CacheKey;
-    use ve_render::TextureCache;
+    use ve_render::{TextureCache, TextureKey};
 
     let gpu = gpu();
     let renderer = Renderer::new(&gpu.device);
@@ -442,15 +442,23 @@ fn the_texture_cache_drops_an_assets_textures_on_request() {
     for asset in 1..=2u64 {
         for frame in 0..3 {
             let texture = renderer.upload(&gpu.device, &gpu.queue, &solid_frame(size, RED));
-            cache.insert(CacheKey::new(AssetId::from_raw(asset), frame, 16), texture);
+            let key = CacheKey::new(AssetId::from_raw(asset), frame, 16);
+            cache.insert(key.into(), texture);
         }
     }
     assert_eq!(cache.len(), 6);
 
+    // A drawn graphic shares the cache but not the ID space, and relinking a
+    // file must not throw away a title.
+    let drawn = TextureKey::Graphic(0x5eed);
+    let texture = renderer.upload(&gpu.device, &gpu.queue, &solid_frame(size, RED));
+    cache.insert(drawn, texture);
+
     cache.invalidate_asset(AssetId::from_raw(1));
-    assert_eq!(cache.len(), 3);
-    assert!(cache.get(&CacheKey::new(AssetId::from_raw(2), 0, 16)).is_some());
-    assert_eq!(cache.bytes(), 3 * 16 * 16 * 4);
+    assert_eq!(cache.len(), 4);
+    assert!(cache.get(&CacheKey::new(AssetId::from_raw(2), 0, 16).into()).is_some());
+    assert!(cache.get(&drawn).is_some(), "a graphic belongs to no asset");
+    assert_eq!(cache.bytes(), 4 * 16 * 16 * 4);
 }
 
 // --- Blend modes -----------------------------------------------------------

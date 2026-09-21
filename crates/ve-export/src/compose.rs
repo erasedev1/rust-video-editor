@@ -40,7 +40,7 @@ use ve_media::CacheKey;
 use ve_metrics::{counters, Metrics};
 use ve_render::{
     chain_passes, CompositeCache, CompositeCacheStats, CompositeKey, GpuTexture, Layer,
-    RenderTarget, Renderer, ScopeSampler, TextureCache,
+    RenderTarget, Renderer, ScopeSampler, TextureCache, TextureKey,
 };
 
 /// Composites resolved instants, holding the caches that make repeats cheap.
@@ -94,7 +94,7 @@ impl FrameComposer {
         for node in &update.nodes {
             for layer in &node.layers {
                 let LayerContent::Frame(frame) = &layer.content else { continue };
-                let Some(key) = key_for(&layer.item) else { continue };
+                let Some(key) = texture_key(&layer.item, &key_for) else { continue };
                 if !self.textures.contains(&key) {
                     let texture = self.renderer.upload(device, queue, frame);
                     self.textures.insert(key, texture);
@@ -164,7 +164,7 @@ impl FrameComposer {
         let mut bound: Vec<Option<Bound>> = Vec::with_capacity(resolved.layers.len());
         for layer in &resolved.layers {
             bound.push(match &layer.content {
-                LayerContent::Frame(_) => key_for(&layer.item)
+                LayerContent::Frame(_) => texture_key(&layer.item, key_for)
                     .filter(|key| self.textures.touch(key))
                     .map(Bound::Frame),
                 LayerContent::Nested(child) => keys
@@ -399,6 +399,23 @@ fn run_chain(
 
 /// Which cache a layer's picture was found in, once it has been touched.
 enum Bound {
-    Frame(CacheKey),
+    Frame(TextureKey),
     Nested(CompositeKey),
+}
+
+/// How an uploaded picture is identified.
+///
+/// A decoded frame is the caller's business — the preview asks its decode
+/// service, an export keys what it decoded itself — while a drawn graphic is
+/// not: its identity is the hash of what drew it, which the plan already
+/// carries. So graphics are keyed here rather than being pushed out to every
+/// caller that has nothing to say about them.
+fn texture_key(
+    item: &PlanItem,
+    key_for: &impl Fn(&PlanItem) -> Option<CacheKey>,
+) -> Option<TextureKey> {
+    match item.graphic() {
+        Some(state) => Some(TextureKey::Graphic(state.content_hash())),
+        None => key_for(item).map(TextureKey::Frame),
+    }
 }

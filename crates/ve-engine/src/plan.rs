@@ -27,11 +27,13 @@
 //! once. It is also what makes the plan easy to assert on: a test can name node
 //! indices instead of matching down a chain of boxes.
 
+use std::sync::Arc;
+
 use ve_core::registry::EffectRegistry;
 use ve_core::{
     builtin_registry, AssetId, BlendMode, ClipId, ColorSpace, Composition, CompositionId,
-    Effect, EffectState, LayerId, MotionBlur, Project, Rgba, Sequence, Size, Source, TrackId,
-    TrackKind, Transform, TransformState,
+    Effect, EffectState, GraphicId, GraphicState, LayerId, MotionBlur, Project, Rgba, Sequence,
+    Size, Source, TrackId, TrackKind, Transform, TransformState,
 };
 use ve_time::{Rate, Ticks};
 
@@ -57,7 +59,11 @@ pub enum Origin {
 }
 
 /// Where a visible item's picture comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: a graphic carries the words it draws. Behind an [`Arc`], so the
+/// plan a preview rebuilds on every repaint clones a pointer rather than a
+/// string.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Draw {
     /// A frame of media, to be decoded.
     Media { asset: AssetId, source_time: Ticks },
@@ -65,6 +71,12 @@ pub enum Draw {
     /// [`RenderPlan::nodes`], and is always less than the index of the node that
     /// holds this item.
     Nested { composition: CompositionId, node: usize },
+    /// A shape or a title, to be drawn.
+    ///
+    /// Resolved here rather than downstream, for the same reason a transform is:
+    /// by the time an instant leaves the engine, *when* is settled, and the
+    /// rasteriser is handed numbers rather than a project to look things up in.
+    Graphic { graphic: GraphicId, state: Arc<GraphicState> },
 }
 
 /// One thing to draw, in back-to-front order within its node.
@@ -109,14 +121,22 @@ impl PlanItem {
     pub fn asset(&self) -> Option<AssetId> {
         match self.draw {
             Draw::Media { asset, .. } => Some(asset),
-            Draw::Nested { .. } => None,
+            Draw::Nested { .. } | Draw::Graphic { .. } => None,
         }
     }
 
     pub fn nested_node(&self) -> Option<usize> {
         match self.draw {
             Draw::Nested { node, .. } => Some(node),
-            Draw::Media { .. } => None,
+            Draw::Media { .. } | Draw::Graphic { .. } => None,
+        }
+    }
+
+    /// The picture this item draws, if it is drawn rather than decoded.
+    pub fn graphic(&self) -> Option<&GraphicState> {
+        match &self.draw {
+            Draw::Graphic { state, .. } => Some(state),
+            Draw::Media { .. } | Draw::Nested { .. } => None,
         }
     }
 }
@@ -437,6 +457,16 @@ impl Evaluator<'_> {
                     self.nested_node(composition, source_time, nodes, audio, depth, transform)?;
                 Draw::Nested { composition: id, node }
             }
+            // Evaluated at the *source* time rather than at the clip's local
+            // time, which is the same rule a nested composition follows: a
+            // graphic has a timeline of its own and the clip is a window onto
+            // it, so trimming into a title's build-in trims the build-in, and a
+            // clip at double speed plays the animation twice as fast.
+            Source::Graphic(id) => {
+                let project = self.project?;
+                let graphic = project.graphic(id)?;
+                Draw::Graphic { graphic: id, state: Arc::new(graphic.evaluate(source_time)) }
+            }
         };
         Some(PlanItem { origin, draw, transform, samples, effects, blend })
     }
@@ -539,6 +569,10 @@ impl Evaluator<'_> {
                     track: None,
                 });
             }
+            // A drawn picture makes no sound. Not an oversight worth a log
+            // line: a shape on an audio track is something the editor should
+            // let a user do and then simply hear nothing from.
+            Source::Graphic(_) => {}
             // A multicam clip's sound follows its picture: the angle on screen
             // is the angle being heard. Cutting to another camera therefore
             // cuts the sound too, which is what a multicam cut means and why a

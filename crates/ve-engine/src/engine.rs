@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use ve_core::{CompositionId, Project, SequenceId, Size};
-use ve_media::{DecodeService, FrameRequest, MediaError, VideoFrame};
+use ve_graphics::{RasterImage, RasterStats, Rasteriser};
+use ve_media::{DecodeService, FrameRequest, MediaError, PixelFormat, VideoFrame};
 use ve_metrics::{spans, Metrics};
 use ve_time::{Rate, Ticks};
 
@@ -148,13 +149,25 @@ impl EngineUpdate {
 pub struct PlaybackEngine {
     clock: PlaybackClock,
     decode: Arc<DecodeService>,
+    /// Shapes and titles, drawn here rather than decoded on a worker.
+    ///
+    /// Synchronous on purpose: a rasterisation is bounded and deterministic,
+    /// and an animated graphic differs every frame, so deferring one would not
+    /// show a late picture but no picture at all. See [`ve_graphics`].
+    graphics: Rasteriser,
     metrics: Metrics,
     prefetch_frames: i64,
 }
 
 impl PlaybackEngine {
     pub fn new(clock: PlaybackClock, decode: Arc<DecodeService>, metrics: Metrics) -> Self {
-        PlaybackEngine { clock, decode, metrics, prefetch_frames: DEFAULT_PREFETCH_FRAMES }
+        PlaybackEngine {
+            clock,
+            decode,
+            graphics: Rasteriser::default(),
+            metrics,
+            prefetch_frames: DEFAULT_PREFETCH_FRAMES,
+        }
     }
 
     pub fn clock(&self) -> &PlaybackClock {
@@ -167,6 +180,11 @@ impl PlaybackEngine {
 
     pub fn decode_service(&self) -> &Arc<DecodeService> {
         &self.decode
+    }
+
+    /// How much drawing the graphics are costing, for the overlay.
+    pub fn graphic_stats(&self) -> RasterStats {
+        self.graphics.stats()
     }
 
     pub fn set_prefetch_frames(&mut self, frames: i64) {
@@ -321,14 +339,14 @@ impl PlaybackEngine {
     }
 
     /// Resolves one node against what is already decoded.
-    fn resolve_node(&self, node: &PlanNode) -> ResolvedNode {
+    fn resolve_node(&mut self, node: &PlanNode) -> ResolvedNode {
         let mut layers = Vec::with_capacity(node.items.len());
         let mut pending = 0usize;
 
         for item in &node.items {
-            match item.draw {
+            match &item.draw {
                 Draw::Media { asset, source_time } => {
-                    match self.decode.cached_frame(asset, source_time) {
+                    match self.decode.cached_frame(*asset, *source_time) {
                         Some(frame) => layers.push(ResolvedLayer {
                             item: item.clone(),
                             content: LayerContent::Frame(frame),
@@ -338,7 +356,8 @@ impl PlaybackEngine {
                             // Even while playing this is interactive work: it is
                             // the frame being shown right now, and it must beat
                             // any read-ahead already queued.
-                            self.decode.request(FrameRequest::interactive(asset, source_time));
+                            self.decode
+                                .request(FrameRequest::interactive(*asset, *source_time));
                         }
                     }
                 }
@@ -348,8 +367,20 @@ impl PlaybackEngine {
                 Draw::Nested { node: index, .. } => {
                     layers.push(ResolvedLayer {
                         item: item.clone(),
-                        content: LayerContent::Nested(index),
+                        content: LayerContent::Nested(*index),
                     });
+                }
+                // Drawn on the spot, and never pending: there is nothing to
+                // wait for. A graphic with nothing to draw — a fill keyframed
+                // to transparent, a size of zero — contributes no layer, which
+                // is the same thing it would contribute if it were drawn.
+                Draw::Graphic { state, .. } => {
+                    if let Some(image) = self.graphics.picture(state) {
+                        layers.push(ResolvedLayer {
+                            item: item.clone(),
+                            content: LayerContent::Frame(drawn_frame(&image)),
+                        });
+                    }
                 }
             }
         }
@@ -423,6 +454,26 @@ impl PlaybackEngine {
         let to = timebase.rate.frame_to_ticks(frame.max(0));
         self.scrub_to(project, viewing, to);
     }
+}
+
+/// A rasterised graphic as a frame.
+///
+/// Both are straight RGBA8 with rows packed tight, so this is a relabelling
+/// rather than a conversion: from here on a drawn picture is indistinguishable
+/// from a decoded one, which is exactly the point — the uploader, the texture
+/// cache, the compositor and every blend mode have one case to handle instead
+/// of two.
+///
+/// The presentation time is zero because a graphic has none: nothing was
+/// decoded, so there is no instant in a file for it to have come from.
+pub fn drawn_frame(image: &RasterImage) -> VideoFrame {
+    VideoFrame::new(
+        image.buffer(),
+        image.size(),
+        image.stride(),
+        PixelFormat::Rgba8,
+        Ticks::ZERO,
+    )
 }
 
 /// Resolves a sequence at an instant without any decoding, for tests and for

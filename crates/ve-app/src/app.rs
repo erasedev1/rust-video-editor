@@ -177,9 +177,10 @@ impl VergeApp {
                     ve_engine::Draw::Media { asset, source_time } => {
                         decode.key_for(asset, source_time)
                     }
-                    // A nested composition has no decoded frame to key; the preview
-                    // finds its picture in the render cache instead.
-                    ve_engine::Draw::Nested { .. } => None,
+                    // Neither a nested composition nor a drawn graphic has a
+                    // decoded frame to key: one is found in the render cache,
+                    // and the other is keyed on what drew it.
+                    ve_engine::Draw::Nested { .. } | ve_engine::Draw::Graphic { .. } => None,
                 },
                 self.state.scopes.open,
             );

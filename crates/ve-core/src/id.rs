@@ -139,4 +139,5 @@ id_types! {
     AngleTag => AngleId,
     CaptionTrackTag => CaptionTrackId,
     CueTag => CueId,
+    GraphicTag => GraphicId,
 }

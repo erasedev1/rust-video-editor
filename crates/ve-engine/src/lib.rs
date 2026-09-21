@@ -35,8 +35,8 @@ pub use audio::{AudioError, AudioRenderer, AudioSink};
 pub use clock::{ManualTime, PlaybackClock, SystemTime, TimeSource, TransportState};
 pub use cpal_sink::CpalSink;
 pub use engine::{
-    peek, EngineUpdate, LayerContent, PlaybackEngine, ResolvedLayer, ResolvedNode, Timebase,
-    Viewing,
+    drawn_frame, peek, EngineUpdate, LayerContent, PlaybackEngine, ResolvedLayer, ResolvedNode,
+    Timebase, Viewing,
 };
 pub use mixer::{AudioMixer, Meter, MixSource, MixStats};
 pub use multicam::{multicam_at, AngleView, MulticamAt};

@@ -34,6 +34,7 @@ fn source_time_of(item: &PlanItem) -> Ticks {
     match item.draw {
         Draw::Media { source_time, .. } => source_time,
         Draw::Nested { .. } => panic!("expected media, got a nested composition"),
+        Draw::Graphic { .. } => panic!("expected media, got a graphic"),
     }
 }
 

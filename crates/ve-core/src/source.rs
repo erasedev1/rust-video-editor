@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::{AngleId, AssetId, CompositionId, MulticamId};
+use crate::id::{AngleId, AssetId, CompositionId, GraphicId, MulticamId};
 
 /// The thing a clip or a composition layer draws from.
 ///
@@ -33,6 +33,12 @@ pub enum Source {
     /// Cutting between angles changes `angle` and nothing else — see
     /// [`crate::multicam`] for why that is the point rather than a convenience.
     Multicam { group: MulticamId, angle: AngleId },
+    /// A shape or a run of text, drawn rather than decoded.
+    ///
+    /// A graphic is a source rather than a kind of clip because a title is
+    /// placed, trimmed, transformed, blended and keyframed exactly as footage
+    /// is — see [`crate::graphic`].
+    Graphic(GraphicId),
 }
 
 impl Source {
@@ -51,14 +57,22 @@ impl Source {
     pub fn asset(self) -> Option<AssetId> {
         match self {
             Source::Asset(id) => Some(id),
-            Source::Composition(_) | Source::Multicam { .. } => None,
+            Source::Composition(_) | Source::Multicam { .. } | Source::Graphic(_) => None,
         }
     }
 
     pub fn composition(self) -> Option<CompositionId> {
         match self {
             Source::Composition(id) => Some(id),
-            Source::Asset(_) | Source::Multicam { .. } => None,
+            Source::Asset(_) | Source::Multicam { .. } | Source::Graphic(_) => None,
+        }
+    }
+
+    /// The graphic this draws, or `None` for anything else.
+    pub fn graphic(self) -> Option<GraphicId> {
+        match self {
+            Source::Graphic(id) => Some(id),
+            Source::Asset(_) | Source::Composition(_) | Source::Multicam { .. } => None,
         }
     }
 
@@ -66,7 +80,7 @@ impl Source {
     pub fn multicam(self) -> Option<(MulticamId, AngleId)> {
         match self {
             Source::Multicam { group, angle } => Some((group, angle)),
-            Source::Asset(_) | Source::Composition(_) => None,
+            Source::Asset(_) | Source::Composition(_) | Source::Graphic(_) => None,
         }
     }
 
@@ -92,6 +106,16 @@ impl Source {
     pub fn is_composition(self) -> bool {
         matches!(self, Source::Composition(_))
     }
+
+    pub fn is_graphic(self) -> bool {
+        matches!(self, Source::Graphic(_))
+    }
+}
+
+impl From<GraphicId> for Source {
+    fn from(id: GraphicId) -> Self {
+        Source::Graphic(id)
+    }
 }
 
 impl From<AssetId> for Source {
@@ -114,6 +138,7 @@ impl std::fmt::Display for Source {
             Source::Multicam { group, angle } => {
                 write!(f, "multicam {group} angle {angle}")
             }
+            Source::Graphic(id) => write!(f, "graphic {id}"),
         }
     }
 }
@@ -146,5 +171,10 @@ mod tests {
 
         let back: Source = serde_json::from_str(r#"{"composition":7}"#).unwrap();
         assert_eq!(back, Source::Composition(CompositionId::from_raw(7)));
+
+        let json = serde_json::to_string(&Source::Graphic(GraphicId::from_raw(9))).unwrap();
+        assert_eq!(json, r#"{"graphic":9}"#);
+        let back: Source = serde_json::from_str(r#"{"graphic":9}"#).unwrap();
+        assert_eq!(back, Source::Graphic(GraphicId::from_raw(9)));
     }
 }

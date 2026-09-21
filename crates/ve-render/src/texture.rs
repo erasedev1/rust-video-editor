@@ -329,13 +329,45 @@ impl GpuTexture {
     }
 }
 
+/// What an uploaded texture is a picture of.
+///
+/// A decoded frame is identified by what was decoded; a drawn graphic by a hash
+/// of everything that drew it. Two spaces that must not be confused, so they
+/// are one tagged key rather than two number spaces sharing a map: a frame
+/// index and a content hash that happened to be equal would otherwise hand a
+/// title's picture to a clip of footage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureKey {
+    /// A frame of media. See [`ve_media::CacheKey`].
+    Frame(CacheKey),
+    /// A shape or a title, keyed on [`ve_core::GraphicState::content_hash`].
+    Graphic(u64),
+}
+
+impl TextureKey {
+    /// The media this texture came from, if it came from media at all. Used by
+    /// invalidation, which is about files.
+    pub fn asset(self) -> Option<ve_core::AssetId> {
+        match self {
+            TextureKey::Frame(key) => Some(key.asset),
+            TextureKey::Graphic(_) => None,
+        }
+    }
+}
+
+impl From<CacheKey> for TextureKey {
+    fn from(key: CacheKey) -> Self {
+        TextureKey::Frame(key)
+    }
+}
+
 /// Least-recently-used cache of uploaded frames, bounded by GPU memory.
 ///
 /// Separate from the CPU-side frame cache because the budgets are different
 /// resources with different pressures: VRAM is usually the scarcer of the two,
 /// and evicting a GPU texture does not require re-decoding, only re-uploading.
 pub struct TextureCache {
-    entries: HashMap<CacheKey, (GpuTexture, u64)>,
+    entries: HashMap<TextureKey, (GpuTexture, u64)>,
     capacity_bytes: usize,
     bytes: usize,
     clock: u64,
@@ -366,7 +398,7 @@ impl TextureCache {
         self
     }
 
-    pub fn get(&mut self, key: &CacheKey) -> Option<&GpuTexture> {
+    pub fn get(&mut self, key: &TextureKey) -> Option<&GpuTexture> {
         self.touch(key).then(|| &self.entries.get(key).expect("just touched").0)
     }
 
@@ -376,7 +408,7 @@ impl TextureCache {
     /// references to *several* textures at once, which a single `&mut self`
     /// lookup cannot hand out. Callers touch every key first, then read them
     /// all through [`TextureCache::peek`].
-    pub fn touch(&mut self, key: &CacheKey) -> bool {
+    pub fn touch(&mut self, key: &TextureKey) -> bool {
         self.clock += 1;
         let clock = self.clock;
         match self.entries.get_mut(key) {
@@ -393,15 +425,15 @@ impl TextureCache {
     }
 
     /// Reads an entry without disturbing LRU order.
-    pub fn peek(&self, key: &CacheKey) -> Option<&GpuTexture> {
+    pub fn peek(&self, key: &TextureKey) -> Option<&GpuTexture> {
         self.entries.get(key).map(|(texture, _)| texture)
     }
 
-    pub fn contains(&self, key: &CacheKey) -> bool {
+    pub fn contains(&self, key: &TextureKey) -> bool {
         self.entries.contains_key(key)
     }
 
-    pub fn insert(&mut self, key: CacheKey, texture: GpuTexture) {
+    pub fn insert(&mut self, key: TextureKey, texture: GpuTexture) {
         let size = texture.byte_size();
         if size > self.capacity_bytes {
             return;
@@ -429,8 +461,8 @@ impl TextureCache {
     }
 
     pub fn invalidate_asset(&mut self, asset: ve_core::AssetId) {
-        let doomed: Vec<CacheKey> =
-            self.entries.keys().filter(|k| k.asset == asset).copied().collect();
+        let doomed: Vec<TextureKey> =
+            self.entries.keys().filter(|k| k.asset() == Some(asset)).copied().collect();
         for key in doomed {
             if let Some((old, _)) = self.entries.remove(&key) {
                 self.bytes -= old.byte_size();

@@ -11,6 +11,7 @@ repository.workspace = true
 ve-core = { workspace = true }
 ve-caption = { workspace = true }
 ve-time = { workspace = true }
+ve-graphics = { workspace = true }
 ve-media = { workspace = true }
 ve-render = { workspace = true }
 ve-engine = { workspace = true }

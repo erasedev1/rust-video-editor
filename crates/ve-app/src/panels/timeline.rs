@@ -707,6 +707,9 @@ fn draw_clip(
                 None => true,
             }
         }
+        // Nothing to relink: a graphic is drawn from the project rather than
+        // read off disk, so it is offline only if the project has lost it.
+        ve_core::Source::Graphic(id) => state.project.graphic(id).is_none(),
     };
     if offline {
         painter.rect_filled(rect, CornerRadius::same(3), theme::OFFLINE.gamma_multiply(0.45));

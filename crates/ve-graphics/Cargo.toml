@@ -1,0 +1,16 @@
+[package]
+name = "ve-graphics"
+description = "Shape and text rasterisation for the Verge video editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ve-core = { workspace = true }
+log = { workspace = true }
+tiny-skia = "0.12"
+
+[dev-dependencies]
+criterion = { workspace = true }

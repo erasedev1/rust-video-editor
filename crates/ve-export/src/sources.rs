@@ -13,7 +13,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use ve_core::{AssetId, Project};
-use ve_engine::{Draw, LayerContent, PlanItem, RenderPlan, ResolvedLayer, ResolvedNode};
+use ve_engine::{
+    drawn_frame, Draw, LayerContent, PlanItem, RenderPlan, ResolvedLayer, ResolvedNode,
+};
+use ve_graphics::Rasteriser;
 use ve_media::{CacheKey, VideoDecoder, VideoFrame};
 use ve_time::Ticks;
 
@@ -30,6 +33,10 @@ pub struct SourceFrames {
     /// Items whose picture could not be decoded, which the report carries: a
     /// frame written without a layer that should have been in it is exactly the
     /// kind of thing that must not pass silently.
+    /// Shapes and titles, drawn rather than decoded. An export gets its hits
+    /// here from a graphic being on screen for more than one frame, which is
+    /// every title anyone has ever made.
+    graphics: Rasteriser,
     missing: u64,
     problems: Vec<String>,
 }
@@ -55,6 +62,7 @@ impl SourceFrames {
             paths,
             decoders: HashMap::new(),
             current: HashMap::new(),
+            graphics: Rasteriser::default(),
             missing: 0,
             problems: Vec::new(),
         }
@@ -85,30 +93,45 @@ impl SourceFrames {
     /// the playback engine's version of this, which reports what is not ready
     /// and carries on.
     pub fn resolve(&mut self, plan: &RenderPlan) -> Vec<ResolvedNode> {
-        plan.nodes
-            .iter()
-            .map(|node| {
-                let mut layers = Vec::with_capacity(node.items.len());
-                for item in &node.items {
-                    match item.draw {
-                        Draw::Media { asset, source_time } => {
-                            match self.frame(asset, source_time) {
-                                Some(frame) => layers.push(ResolvedLayer {
-                                    item: item.clone(),
-                                    content: LayerContent::Frame(frame),
-                                }),
-                                None => self.missing += 1,
-                            }
+        // Borrowed apart so the graphics can be drawn while `self.frame` holds
+        // the decoders; they are separate halves of the same struct and the
+        // closure below needs both.
+        let mut nodes = Vec::with_capacity(plan.nodes.len());
+        for node in &plan.nodes {
+            let mut layers = Vec::with_capacity(node.items.len());
+            for item in &node.items {
+                match &item.draw {
+                    Draw::Media { asset, source_time } => {
+                        match self.frame(*asset, *source_time) {
+                            Some(frame) => layers.push(ResolvedLayer {
+                                item: item.clone(),
+                                content: LayerContent::Frame(frame),
+                            }),
+                            None => self.missing += 1,
                         }
-                        Draw::Nested { node: index, .. } => layers.push(ResolvedLayer {
-                            item: item.clone(),
-                            content: LayerContent::Nested(index),
-                        }),
+                    }
+                    Draw::Nested { node: index, .. } => layers.push(ResolvedLayer {
+                        item: item.clone(),
+                        content: LayerContent::Nested(*index),
+                    }),
+                    // Drawn, and never missing: a graphic with nothing to draw
+                    // is a fill keyframed to transparent rather than a file
+                    // that could not be opened, and counting it as a problem
+                    // would report a render as incomplete for doing exactly
+                    // what it was asked to.
+                    Draw::Graphic { state, .. } => {
+                        if let Some(image) = self.graphics.picture(state) {
+                            layers.push(ResolvedLayer {
+                                item: item.clone(),
+                                content: LayerContent::Frame(drawn_frame(&image)),
+                            });
+                        }
                     }
                 }
-                ResolvedNode { layers, pending: 0 }
-            })
-            .collect()
+            }
+            nodes.push(ResolvedNode { layers, pending: 0 });
+        }
+        nodes
     }
 
     /// The frame of `asset` covering `source_time`, decoding it if need be.

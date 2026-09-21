@@ -22,6 +22,7 @@ pub mod composition;
 pub mod effect;
 pub mod fade;
 pub mod geometry;
+pub mod graphic;
 pub mod id;
 pub mod motion;
 pub mod multicam;
@@ -44,9 +45,13 @@ pub use effect::{
 };
 pub use fade::{Fade, FadeCurve, FadeEdge};
 pub use geometry::{ColorSpace, Rgba, Size, Vec2};
+pub use graphic::{
+    FontSpec, Graphic, GraphicContent, GraphicState, Shape, ShapeKind, ShapeState, Text,
+    TextAlign, TextState,
+};
 pub use id::{
-    AngleId, AssetId, CaptionTrackId, ClipId, CompositionId, CueId, EffectId, Id, IdAllocator,
-    LayerId, MarkerId, MulticamId, SequenceId, TrackId,
+    AngleId, AssetId, CaptionTrackId, ClipId, CompositionId, CueId, EffectId, GraphicId, Id,
+    IdAllocator, LayerId, MarkerId, MulticamId, SequenceId, TrackId,
 };
 pub use motion::MotionBlur;
 pub use multicam::{MulticamAngle, MulticamGroup, SyncMethod};
@@ -91,6 +96,10 @@ pub enum CoreError {
     CaptionTrackNotFound(CaptionTrackId),
     #[error("cue {0} not found")]
     CueNotFound(CueId),
+    #[error("graphic {0} not found")]
+    GraphicNotFound(GraphicId),
+    #[error("graphic {id} is still used in {places} place(s)")]
+    GraphicInUse { id: GraphicId, places: usize },
     #[error("multicam group {0} not found")]
     MulticamNotFound(MulticamId),
     #[error("angle {0} not found")]

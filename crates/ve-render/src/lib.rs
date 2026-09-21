@@ -51,7 +51,7 @@ pub use scopes::{
     vectorscope, waveform, Histogram, ScopeImage, ScopeSample, ScopeSampler, WaveformMode,
 };
 pub use target::RenderTarget;
-pub use texture::{GpuTexture, TextureCache, TextureId, FRAME_FORMAT};
+pub use texture::{GpuTexture, TextureCache, TextureId, TextureKey, FRAME_FORMAT};
 pub use transform::{fit_scale, layer_matrix};
 
 #[derive(Debug, thiserror::Error)]
