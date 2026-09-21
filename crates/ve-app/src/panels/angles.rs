@@ -44,6 +44,13 @@ const TILE_PIXELS: usize = 320;
 /// shoot; past that the tiles shrink rather than the grid growing sideways.
 const MAX_COLUMNS: usize = 4;
 
+/// How tall a tile grows on its own before the panel has to be dragged.
+///
+/// The viewer opens over the timeline, and a grid that took half the window the
+/// moment it appeared would be a worse first impression than one that has to be
+/// pulled bigger.
+const MAX_TILE_HEIGHT: f32 = 180.0;
+
 /// Textures for the tiles, kept between frames.
 ///
 /// Keyed on the asset with the instant it holds, so a tile is only re-uploaded
@@ -154,7 +161,17 @@ pub fn show(
     let available = ui.available_size();
     let spacing = 4.0;
     let tile_w = ((available.x - spacing * (columns as f32 - 1.0)) / columns as f32).max(40.0);
-    let tile_h = ((available.y - 18.0 - spacing * (rows as f32 - 1.0)) / rows as f32).max(30.0);
+
+    // A tile is at least tall enough to hold a 16:9 picture, whatever height
+    // the panel has settled at: a panel that shrank to its contents would
+    // otherwise leave the grid a few pixels high and every picture in it a
+    // smear. Above that the tiles take whatever room the panel has been
+    // dragged to, so making the viewer bigger makes the pictures bigger.
+    let by_aspect = (tile_w * 9.0 / 16.0).min(MAX_TILE_HEIGHT);
+    let by_panel = (available.y - spacing * (rows as f32 - 1.0)) / rows as f32;
+    let tile_h = by_panel.max(by_aspect).max(30.0);
+    // Asking for the room the grid needs is what lets the panel grow to it.
+    ui.set_min_height(tile_h * rows as f32 + spacing * (rows as f32 - 1.0));
 
     let shift = ui.input(|i| i.modifiers.shift);
     let ctx = ui.ctx().clone();

@@ -70,20 +70,14 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
                                     // multicam group. Only offered for media
                                     // that has a picture: an angle is a camera.
                                     if has_video {
-                                        let mark = if picked { "◉" } else { "○" };
+                                        // A real checkbox rather than a glyph:
+                                        // egui draws its own box, so it cannot
+                                        // come out as a missing-character
+                                        // rectangle on a system whose font has
+                                        // no ballot symbols.
+                                        let mut on = picked;
                                         if ui
-                                            .add(
-                                                egui::Label::new(
-                                                    RichText::new(mark).small().color(
-                                                        if picked {
-                                                            theme::ACCENT
-                                                        } else {
-                                                            theme::TEXT_FAINT
-                                                        },
-                                                    ),
-                                                )
-                                                .sense(Sense::click()),
-                                            )
+                                            .add(egui::Checkbox::without_text(&mut on))
                                             .on_hover_text("include in the next multicam group")
                                             .clicked()
                                         {
@@ -347,7 +341,7 @@ fn multicam_bar(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
                         });
                     }
                     if ui
-                        .add_enabled(target_track.is_some(), egui::Button::new("＋"))
+                        .add_enabled(target_track.is_some(), egui::Button::new("+"))
                         .on_hover_text("Add to the timeline at the playhead")
                         .clicked()
                     {
@@ -362,7 +356,7 @@ fn multicam_bar(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button("✕").on_hover_text("Delete this group").clicked() {
+                        if ui.small_button("×").on_hover_text("Delete this group").clicked() {
                             actions.push(Action::RemoveMulticamGroup(id));
                         }
                     });

@@ -24,3 +24,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "waveforms"
 harness = false
+
+[[bench]]
+name = "sync"
+harness = false

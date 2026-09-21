@@ -223,12 +223,14 @@ blur's cost stops growing with its radius.
 - Export: render a sequence to a file ✅ — H.264, H.265 and ProRes, with sound
 - Proxies ✅ — built in the background, switchable, never used for a delivery
 - Colour grading ✅ — three-way, white balance, an HSL secondary, and scopes
-- Multicam, captions, advanced audio
+- Multicam ✅ — grouped cameras, synced on sound or timecode, cut with the
+  number keys
+- Captions, advanced audio
 - Hardware encoders
 
-**Export, proxies and grading are done; the rest of the phase is not.** An
-editor that cannot produce a file is a demonstration rather than a tool, so
-export came first.
+**Export, proxies, grading and multicam are done; captions, advanced audio and
+hardware encoders are not.** An editor that cannot produce a file is a
+demonstration rather than a tool, so export came first.
 
 What an export is, is the editor run with nobody watching. The same `evaluate`
 the preview calls resolves each instant; the same compositor draws it — one
@@ -417,6 +419,73 @@ See [BENCHMARKS.md](BENCHMARKS.md#grading) for what a grading pass costs
 against a plain composite, and [the scopes table](BENCHMARKS.md#scopes) for
 what reading the picture back and counting it costs — including the `f64::round`
 that turned out to be most of the second one.
+
+### Multicam
+
+A group is a set of angles on one shared timeline, each carrying the offset from
+that timeline into its own media. A clip draws `Source::Multicam{group, angle}`,
+so **cutting between cameras changes one field and nothing else** — the clip
+keeps its position, its length, its window into the group, its effects and its
+animation, because none of those is about which camera is being watched. That is
+what makes a cut instant, and what makes it undoable as one tiny command rather
+than as a rewrite of the clip.
+
+The alternative — swapping the clip's asset and rewriting `source_in` by the
+difference of two offsets — would make every angle change a different edit
+depending on which angle it came from, and a group synced wrongly would leave a
+trail of clips already rewritten with the wrong numbers.
+
+An angle is a **camera**: an `AssetId`, not a `Source`. A composition cannot be
+an angle and neither can another group, which keeps the nesting graph exactly as
+it was so the cycle check that stops a render never finishing does not have to
+learn about groups. An angle that needs work done to it is a clip with effects
+on it, or a multicam clip inside a composition — the direction nesting already
+runs.
+
+A clip is trimmed against the **group**, not against the angle it happens to be
+showing, or the same clip would have different limits depending on what was on
+screen when its edge was grabbed. The group covers the **union** of its cameras
+rather than the intersection: cameras start and stop at different moments, and
+bounding to the stretch every camera covers would refuse edits over footage that
+plainly exists. An angle with nothing at a given instant draws nothing, and the
+viewer says which those are.
+
+**Syncing correlates the envelope, not the samples.** Two cameras twenty feet
+apart record the same event through different microphones, at different levels,
+with different room colouration; their waveforms do not match at all, and
+correlating 48,000 samples a second to discover that is expensive as well as
+wrong. What matches is *when the loud parts happen* — so this correlates the RMS
+series the waveform analysis already produces, at 200 buckets a second. Scores
+are Pearson over the overlap, so a camera set 14 dB quieter matches exactly.
+
+Five milliseconds is not frame-accurate at 24 fps and the code does not pretend
+otherwise: every match carries a **confidence**, the interface reports the
+weakest pair in the group, and the offsets can be nudged by hand afterwards —
+which marks the group Manual, because once a number has been typed over, saying
+it was measured is no longer true. Timecode syncing reads the start timecode the
+container records, drop frame included, and refuses rather than guessing when a
+camera does not carry one.
+
+The viewer is a grid of every camera at one instant, with the one on screen
+outlined. Numbers cut, shift switches, and a tile is numbered over *every* angle
+rather than only the enabled ones — disabling a camera must not renumber the
+keys under the user's fingers part way through a shot. A camera that was not
+rolling keeps its tile and says so, for the same reason.
+
+Tiles are uploaded as ordinary egui textures rather than going through the
+compositor: a tile is a thumbnail of one decoded frame with no transform, no
+effects and no blending, so it needs no render target and no pipeline. The
+frames come from the cache and the scheduler the preview already uses.
+
+See [BENCHMARKS.md](BENCHMARKS.md#multicam-syncing) for what syncing costs and
+what the coarse-to-fine search is worth against the exhaustive one.
+
+**A bug this found.** Building a 16 kHz fixture for the sync tests exposed a
+silent fault in the audio decoder: `ffmpeg-next` allocates the resampler's
+output frame for the input's sample count, so upsampling never caught up. A
+44.1 kHz file played 8.8% fast and drew its waveform 8.8% short, believed by
+everything downstream. Every committed fixture was 48 kHz, where the bug cannot
+show. Fixed, with regression tests in both directions.
 
 ## Phase 8 — Motion graphics
 

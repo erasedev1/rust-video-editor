@@ -907,6 +907,80 @@ editor holds and upload every frame twice; sharing costs an export's submissions
 queueing behind the preview's, which is the right way round — the person
 watching the editor is waiting on the preview, not on the render.
 
+## Multicam
+
+A group is a set of angles sharing one **group timeline**; each angle carries the
+offset from that timeline into its own media, so group time `t` reads angle `a`
+at `t + a.offset`. Syncing is the act of establishing those offsets. Everything
+after it is arithmetic.
+
+### One field is the cut
+
+A clip draws `Source::Multicam { group, angle }` — both halves, so a source says
+what it means without a lookup. Cutting to another camera changes `angle` and
+nothing else: position, length, source window, effects and animation are all
+untouched, because none of them is about which camera is being watched.
+
+`Project::resolve_source` is the single place that indirection is undone. By the
+time the decode scheduler, the frame cache and the renderer see a multicam clip
+it is an ordinary media draw, so none of them knows multicam exists.
+
+### An angle is a camera, not a source
+
+`MulticamAngle::asset` is an `AssetId`. A composition cannot be an angle and
+neither can another group. Allowing one would add a second kind of edge to the
+nesting graph — a clip reaching a composition *through* a group — and the cycle
+check that keeps a render from never finishing would have to know about groups
+to stay correct. Nothing is lost: an angle that needs work done to it is a clip
+with effects on it, or a multicam clip nested inside a composition.
+
+### Syncing correlates envelopes
+
+Two cameras at one event record through different microphones, at different
+levels, in different parts of the room. Their **waveforms** do not match. What
+matches is when the loud parts happen, so `ve-media::sync` correlates the RMS
+series the waveform analysis already produces — 200 buckets a second, five
+milliseconds each.
+
+Scores are **Pearson** over the overlapping region: both series are mean-centred
+and divided by their own magnitude, so a camera 10 dB quieter still matches
+exactly, where a sum of differences would rank it below silence.
+
+The search is **coarse to fine** over a decimated pyramid. A full search of ±10
+minutes at 200 buckets a second is a quarter of a million lags against a series
+of the same order; decimating by eight, repeatedly, turns that into 59 lags at
+the top and a handful either side at each level below. A coarse level needs
+statistical weight as well as a time floor — one second of overlap is 200 points
+on the base grid but three where a bucket is a third of a second, and three
+points correlate at very nearly ±1 whatever they are.
+
+What that costs is the usual risk: a coarse level that picks the wrong peak
+cannot be talked out of it by the finer ones. Every match therefore carries a
+confidence, the interface reports the **weakest pair** rather than an average —
+one camera that did not match makes the whole group suspect — and nothing about
+the result is presented as more certain than it is.
+
+Measuring is I/O, so it does not live in the command layer: `ResyncMulticamGroup`
+takes offsets already measured and records them. That is also what makes a sync
+undoable in the ordinary way, as a before-and-after on a handful of numbers.
+
+### The viewer
+
+`ve-engine::multicam_at` answers what the grid contains the same way the plan
+answers what the picture contains: purely, from the project and a time, with no
+decoding and no GPU. It returns a list of media requests; the interface asks the
+decode service for them and draws whatever arrived.
+
+Tiles are uploaded as ordinary egui textures rather than going through the
+compositor, because a tile is a thumbnail of one decoded frame with nothing done
+to it. That costs a CPU copy per changed frame and saves a render target, a
+pipeline and a second path through the compositor.
+
+Numbers are assigned over **every** angle rather than only the enabled ones, and
+a camera that was not rolling keeps its tile. Both for the same reason: the
+numbers are the controls, and a grid that renumbered itself mid-shot would move
+them under the user's fingers.
+
 ## The project file
 
 See [PROJECT_FORMAT.md](PROJECT_FORMAT.md). In short: pretty-printed JSON behind

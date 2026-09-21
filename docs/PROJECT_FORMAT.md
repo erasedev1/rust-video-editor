@@ -112,6 +112,19 @@ with a test that loads a document without it and asserts the mode comes back as
 `normal`. A bump is for a change that would make an older document mean something
 different — a renamed field, a changed unit, a restructured tree.
 
+A clip's `source` gained a third shape in Phase 7 —
+`{"multicam": {"group": 12, "angle": 14}}` — alongside `{"asset": 3}` and
+`{"composition": 7}`. That is **additive for reading**: every version 2 document
+still means exactly what it meant, which is the test for whether a bump is
+needed. A version 2 file written by this build can carry a multicam source that
+an older build will not understand, and the envelope version is not what would
+tell it so; that is the known cost of not bumping, and it is the same cost every
+new enum variant carries in a format this young.
+
+Multicam groups live in a `multicams` array on the project, omitted entirely
+when there are none. An angle is `{id, name, asset, offset, enabled}`, where
+`offset` is where group time zero falls inside that camera's own media.
+
 Everything audio added in Phase 4 is additive, and still at version 2:
 
 | Field                        | Where            | Missing means |

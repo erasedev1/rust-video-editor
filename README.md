@@ -36,6 +36,9 @@ The first vertical slice is complete and tested end to end:
 - Audio playback through the system's default output device, mixed ahead on its
   own thread — built and tested to the device boundary, but **unverified against
   real hardware**, because this was developed in a container with no sound card
+- Multicam: group the cameras that covered one event, sync them on their sound
+  or on timecode, and cut between them with the number keys while the angle
+  viewer shows every camera at once
 - Keyframe any transform, audio or effect property, with hold, linear and eased
   interpolation, from an animation editor that shares the timeline's own time
   axis
@@ -131,6 +134,14 @@ the angle is hue, so the six patches of a colour bar sit as six dots and a cast
 shows as the whole plot leaning one way. The rings say how saturated; there are
 no primary target boxes, because those are 75% bars under one standard and
 drawing them over a Rec. 709 plot would invite a reading they do not support.
+
+![The angle viewer, with a multicam clip cut between three cameras](docs/images/multicam.png)
+
+Multicam: three cameras grouped from the media panel, the angle viewer under the
+preview with the camera on screen outlined, and a clip cut into three by pressing
+2 and then 3. The numbers on the tiles are the controls, so they are assigned
+over every angle rather than only the enabled ones — a grid that renumbered
+itself mid-shot would move them under your fingers.
 
 The development overlay reports what the frame actually cost, broken down by
 stage, so a regression is visible while editing rather than weeks later:
@@ -274,7 +285,7 @@ says so in the performance overlay, and keeps cutting.
 ## Testing
 
 ```sh
-cargo test --workspace     # 840 tests
+cargo test --workspace     # 949 tests
 cargo bench                # measured, not estimated
 ```
 

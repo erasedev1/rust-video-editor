@@ -12,6 +12,7 @@ cargo bench -p ve-render --bench compositing  # GPU, including effect passes
 cargo bench -p ve-render --bench scopes       # reading the picture back and counting it
 cargo bench -p ve-media  --bench waveforms    # audio analysis and display
 cargo bench -p ve-engine --bench audio        # mixing, metering and fades
+cargo bench -p ve-media  --bench sync         # multicam syncing
 cargo bench -p ve-export --bench export       # encoding, readback and a whole second
 cargo bench -p ve-export --bench proxy        # what a proxy costs and what it buys
 ```
@@ -632,6 +633,48 @@ The two regression tests added with the fix assert on **where the seek put the
 reader** rather than on which frame came back, which is the thing the existing
 tests could not see.
 
+## Multicam syncing
+
+Same container, `cargo bench -p ve-media --bench sync`. Figures are per **pair**
+of cameras; a group of N cameras is N−1 pairs. Each run includes building the
+decimated pyramid from the peaks, which at the longer lengths is most of it.
+
+| Pair length |     Time |
+|-------------|---------:|
+| 1 minute    |   182 µs |
+| 10 minutes  |  7.09 ms |
+| 60 minutes  |  46.6 ms |
+
+An hour-long four-camera group is therefore about **140 ms** — fast enough that
+Sync is a button rather than a progress bar. The wait a user actually notices is
+the *analysis* before it: peaks come from the same background workers that draw
+the timeline's waveforms, at about 100× real time (see [the waveform
+table](#analysis)), so an hour of audio takes about thirty seconds to read
+before there is anything to correlate. Syncing a group that has already been
+sitting on the timeline is instant, because those peaks already exist.
+
+### What the pyramid is worth
+
+Two minutes of material, searched ±60 seconds — short enough that the
+exhaustive version finishes inside a benchmark run at all:
+
+| Searching ±60s of a 2-minute pair |     Time | Cheaper by |
+|-----------------------------------|---------:|-----------:|
+| Every lag, scored                  |   777 ms |         1× |
+| Coarse to fine                     |  1.37 ms |       566× |
+
+The exhaustive search is not kept in the crate; it lives in the benchmark,
+because it exists to be measured against rather than to be called. Scaling that
+777 ms to the ±10 minutes and 60 minutes the editor actually offers puts the
+exhaustive search in the tens of minutes for one pair, which is the whole
+argument: the pyramid is not an optimisation of this feature, it is what makes
+the feature exist.
+
+What it costs is the usual risk of a coarse-to-fine search — a coarse level that
+picks the wrong peak cannot be talked out of it by the finer ones. That is what
+the confidence figure on every match is for, and what the interface reports as
+"the weakest pair".
+
 ## Live measurements
 
 The editor's own overlay reports what it is doing, measured the same way. From
@@ -685,3 +728,6 @@ Named because their absence is a gap, not because they are unimportant:
 - The audio device itself. Mixing, metering and the ring are measured; the
   latency and underrun behaviour of a real sound card are not, because this
   container has none.
+- The angle viewer's per-frame cost. It decodes one frame per camera per
+  instant through the same service the preview uses, so the cost is a decode
+  and a thumbnail upload; neither is measured separately yet.
