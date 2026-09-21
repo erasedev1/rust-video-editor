@@ -20,6 +20,7 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
     });
     proxy_bar(ui, state, actions);
     multicam_bar(ui, state, actions);
+    graphics_bar(ui, state, actions);
     ui.separator();
 
     if state.project.assets.is_empty() {
@@ -363,5 +364,132 @@ fn multicam_bar(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
                 });
             });
         ui.add_space(2.0);
+    }
+}
+
+/// The shapes and titles this project holds, and the buttons that make more.
+///
+/// Sits with the media because that is what a graphic is: something a clip can
+/// draw. It is not media in the sense of a file on disk — there is nothing to
+/// relink and nothing to go offline — which is why it gets its own heading
+/// rather than a row in the list above.
+fn graphics_bar(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("GRAPHICS").small().color(theme::TEXT_FAINT));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.menu_button("New…", |ui| {
+                for kind in [
+                    ve_core::ShapeKind::Rectangle,
+                    ve_core::ShapeKind::Ellipse,
+                    ve_core::ShapeKind::Polygon { sides: 6 },
+                    ve_core::ShapeKind::Star { points: 5 },
+                ] {
+                    if ui.button(kind.label()).clicked() {
+                        actions.push(Action::AddShape(kind));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.button("Title").clicked() {
+                    actions.push(Action::AddTitle);
+                    ui.close();
+                }
+            });
+        });
+    });
+
+    if state.project.graphics.is_empty() {
+        ui.label(
+            RichText::new("Shapes and titles you make appear here")
+                .small()
+                .color(theme::TEXT_FAINT),
+        );
+        return;
+    }
+
+    let target_track = default_track_for(state);
+    let selected = state.selection.graphic;
+    for graphic in &state.project.graphics {
+        let id = graphic.id;
+        let is_selected = selected == Some(id);
+        let summary = summarise_graphic(graphic);
+        let name = graphic.name.clone();
+
+        let response = ui
+            .scope(|ui| {
+                let fill = if is_selected { theme::ACCENT_DIM } else { theme::PANEL_RAISED };
+                egui::Frame::new()
+                    .fill(fill)
+                    .corner_radius(theme::RADIUS)
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&name).color(theme::TEXT));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(summary).small().color(theme::TEXT_FAINT),
+                                );
+                            });
+                        });
+                    });
+            })
+            .response
+            .interact(Sense::click());
+
+        if response.clicked() {
+            actions.push(Action::SelectGraphic(Some(id)));
+        }
+        if response.double_clicked() {
+            if let Some(track) = target_track {
+                let at = state.active_sequence().map(|s| s.playhead).unwrap_or_default();
+                actions.push(Action::AddGraphicToTimeline { graphic: id, track, at });
+            }
+        }
+        response.context_menu(|ui| {
+            if ui.button("Add at playhead").clicked() {
+                if let Some(track) = target_track {
+                    let at = state.active_sequence().map(|s| s.playhead).unwrap_or_default();
+                    actions.push(Action::AddGraphicToTimeline { graphic: id, track, at });
+                }
+                ui.close();
+            }
+            if ui.button("Duplicate").clicked() {
+                actions.push(Action::DuplicateGraphic(id));
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Delete").clicked() {
+                actions.push(Action::RemoveGraphic(id));
+                ui.close();
+            }
+        });
+        response.on_hover_text(format!("{name}\ndouble-click to add at the playhead"));
+        ui.add_space(2.0);
+    }
+}
+
+/// How much of a title's words the list shows before eliding.
+const SUMMARY_CHARS: usize = 18;
+
+/// A one-line summary of what a graphic draws.
+fn summarise_graphic(graphic: &ve_core::Graphic) -> String {
+    match &graphic.content {
+        ve_core::GraphicContent::Shape(shape) => {
+            let size = shape.size.value;
+            format!("{}  ·  {:.0}×{:.0}", shape.kind.label(), size.x, size.y)
+        }
+        ve_core::GraphicContent::Text(text) => {
+            // The words themselves are the most useful thing to show, so the
+            // kind is left implicit and the first line is elided instead.
+            let first = text.text.lines().next().unwrap_or_default();
+            let shown: String = first.chars().take(SUMMARY_CHARS).collect();
+            if first.chars().count() > SUMMARY_CHARS {
+                format!("{shown}…")
+            } else {
+                shown
+            }
+        }
     }
 }

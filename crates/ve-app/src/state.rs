@@ -34,6 +34,12 @@ pub struct Selection {
     /// must not make Delete take a clip.
     pub cue: Option<CueId>,
     pub asset: Option<AssetId>,
+    /// The graphic being edited, when one was picked in the media panel.
+    ///
+    /// A clip that draws a graphic reaches the same controls without this being
+    /// set — selecting the clip is selecting what it draws — so this is only
+    /// for editing one that is not on the timeline yet.
+    pub graphic: Option<ve_core::GraphicId>,
 }
 
 impl Selection {

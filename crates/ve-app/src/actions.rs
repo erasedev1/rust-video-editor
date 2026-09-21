@@ -9,22 +9,25 @@
 use std::path::PathBuf;
 
 use ve_command::{
-    property_ref, AddCaptionTrack, AddClip, AddCue, AddEffect, AddMarker, AddTrack,
-    ClipProperty, Command, Compound, CreateMulticamGroup, CrossfadeClips, CutToAngle,
-    EditKeyframes, EffectHost, KeyframeEdit, KeyframePoint, MoveClip, MoveEffect, MoveTrack,
-    NewAngle, PropertyValue, RemoveCaptionTrack, RemoveClip, RemoveCue, RemoveEffect,
-    RemoveMarker, RemoveMulticamGroup, RemoveTrack, RenameEffect, ReplaceCues,
+    graphic_clip, property_ref, AddCaptionTrack, AddClip, AddCue, AddEffect, AddGraphic,
+    AddMarker, AddTrack, ClipProperty, Command, Compound, CreateMulticamGroup, CrossfadeClips,
+    CutToAngle, DuplicateGraphic, EditKeyframes, EffectHost, GraphicOption, GraphicProperty,
+    KeyframeEdit, KeyframePoint, MoveClip, MoveEffect, MoveTrack, NewAngle, PropertyValue,
+    RemoveCaptionTrack, RemoveClip, RemoveCue, RemoveEffect, RemoveGraphic, RemoveMarker,
+    RemoveMulticamGroup, RemoveTrack, RenameEffect, RenameGraphic, ReplaceCues,
     ResyncMulticamGroup, RetimeCue, RollEdit, SetAngleEnabled, SetAngleOffset, SetAssetProxy,
     SetCaptionLanguage, SetClipAngle, SetClipBlendMode, SetClipEnabled, SetClipFade,
     SetClipMotionBlur, SetClipProperty, SetClipSpeed, SetCompositionSettings, SetCueText,
-    SetEffectEnabled, SetEffectOption, SetSequenceColorSpace, SetSequenceFormat,
-    SetSequenceMotionBlur, SetTrackFlag, SetTrackLevel, SetUseProxies, ShiftClips, SlideClip,
-    SlipClip, SplitClip, TrackFlag, TrackLevel, TrimClip, TrimEdge,
+    SetEffectEnabled, SetEffectOption, SetGraphicOption, SetGraphicProperty, SetGraphicText,
+    SetSequenceColorSpace, SetSequenceFormat, SetSequenceMotionBlur, SetTrackFlag,
+    SetTrackLevel, SetUseProxies, ShiftClips, SlideClip, SlipClip, SplitClip, TrackFlag,
+    TrackLevel, TrimClip, TrimEdge,
 };
 use ve_core::{
     AngleId, AssetId, BlendMode, CaptionTrackId, Clip, ClipId, ColorSpace, CueId, EffectId,
-    Fade, FadeCurve, FadeEdge, Interpolation, MarkerId, MotionBlur, MulticamId, ParamValue,
-    Project, SequenceId, Source, Speed, SyncMethod, TrackId, TrackKind,
+    Fade, FadeCurve, FadeEdge, GraphicContent, GraphicId, Interpolation, MarkerId, MotionBlur,
+    MulticamId, ParamValue, Project, Rgba, SequenceId, Shape, ShapeKind, Source, Speed,
+    SyncMethod, Text, TrackId, TrackKind, Vec2,
 };
 use ve_engine::PlaybackEngine;
 use ve_media::WaveformService;
@@ -131,6 +134,40 @@ pub enum Action {
     /// Applies to whatever canvas is being viewed: the sequence, or a
     /// composition when one is open.
     SetColorSpace(ColorSpace),
+
+    // Graphics
+    /// Makes a shape and selects it, ready to be dialled in.
+    AddShape(ShapeKind),
+    /// Makes a title and selects it.
+    AddTitle,
+    SelectGraphic(Option<GraphicId>),
+    RemoveGraphic(GraphicId),
+    DuplicateGraphic(GraphicId),
+    RenameGraphic {
+        graphic: GraphicId,
+        name: String,
+    },
+    SetGraphicProperty {
+        graphic: GraphicId,
+        target: GraphicProperty,
+        value: PropertyValue,
+        /// Whether this is one move of a drag rather than a finished edit.
+        coalesce: bool,
+    },
+    SetGraphicText {
+        graphic: GraphicId,
+        text: String,
+    },
+    SetGraphicOption {
+        graphic: GraphicId,
+        option: GraphicOption,
+    },
+    /// Places a graphic on the timeline at the playhead.
+    AddGraphicToTimeline {
+        graphic: GraphicId,
+        track: TrackId,
+        at: Ticks,
+    },
 
     // Multicam
     /// Ticks a piece of media for inclusion in the next group.
@@ -1490,6 +1527,140 @@ pub fn dispatch(
             let on = state.timeline.snapping;
             state.set_status(Status::info(if on { "snapping on" } else { "snapping off" }));
         }
+        Action::AddShape(kind) => {
+            // Sized against the canvas rather than in absolute pixels, so a
+            // new rectangle is a sensible fraction of the frame whatever the
+            // sequence's resolution.
+            let canvas = state
+                .active_sequence()
+                .map(|s| s.settings.resolution)
+                .unwrap_or(state.project.settings.default_sequence.resolution);
+            let size = Vec2::new(canvas.width as f64 * 0.4, canvas.height as f64 * 0.4);
+            let name = kind.label().to_string();
+            add_graphic(
+                state,
+                &name,
+                GraphicContent::Shape(Shape::new(kind, size, Rgba::WHITE)),
+            );
+        }
+
+        Action::AddTitle => {
+            let canvas = state
+                .active_sequence()
+                .map(|s| s.settings.resolution)
+                .unwrap_or(state.project.settings.default_sequence.resolution);
+            // A tenth of the frame's height is about where a title sits before
+            // anyone touches it.
+            let size = canvas.height as f64 * 0.1;
+            add_graphic(
+                state,
+                "Title",
+                GraphicContent::Text(Text::new("Title", size, Rgba::WHITE)),
+            );
+        }
+
+        Action::SelectGraphic(graphic) => {
+            state.selection.graphic = graphic;
+            if graphic.is_some() {
+                // A graphic in hand and a clip in hand answer different
+                // questions, and the inspector can only show one.
+                state.selection.clips.clear();
+            }
+        }
+
+        Action::RemoveGraphic(graphic) => {
+            match state
+                .history
+                .execute(&mut state.project, Box::new(RemoveGraphic::new(graphic)))
+            {
+                Ok(()) => {
+                    state.mark_edited();
+                    if state.selection.graphic == Some(graphic) {
+                        state.selection.graphic = None;
+                    }
+                    state.set_status(Status::info("graphic deleted"));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::DuplicateGraphic(graphic) => {
+            let mut command = DuplicateGraphic::new(graphic);
+            match command.apply(&mut state.project) {
+                Ok(()) => {
+                    let copy = state.project.graphics.last().map(|g| g.id);
+                    if command.undo(&mut state.project).is_err() {
+                        return;
+                    }
+                    if state.history.execute(&mut state.project, Box::new(command)).is_ok() {
+                        state.mark_edited();
+                        state.selection.graphic = copy;
+                    }
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::RenameGraphic { graphic, name } => {
+            let command = Box::new(RenameGraphic::new(graphic, name));
+            match state.history.execute_coalesced(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetGraphicProperty { graphic, target, value, coalesce } => {
+            let command = Box::new(SetGraphicProperty::new(graphic, target, value));
+            let result = if coalesce {
+                state.history.execute_coalesced(&mut state.project, command)
+            } else {
+                state.history.execute(&mut state.project, command)
+            };
+            match result {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetGraphicText { graphic, text } => {
+            let command = Box::new(SetGraphicText::new(graphic, text));
+            // Typing is a drag by another name: one undo step for the sentence.
+            match state.history.execute_coalesced(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetGraphicOption { graphic, option } => {
+            let command = Box::new(SetGraphicOption::new(graphic, option));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::AddGraphicToTimeline { graphic, track, at } => {
+            let clip = match graphic_clip(&mut state.project, graphic, at.clamp_non_negative())
+            {
+                Ok(clip) => clip,
+                Err(e) => {
+                    state.set_status(Status::warning(e.to_string()));
+                    return;
+                }
+            };
+            let id = clip.id;
+            let command = Box::new(AddClip::new(sequence_id, track, clip));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.mark_edited();
+                    state.selection.select_only(id, track);
+                    state.selection.graphic = None;
+                    state.set_status(Status::info("graphic added"));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
         Action::ToggleMulticamPick(asset) => {
             match state.multicam_picks.iter().position(|a| *a == asset) {
                 Some(index) => {
@@ -1996,6 +2167,43 @@ fn apply_sync(
     }
 }
 
+/// Creates a graphic, selects it, and says so.
+///
+/// Shared by the shape and title actions because everything except the content
+/// is the same: the name is made unique against what is already there, so a
+/// second rectangle is "Rectangle 2" rather than a duplicate label in the list.
+fn add_graphic(state: &mut EditorState, base: &str, content: GraphicContent) {
+    let name = unique_graphic_name(&state.project, base);
+    let mut command = AddGraphic::new(name, content);
+    if let Err(e) = command.apply(&mut state.project) {
+        state.set_status(Status::warning(e.to_string()));
+        return;
+    }
+    let id = command.graphic_id();
+    if command.undo(&mut state.project).is_err() {
+        return;
+    }
+    match state.history.execute(&mut state.project, Box::new(command)) {
+        Ok(()) => {
+            state.mark_edited();
+            state.selection.graphic = id;
+            state.selection.clips.clear();
+            state.set_status(Status::info("graphic created — drag it onto a track"));
+        }
+        Err(e) => state.set_status(Status::warning(e.to_string())),
+    }
+}
+
+fn unique_graphic_name(project: &Project, base: &str) -> String {
+    if !project.graphics.iter().any(|g| g.name == base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|n| format!("{base} {n}"))
+        .find(|name| !project.graphics.iter().any(|g| &g.name == name))
+        .unwrap_or_else(|| base.to_string())
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""
@@ -2274,6 +2482,11 @@ fn sync_playhead(state: &mut EditorState, engine: &PlaybackEngine) {
 
 /// Drops selected clips that no longer exist, which an undo can cause.
 fn prune_selection(state: &mut EditorState) {
+    // A graphic can go out from under the selection on undo, and an inspector
+    // pointed at one that no longer exists would show nothing with no way back.
+    if state.selection.graphic.is_some_and(|id| state.project.graphic(id).is_none()) {
+        state.selection.graphic = None;
+    }
     let Some(seq) = state.project.active() else { return };
     state.selection.clips.retain(|c| seq.find_clip(*c).is_some());
 }

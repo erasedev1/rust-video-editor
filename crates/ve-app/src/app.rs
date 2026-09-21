@@ -295,6 +295,43 @@ impl VergeApp {
                     }
                 });
 
+                ui.menu_button("Graphic", |ui| {
+                    for kind in [
+                        ve_core::ShapeKind::Rectangle,
+                        ve_core::ShapeKind::Ellipse,
+                        ve_core::ShapeKind::Polygon { sides: 6 },
+                        ve_core::ShapeKind::Star { points: 5 },
+                    ] {
+                        if ui.button(format!("New {}", kind.label())).clicked() {
+                            actions_out.push(Action::AddShape(kind));
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("New Title").clicked() {
+                        actions_out.push(Action::AddTitle);
+                        ui.close();
+                    }
+                    ui.separator();
+                    let selected = self.state.selection.graphic;
+                    if ui
+                        .add_enabled(selected.is_some(), egui::Button::new("Duplicate"))
+                        .clicked()
+                    {
+                        if let Some(id) = selected {
+                            actions_out.push(Action::DuplicateGraphic(id));
+                        }
+                        ui.close();
+                    }
+                    if ui.add_enabled(selected.is_some(), egui::Button::new("Delete")).clicked()
+                    {
+                        if let Some(id) = selected {
+                            actions_out.push(Action::RemoveGraphic(id));
+                        }
+                        ui.close();
+                    }
+                });
+
                 ui.menu_button("Media", |ui| {
                     let running = self.state.proxies.is_running();
                     let ready = self

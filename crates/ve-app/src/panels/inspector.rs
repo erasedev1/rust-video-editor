@@ -1,11 +1,15 @@
 //! The inspector: properties of whatever is selected.
 
 use egui::{DragValue, RichText, Ui};
-use ve_command::{ClipProperty, PropertyValue, TrackLevel};
+use ve_command::{
+    graphic_property_ref, ClipProperty, GraphicOption, GraphicProperty, PropertyValue,
+    TrackLevel,
+};
 use ve_core::registry::{EffectCategory, EffectRegistry, ParamKind};
 use ve_core::{
     builtin_registry, BlendMode, Clip, ColorSpace, Effect, EffectId, Fade, FadeCurve, FadeEdge,
-    MotionBlur, ParamValue, Rgba, Vec2,
+    Graphic, GraphicContent, GraphicId, MotionBlur, ParamValue, Rgba, ShapeKind, TextAlign,
+    Vec2,
 };
 use ve_engine::AudioLevels;
 use ve_time::Ticks;
@@ -35,6 +39,15 @@ pub fn show(
     if state.selection.cue.is_some() {
         caption_section(ui, state, actions);
         return;
+    }
+
+    // A graphic picked in the media panel is not on the timeline yet, so there
+    // is no clip to show instead — the same rule, one step earlier.
+    if let Some(id) = state.selection.graphic {
+        if let Some(graphic) = state.project.graphic(id) {
+            graphic_section(ui, graphic, playhead, actions);
+            return;
+        }
     }
 
     let Some(clip_id) = state.selection.only() else {
@@ -227,6 +240,16 @@ pub fn show(
                 },
             );
         });
+
+        // A clip that draws a graphic edits that graphic from here: selecting
+        // the clip is selecting what it shows, and making the user go back to
+        // the media panel to change a word would be a worse answer than the
+        // one every editor gives.
+        if let ve_core::Source::Graphic(id) = clip.source {
+            if let Some(graphic) = state.project.graphic(id) {
+                graphic_controls(ui, graphic, local, actions);
+            }
+        }
 
         track_section(ui, state, levels, actions);
 
@@ -1048,5 +1071,317 @@ fn caption_track_section(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Act
             )
             .on_hover_text("the language tag names the file this track exports to");
         });
+    });
+}
+
+// ---- graphics -----------------------------------------------------------
+
+/// The panel for a graphic picked in the media panel, which is not on the
+/// timeline yet and so has no clip to describe.
+fn graphic_section(ui: &mut Ui, graphic: &Graphic, playhead: Ticks, actions: &mut Vec<Action>) {
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.label(RichText::new(&graphic.name).color(theme::TEXT));
+        ui.label(
+            RichText::new("not on the timeline — double-click it to add")
+                .small()
+                .color(theme::TEXT_FAINT),
+        );
+        ui.add_space(8.0);
+        // A graphic off the timeline has no clip time, so it is read at zero.
+        // Animating one is done from a clip that draws it, where "now" means
+        // something.
+        graphic_controls(ui, graphic, Ticks::ZERO, actions);
+        let _ = playhead;
+    });
+}
+
+/// The controls for whatever a graphic draws.
+///
+/// Shared between the two ways of reaching a graphic — picked in the media
+/// panel, or selected as the clip that draws it — because they are the same
+/// object and editing it is the same command either way. `at` is the instant
+/// animated values are read at, which is clip-local time when there is a clip
+/// and zero when there is not.
+fn graphic_controls(ui: &mut Ui, graphic: &Graphic, at: Ticks, actions: &mut Vec<Action>) {
+    let id = graphic.id;
+    match &graphic.content {
+        GraphicContent::Shape(shape) => {
+            section(ui, "Shape", |ui| {
+                shape_kind_row(ui, id, shape.kind, actions);
+                graphic_point_row(ui, graphic, GraphicProperty::Size, "Size", at, actions);
+                graphic_scalar_row(
+                    ui,
+                    graphic,
+                    GraphicProperty::CornerRadius,
+                    "Corner",
+                    0.0..=2000.0,
+                    0.5,
+                    " px",
+                    at,
+                    actions,
+                );
+                // Only a star has notches to set how deep they go.
+                if matches!(shape.kind, ShapeKind::Star { .. }) {
+                    graphic_scalar_row(
+                        ui,
+                        graphic,
+                        GraphicProperty::InnerRadius,
+                        "Inner",
+                        0.0..=1.0,
+                        0.005,
+                        "",
+                        at,
+                        actions,
+                    );
+                }
+            });
+        }
+        GraphicContent::Text(text) => {
+            section(ui, "Text", |ui| {
+                let mut body = text.text.clone();
+                if ui.add(egui::TextEdit::multiline(&mut body).desired_rows(2)).changed() {
+                    actions.push(Action::SetGraphicText { graphic: id, text: body });
+                }
+                font_row(ui, id, &text.font.family, actions);
+                align_row(ui, id, text.align, actions);
+                wrap_row(ui, id, text.wrap_width, actions);
+            });
+            section(ui, "Type", |ui| {
+                graphic_scalar_row(
+                    ui,
+                    graphic,
+                    GraphicProperty::FontSize,
+                    "Size",
+                    1.0..=2000.0,
+                    0.5,
+                    " px",
+                    at,
+                    actions,
+                );
+                graphic_scalar_row(
+                    ui,
+                    graphic,
+                    GraphicProperty::Tracking,
+                    "Tracking",
+                    -200.0..=200.0,
+                    0.25,
+                    "",
+                    at,
+                    actions,
+                );
+                graphic_scalar_row(
+                    ui,
+                    graphic,
+                    GraphicProperty::LineHeight,
+                    "Line",
+                    0.1..=5.0,
+                    0.01,
+                    "×",
+                    at,
+                    actions,
+                );
+            });
+        }
+    }
+
+    // Fill and stroke mean the same thing on both, and are drawn by the same
+    // code, so they get one section whichever kind this is.
+    section(ui, "Paint", |ui| {
+        graphic_color_row(ui, graphic, GraphicProperty::Fill, "Fill", at, actions);
+        graphic_color_row(ui, graphic, GraphicProperty::Stroke, "Stroke", at, actions);
+        graphic_scalar_row(
+            ui,
+            graphic,
+            GraphicProperty::StrokeWidth,
+            "Width",
+            0.0..=200.0,
+            0.1,
+            " px",
+            at,
+            actions,
+        );
+    });
+}
+
+/// Reads a graphic property as it stands at `at`, or `None` when this graphic
+/// does not have it.
+fn graphic_value(
+    graphic: &Graphic,
+    target: GraphicProperty,
+    at: Ticks,
+) -> Option<(PropertyValue, bool)> {
+    let p = graphic_property_ref(graphic, target)?;
+    Some((p.evaluate(at), p.is_animated()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn graphic_scalar_row(
+    ui: &mut Ui,
+    graphic: &Graphic,
+    target: GraphicProperty,
+    label: &str,
+    range: std::ops::RangeInclusive<f64>,
+    speed: f64,
+    suffix: &str,
+    at: Ticks,
+    actions: &mut Vec<Action>,
+) {
+    let Some((PropertyValue::Scalar(value), animated)) = graphic_value(graphic, target, at)
+    else {
+        return;
+    };
+    let id = graphic.id;
+    scalar_row(ui, label, value, animated, range, speed, suffix, |v| {
+        push_graphic_property(actions, id, target, PropertyValue::Scalar(v));
+    });
+}
+
+fn graphic_point_row(
+    ui: &mut Ui,
+    graphic: &Graphic,
+    target: GraphicProperty,
+    label: &str,
+    at: Ticks,
+    actions: &mut Vec<Action>,
+) {
+    let Some((PropertyValue::Point(value), animated)) = graphic_value(graphic, target, at)
+    else {
+        return;
+    };
+    let id = graphic.id;
+    point_row(ui, label, value, animated, |v| {
+        push_graphic_property(actions, id, target, PropertyValue::Point(v));
+    });
+}
+
+fn graphic_color_row(
+    ui: &mut Ui,
+    graphic: &Graphic,
+    target: GraphicProperty,
+    label: &str,
+    at: Ticks,
+    actions: &mut Vec<Action>,
+) {
+    let Some((PropertyValue::Color(value), animated)) = graphic_value(graphic, target, at)
+    else {
+        return;
+    };
+    let id = graphic.id;
+    color_row(ui, label, value, animated, |v| {
+        push_graphic_property(actions, id, target, PropertyValue::Color(v));
+    });
+}
+
+/// Every property edit from these rows coalesces: the rows fire on each move of
+/// a drag, and a drag is one thing the user did.
+fn push_graphic_property(
+    actions: &mut Vec<Action>,
+    graphic: GraphicId,
+    target: GraphicProperty,
+    value: PropertyValue,
+) {
+    actions.push(Action::SetGraphicProperty { graphic, target, value, coalesce: true });
+}
+
+fn shape_kind_row(ui: &mut Ui, id: GraphicId, kind: ShapeKind, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        property_label(ui, "Kind", false);
+        egui::ComboBox::from_id_salt(("graphic-kind", id.raw()))
+            .selected_text(kind.label())
+            .show_ui(ui, |ui| {
+                for option in [
+                    ShapeKind::Rectangle,
+                    ShapeKind::Ellipse,
+                    ShapeKind::Polygon { sides: 6 },
+                    ShapeKind::Star { points: 5 },
+                ] {
+                    if ui.selectable_label(kind == option, option.label()).clicked() {
+                        actions.push(Action::SetGraphicOption {
+                            graphic: id,
+                            option: GraphicOption::Kind(option),
+                        });
+                    }
+                }
+            });
+    });
+
+    // How many sides or points, for the kinds that have a count. It is not
+    // animatable — there is no half a side — so it is a choice rather than a
+    // property, and changing it restates the kind.
+    if let Some(count) = kind.count() {
+        ui.horizontal(|ui| {
+            property_label(ui, "Points", false);
+            let mut n = count as f64;
+            if ui.add(DragValue::new(&mut n).speed(0.1).range(3.0..=64.0)).changed() {
+                let n = n.round().clamp(3.0, 64.0) as u32;
+                let option = match kind {
+                    ShapeKind::Polygon { .. } => Some(ShapeKind::Polygon { sides: n }),
+                    ShapeKind::Star { .. } => Some(ShapeKind::Star { points: n }),
+                    _ => None,
+                };
+                if let Some(option) = option {
+                    actions.push(Action::SetGraphicOption {
+                        graphic: id,
+                        option: GraphicOption::Kind(option),
+                    });
+                }
+            }
+        });
+    }
+}
+
+fn font_row(ui: &mut Ui, id: GraphicId, family: &str, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        property_label(ui, "Font", false);
+        let mut name = family.to_string();
+        if ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0)).changed() {
+            actions.push(Action::SetGraphicOption {
+                graphic: id,
+                option: GraphicOption::Font(ve_core::FontSpec::new(name)),
+            });
+        }
+    })
+    .response
+    .on_hover_text("A family the system has; the fallback is used if it does not");
+}
+
+fn align_row(ui: &mut Ui, id: GraphicId, align: TextAlign, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        property_label(ui, "Align", false);
+        for option in [TextAlign::Left, TextAlign::Center, TextAlign::Right] {
+            if ui.selectable_label(align == option, option.label()).clicked() {
+                actions.push(Action::SetGraphicOption {
+                    graphic: id,
+                    option: GraphicOption::Align(option),
+                });
+            }
+        }
+    });
+}
+
+fn wrap_row(ui: &mut Ui, id: GraphicId, wrap: Option<f64>, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        property_label(ui, "Wrap", false);
+        let mut on = wrap.is_some();
+        if ui.checkbox(&mut on, "").clicked() {
+            actions.push(Action::SetGraphicOption {
+                graphic: id,
+                // Off means break only where the text says to, which is what
+                // `None` means rather than a width of zero.
+                option: GraphicOption::WrapWidth(on.then_some(640.0)),
+            });
+        }
+        if let Some(width) = wrap {
+            let mut w = width;
+            if ui
+                .add(DragValue::new(&mut w).speed(1.0).range(1.0..=10000.0).suffix(" px"))
+                .changed()
+            {
+                actions.push(Action::SetGraphicOption {
+                    graphic: id,
+                    option: GraphicOption::WrapWidth(Some(w)),
+                });
+            }
+        }
     });
 }
