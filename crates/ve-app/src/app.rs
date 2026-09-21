@@ -70,6 +70,7 @@ impl VergeApp {
         let scratch = std::env::temp_dir().join("verge-autosave");
         let mut state = EditorState::new(Project::with_default_sequence("Untitled"), scratch);
         state.export.metrics = metrics.clone();
+        state.proxies.metrics = metrics.clone();
 
         // Share the interface's device rather than creating a second one, so a
         // decoded frame is uploaded once and both the compositor and the UI
