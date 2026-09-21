@@ -41,7 +41,9 @@ pub mod texture;
 pub mod transform;
 
 pub use cache::{CompositeCache, CompositeCacheStats, CompositeKey};
-pub use effects::{chain_passes, passes_for, EffectPass, Program};
+pub use effects::{
+    chain_passes, passes_for, three_way_response, white_balance_gains, EffectPass, Program,
+};
 pub use gpu::GpuContext;
 pub use renderer::{Layer, Renderer};
 pub use target::RenderTarget;

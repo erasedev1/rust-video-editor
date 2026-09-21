@@ -268,3 +268,137 @@ fn fs_luma(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     return premultiplied(vec4<f32>(c.rgb, c.a * keep));
 }
+
+// --- Three-way colour --------------------------------------------------------
+//
+// p0 = (slope rgb, 0) — what a unit of input is worth, i.e. gain − lift
+// p1 = (lift rgb, 0)  — what black becomes
+// p2 = (exponent rgb, 0)
+//
+// Lift, gamma and gain, the grade every colourist builds first:
+//
+//     out = (in · (gain − lift) + lift) ^ (1/gamma)
+//
+// in = 0 comes out at `lift` and in = 1 at `gain`, so the two ends of the range
+// are dialled directly and the exponent bends what lies between them. Each is
+// per channel, which is what makes a *colour* wheel rather than three sliders:
+// a warm shadow is a lift whose red is higher than its blue.
+//
+// The three vectors are built on the CPU from the six controls — see
+// `three_way_pass`. Doing it there rather than here keeps a `pow` of a constant
+// out of every pixel, and puts the arithmetic where a test can read it.
+@fragment
+fn fs_grade(in: VertexOutput) -> @location(0) vec4<f32> {
+    let c = straight(tap(in.uv));
+    // Negative before the exponent is not "very dark", it is NaN. A lift that
+    // has pushed a channel below zero is clamped here rather than being left to
+    // come out of `pow` as a hole in the picture.
+    let graded = pow(max(c.rgb * fx.p0.xyz + fx.p1.xyz, vec3<f32>(0.0)), fx.p2.xyz);
+    return premultiplied(vec4<f32>(graded, c.a));
+}
+
+// --- HSL secondary -----------------------------------------------------------
+//
+// p0 = (hue centre in turns, half width in turns, softness in turns, saturation floor)
+// p1 = (hue shift in turns, saturation scale, luma scale, show matte)
+//
+// A secondary is two halves: deciding *what* is selected, and grading it. The
+// first half is the one that is hard to see, which is why `show matte` exists —
+// dialling a qualifier by looking at the graded picture means guessing at the
+// edges of the selection from the other side of a grade.
+//
+// Hue is carried in turns rather than degrees so the wrap is `fract`: red sits
+// at both 0 and 1, and a band centred on it has to reach across that seam
+// rather than stopping dead at it.
+fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
+    let high = max(c.r, max(c.g, c.b));
+    let low = min(c.r, min(c.g, c.b));
+    let chroma = high - low;
+    let lightness = (high + low) * 0.5;
+
+    var hue = 0.0;
+    if (chroma > 1e-6) {
+        if (high == c.r) {
+            hue = (c.g - c.b) / chroma;
+            // The one branch that wraps: red's sector runs from −1 to +1 and
+            // the negative half belongs at the top of the circle.
+            hue = hue - 6.0 * floor(hue / 6.0);
+        } else if (high == c.g) {
+            hue = (c.b - c.r) / chroma + 2.0;
+        } else {
+            hue = (c.r - c.g) / chroma + 4.0;
+        }
+        hue = hue / 6.0;
+    }
+
+    var saturation = 0.0;
+    let span = 1.0 - abs(2.0 * lightness - 1.0);
+    if (span > 1e-6) {
+        saturation = chroma / span;
+    }
+    return vec3<f32>(hue, saturation, lightness);
+}
+
+fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {
+    let hue = fract(hsl.x);
+    let saturation = clamp(hsl.y, 0.0, 1.0);
+    let lightness = clamp(hsl.z, 0.0, 1.0);
+    let chroma = (1.0 - abs(2.0 * lightness - 1.0)) * saturation;
+    let sector = hue * 6.0;
+    let second = chroma * (1.0 - abs(fract(sector * 0.5) * 2.0 - 1.0));
+    let base = lightness - chroma * 0.5;
+
+    var rgb = vec3<f32>(0.0);
+    if (sector < 1.0) {
+        rgb = vec3<f32>(chroma, second, 0.0);
+    } else if (sector < 2.0) {
+        rgb = vec3<f32>(second, chroma, 0.0);
+    } else if (sector < 3.0) {
+        rgb = vec3<f32>(0.0, chroma, second);
+    } else if (sector < 4.0) {
+        rgb = vec3<f32>(0.0, second, chroma);
+    } else if (sector < 5.0) {
+        rgb = vec3<f32>(second, 0.0, chroma);
+    } else {
+        rgb = vec3<f32>(chroma, 0.0, second);
+    }
+    return rgb + base;
+}
+
+@fragment
+fn fs_qualify(in: VertexOutput) -> @location(0) vec4<f32> {
+    let c = straight(tap(in.uv));
+    let hsl = rgb_to_hsl(clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+
+    // Distance round the circle, never more than half a turn: a band centred on
+    // red must reach 0.98 as readily as 0.02.
+    let raw = abs(hsl.x - fx.p0.x);
+    let distance = min(raw, 1.0 - raw);
+
+    let half_width = fx.p0.y;
+    let softness = fx.p0.z;
+    // Inside the band the weight is 1; past it the weight ramps to 0 over the
+    // softness. A softness of zero gives a hard edge, which is what `smoothstep`
+    // with equal edges would make undefined — so the pair is widened on the CPU.
+    var weight = 1.0 - smoothstep(half_width, half_width + softness, distance);
+
+    // Saturation gates the selection. Grey has no meaningful hue, so without
+    // this a band centred anywhere would select every neutral in the frame.
+    weight *= smoothstep(fx.p0.w, fx.p0.w + 0.05, hsl.y);
+
+    if (fx.p1.w > 0.5) {
+        // The matte, in the picture's own alpha: what is selected is white and
+        // what is not is black, so the edges of the key are the thing on screen
+        // rather than something to be inferred from a grade.
+        return premultiplied(vec4<f32>(vec3<f32>(weight), c.a));
+    }
+
+    let shifted = hsl_to_rgb(vec3<f32>(
+        hsl.x + fx.p1.x,
+        hsl.y * fx.p1.y,
+        hsl.z * fx.p1.z,
+    ));
+    // Mixed by the weight rather than written through, so the edge of the
+    // selection is a ramp and not a cut-out.
+    return premultiplied(vec4<f32>(mix(c.rgb, shifted, weight), c.a));
+}

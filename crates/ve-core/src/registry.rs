@@ -418,11 +418,23 @@ pub fn builtin_registry() -> &'static EffectRegistry {
 pub mod kinds {
     pub const GAUSSIAN_BLUR: &str = "verge.blur.gaussian";
     pub const COLOR_ADJUST: &str = "verge.color.adjust";
+    pub const THREE_WAY: &str = "verge.color.wheels";
+    pub const WHITE_BALANCE: &str = "verge.color.balance";
+    pub const HSL_SECONDARY: &str = "verge.color.hsl";
     pub const SHARPEN: &str = "verge.stylize.sharpen";
     pub const TRANSFORM: &str = "verge.distort.transform";
     pub const SHAPE_MASK: &str = "verge.matte.shape";
     pub const LUMA_KEY: &str = "verge.matte.luma";
 }
+
+/// The centre of a colour wheel: the value that means "change nothing".
+///
+/// A grading wheel is an *offset*, so its neutral is the middle of the range
+/// rather than either end. Mid grey is that middle, which is why the three
+/// bands of the three-way corrector default to it and not to white: white would
+/// mean "push everything towards white", which is what a tint means and not
+/// what a wheel does.
+const NEUTRAL_WHEEL: Rgba = Rgba::new(0.5, 0.5, 0.5, 1.0);
 
 fn builtin_descriptors() -> Vec<EffectDescriptor> {
     vec![
@@ -479,6 +491,120 @@ fn builtin_descriptors() -> Vec<EffectDescriptor> {
             "Tint",
             ParamKind::Color { default: Rgba::WHITE },
             "Multiplies every channel. White leaves the picture alone",
+        )),
+        EffectDescriptor::new(
+            kinds::THREE_WAY,
+            "Three-Way Colour",
+            EffectCategory::Color,
+            "Lift, gamma and gain: a colour and a level for the shadows, the midtones and the highlights",
+        )
+        .with_param(ParamDescriptor::new(
+            "shadows",
+            "Shadows",
+            ParamKind::Color { default: NEUTRAL_WHEEL },
+            "Colour the darkest tones are pulled towards. Mid grey leaves them alone",
+        ))
+        .with_param(ParamDescriptor::new(
+            "shadow_level",
+            "Shadow Level",
+            ParamKind::scalar(0.0, -1.0, 1.0),
+            "Lifts the blacks off zero, or crushes them into it",
+        ))
+        .with_param(ParamDescriptor::new(
+            "midtones",
+            "Midtones",
+            ParamKind::Color { default: NEUTRAL_WHEEL },
+            "Colour the middle of the range is pulled towards, leaving black and white where they are",
+        ))
+        .with_param(ParamDescriptor::new(
+            "midtone_level",
+            "Midtone Level",
+            ParamKind::scalar(0.0, -1.0, 1.0),
+            "Bends the midtones brighter or darker without moving black or white",
+        ))
+        .with_param(ParamDescriptor::new(
+            "highlights",
+            "Highlights",
+            ParamKind::Color { default: NEUTRAL_WHEEL },
+            "Colour the brightest tones are pulled towards. Mid grey leaves them alone",
+        ))
+        .with_param(ParamDescriptor::new(
+            "highlight_level",
+            "Highlight Level",
+            ParamKind::scalar(0.0, -1.0, 1.0),
+            "Raises or lowers the whites. Each whole step is a stop",
+        )),
+        EffectDescriptor::new(
+            kinds::WHITE_BALANCE,
+            "White Balance",
+            EffectCategory::Color,
+            "Warms or cools the picture along the two axes a white card goes wrong on",
+        )
+        .with_param(ParamDescriptor::new(
+            "temperature",
+            "Temperature",
+            ParamKind::scalar(0.0, -1.0, 1.0),
+            "Positive warms towards orange, negative cools towards blue",
+        ))
+        .with_param(ParamDescriptor::new(
+            "tint",
+            "Tint",
+            ParamKind::scalar(0.0, -1.0, 1.0),
+            "Positive pushes towards magenta, negative towards green",
+        )),
+        EffectDescriptor::new(
+            kinds::HSL_SECONDARY,
+            "HSL Secondary",
+            EffectCategory::Color,
+            "Selects one range of hue and saturation and grades only that",
+        )
+        .with_param(ParamDescriptor::new(
+            "hue",
+            "Hue",
+            ParamKind::scalar(0.0, 0.0, 360.0),
+            "Centre of the band being selected, in degrees round the colour wheel",
+        ))
+        .with_param(ParamDescriptor::new(
+            "hue_width",
+            "Width",
+            ParamKind::scalar(30.0, 0.0, 180.0),
+            "How far either side of the centre still counts as selected, in degrees",
+        ))
+        .with_param(ParamDescriptor::new(
+            "softness",
+            "Softness",
+            ParamKind::scalar(15.0, 0.0, 180.0),
+            "How far past the band the selection fades out, in degrees",
+        ))
+        .with_param(ParamDescriptor::new(
+            "saturation_floor",
+            "Saturation Floor",
+            ParamKind::scalar(0.1, 0.0, 1.0),
+            "Below this saturation nothing is selected, which is what keeps greys out of a key",
+        ))
+        .with_param(ParamDescriptor::new(
+            "hue_shift",
+            "Hue Shift",
+            ParamKind::scalar(0.0, -180.0, 180.0),
+            "Degrees the selected colours are turned by",
+        ))
+        .with_param(ParamDescriptor::new(
+            "saturation_scale",
+            "Saturation",
+            ParamKind::scalar(1.0, 0.0, 4.0),
+            "Multiplies the saturation of what is selected. 0 drains it to grey",
+        ))
+        .with_param(ParamDescriptor::new(
+            "luma_scale",
+            "Brightness",
+            ParamKind::scalar(1.0, 0.0, 4.0),
+            "Multiplies the brightness of what is selected",
+        ))
+        .with_param(ParamDescriptor::new(
+            "show_matte",
+            "Show Matte",
+            ParamKind::Bool { default: false },
+            "Shows the selection as a black-and-white matte, which is how a key is dialled in",
         )),
         EffectDescriptor::new(
             kinds::SHARPEN,
@@ -804,6 +930,48 @@ mod tests {
         assert_eq!(state.scalar("intensity", 0.0), 3.0);
         // A key nobody declared reads as the fallback rather than panicking.
         assert_eq!(state.scalar("radius", 7.0), 7.0);
+    }
+
+    #[test]
+    fn every_grading_effect_starts_neutral() {
+        // A grade that changed the picture the moment it was added would make
+        // "what did I do?" unanswerable. Each wheel starts at the centre of its
+        // range and each level at zero, so an added effect is visible in the
+        // chain and invisible in the frame.
+        let registry = EffectRegistry::builtin();
+        let wheels = registry.instantiate(kinds::THREE_WAY, id(1)).unwrap();
+        for band in ["shadows", "midtones", "highlights"] {
+            let ParamValue::Color(colour) = wheels.param(band).unwrap() else {
+                panic!("{band} is not a colour");
+            };
+            assert_eq!(colour.evaluate(Ticks::ZERO), NEUTRAL_WHEEL);
+        }
+        for level in ["shadow_level", "midtone_level", "highlight_level"] {
+            assert_eq!(
+                wheels.param(level).unwrap().as_scalar_at(Ticks::ZERO),
+                Some(0.0),
+                "{level} does not start at zero"
+            );
+        }
+
+        let balance = registry.instantiate(kinds::WHITE_BALANCE, id(2)).unwrap();
+        assert_eq!(balance.param("temperature").unwrap().as_scalar_at(Ticks::ZERO), Some(0.0));
+        assert_eq!(balance.param("tint").unwrap().as_scalar_at(Ticks::ZERO), Some(0.0));
+
+        let hsl = registry.instantiate(kinds::HSL_SECONDARY, id(3)).unwrap();
+        assert_eq!(hsl.param("hue_shift").unwrap().as_scalar_at(Ticks::ZERO), Some(0.0));
+        assert_eq!(hsl.param("saturation_scale").unwrap().as_scalar_at(Ticks::ZERO), Some(1.0));
+        assert_eq!(hsl.param("luma_scale").unwrap().as_scalar_at(Ticks::ZERO), Some(1.0));
+    }
+
+    #[test]
+    fn the_grading_effects_are_offered_under_colour() {
+        let registry = EffectRegistry::builtin();
+        let colour: Vec<&str> =
+            registry.in_category(EffectCategory::Color).map(|d| d.kind.as_str()).collect();
+        for kind in [kinds::THREE_WAY, kinds::WHITE_BALANCE, kinds::HSL_SECONDARY] {
+            assert!(colour.contains(&kind), "{kind} is not in the colour menu");
+        }
     }
 
     #[test]

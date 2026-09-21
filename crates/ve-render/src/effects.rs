@@ -58,16 +58,20 @@ pub enum Program {
     Transform,
     Mask,
     LumaKey,
+    Grade,
+    Qualify,
 }
 
 impl Program {
-    const ALL: [Program; 6] = [
+    const ALL: [Program; 8] = [
         Program::Blur,
         Program::Color,
         Program::Sharpen,
         Program::Transform,
         Program::Mask,
         Program::LumaKey,
+        Program::Grade,
+        Program::Qualify,
     ];
 
     fn entry_point(self) -> &'static str {
@@ -78,6 +82,8 @@ impl Program {
             Program::Transform => "fs_transform",
             Program::Mask => "fs_mask",
             Program::LumaKey => "fs_luma",
+            Program::Grade => "fs_grade",
+            Program::Qualify => "fs_qualify",
         }
     }
 
@@ -156,6 +162,9 @@ pub fn passes_for(effect: &EffectState, size: Size) -> Vec<EffectPass> {
     match effect.kind.as_str() {
         kinds::GAUSSIAN_BLUR => blur_passes(effect, size),
         kinds::COLOR_ADJUST => vec![color_pass(effect, size)],
+        kinds::THREE_WAY => three_way_pass(effect, size).into_iter().collect(),
+        kinds::WHITE_BALANCE => white_balance_pass(effect, size).into_iter().collect(),
+        kinds::HSL_SECONDARY => hsl_pass(effect, size).into_iter().collect(),
         kinds::SHARPEN => sharpen_pass(effect, size).into_iter().collect(),
         kinds::TRANSFORM => transform_pass(effect, size).into_iter().collect(),
         kinds::SHAPE_MASK => mask_pass(effect, size).into_iter().collect(),
@@ -223,6 +232,186 @@ fn color_pass(effect: &EffectState, size: Size) -> EffectPass {
     params[6] = tint.b as f32;
     params[7] = tint.a as f32;
     EffectPass { program: Program::Color, uniform: EffectUniform::new(params, size) }
+}
+
+/// Rec. 709 luma, the same weights `effects.wgsl` uses.
+///
+/// Duplicated rather than shared because one copy is WGSL and the other is
+/// Rust; a test asserts the CPU copy still does what the shader's does.
+const LUMA: [f64; 3] = [0.2126, 0.7152, 0.0722];
+
+/// How far a fully deflected shadow wheel moves black, in the 0..1 range.
+///
+/// A quarter is about where a lift stops being a grade and starts being a
+/// mistake, and it is what the established correctors offer.
+const LIFT_RANGE: f64 = 0.25;
+
+/// Stops a fully deflected highlight or midtone control is worth.
+///
+/// Half a stop per unit, so the two ends of a slider are a factor of two apart
+/// and dialling one to +1 and a second to −1 cancels exactly.
+const BAND_STOPS: f64 = 0.5;
+
+/// One band's colour wheel and level, combined into a per-channel amount in
+/// roughly −2..2.
+///
+/// The wheel is an offset from mid grey — doubled, so a channel at 1 is +1 —
+/// and the level is the same amount applied to all three. They add rather than
+/// multiply because they are the same quantity said two ways: "warmer" and
+/// "brighter" are both a push, and a wheel dragged to the edge with the level
+/// at zero should reach as far as the level alone does.
+fn band(colour: Rgba, level: f64) -> [f64; 3] {
+    [
+        (colour.r - 0.5) * 2.0 + level,
+        (colour.g - 0.5) * 2.0 + level,
+        (colour.b - 0.5) * 2.0 + level,
+    ]
+}
+
+/// Lift, gamma and gain, resolved to the three vectors `fs_grade` applies.
+///
+/// Returns `(slope, lift, exponent)` for
+/// `out = (in · slope + lift) ^ exponent`, where `slope = gain − lift` — so an
+/// input of 0 comes out at `lift` and an input of 1 at `gain`. Every control at
+/// neutral gives `(1, 0, 1)`, which is the identity, and that is asserted
+/// rather than assumed.
+///
+/// Exported for the tests and for the grading panel, which draws the curve this
+/// describes rather than drawing a second opinion about it.
+pub fn three_way_response(
+    shadows: Rgba,
+    shadow_level: f64,
+    midtones: Rgba,
+    midtone_level: f64,
+    highlights: Rgba,
+    highlight_level: f64,
+) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let low = band(shadows, shadow_level);
+    let mid = band(midtones, midtone_level);
+    let high = band(highlights, highlight_level);
+
+    let mut slope = [0.0; 3];
+    let mut lift = [0.0; 3];
+    let mut exponent = [0.0; 3];
+    for c in 0..3 {
+        lift[c] = low[c] * LIFT_RANGE;
+        let gain = (high[c] * BAND_STOPS).exp2();
+        slope[c] = gain - lift[c];
+        // Negated, because what the shader raises the picture to is 1/gamma:
+        // a midtone control pushed positive should *brighten*, which means an
+        // exponent below one.
+        exponent[c] = (-mid[c] * BAND_STOPS).exp2();
+    }
+    (slope, lift, exponent)
+}
+
+fn three_way_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
+    let neutral = Rgba::new(0.5, 0.5, 0.5, 1.0);
+    let (slope, lift, exponent) = three_way_response(
+        effect.color("shadows", neutral),
+        effect.scalar("shadow_level", 0.0),
+        effect.color("midtones", neutral),
+        effect.scalar("midtone_level", 0.0),
+        effect.color("highlights", neutral),
+        effect.scalar("highlight_level", 0.0),
+    );
+
+    // A grade dialled back to neutral costs nothing. Tested on the *response*
+    // rather than on the controls so that a wheel keyframed back to mid grey is
+    // as free as one that was never touched — and so that a control added later
+    // cannot be forgotten here.
+    let identity = (0..3).all(|c| {
+        (slope[c] - 1.0).abs() < 1e-6
+            && lift[c].abs() < 1e-6
+            && (exponent[c] - 1.0).abs() < 1e-6
+    });
+    if identity {
+        return None;
+    }
+
+    let mut params = [0.0f32; 16];
+    for c in 0..3 {
+        params[c] = slope[c] as f32;
+        params[4 + c] = lift[c] as f32;
+        params[8 + c] = exponent[c] as f32;
+    }
+    Some(EffectPass { program: Program::Grade, uniform: EffectUniform::new(params, size) })
+}
+
+/// The per-channel gains a temperature and a tint come to.
+///
+/// Temperature trades red against blue and tint moves green against both, each
+/// half a stop per unit — which is the von Kries approximation every editor's
+/// temperature slider is, short of a full chromatic adaptation through a
+/// colour space this pipeline does not carry.
+///
+/// The three are then divided by their own Rec. 709 luma, so white comes out of
+/// a white balance at exactly the brightness it went in at. Without that, every
+/// cooling is also a darkening, and a colourist correcting one would spend the
+/// rest of the grade undoing the other.
+pub fn white_balance_gains(temperature: f64, tint: f64) -> [f64; 3] {
+    let r = (temperature * BAND_STOPS).exp2();
+    let b = (-temperature * BAND_STOPS).exp2();
+    let g = (-tint * BAND_STOPS).exp2();
+    let luma = LUMA[0] * r + LUMA[1] * g + LUMA[2] * b;
+    [r / luma, g / luma, b / luma]
+}
+
+/// White balance, drawn by the *colour adjust* program.
+///
+/// Two registry kinds, one shader: a white balance is a per-channel multiply,
+/// which `fs_color` already does, so the kind that a project file names and the
+/// program that draws it are deliberately not the same list. What this function
+/// adds is the arithmetic turning two intuitive controls into three gains —
+/// which is exactly the part a shader should not be doing per pixel.
+fn white_balance_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
+    let temperature = effect.scalar("temperature", 0.0);
+    let tint = effect.scalar("tint", 0.0);
+    if temperature == 0.0 && tint == 0.0 {
+        return None;
+    }
+    let gains = white_balance_gains(temperature, tint);
+
+    let mut params = [0.0f32; 16];
+    // Everything `fs_color` does other than the tint, dialled to neutral.
+    params[0] = 1.0;
+    params[1] = 1.0;
+    params[2] = 1.0;
+    params[3] = 1.0;
+    params[4] = gains[0] as f32;
+    params[5] = gains[1] as f32;
+    params[6] = gains[2] as f32;
+    params[7] = 1.0;
+    Some(EffectPass { program: Program::Color, uniform: EffectUniform::new(params, size) })
+}
+
+fn hsl_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
+    let hue_shift = effect.scalar("hue_shift", 0.0);
+    let saturation = effect.scalar("saturation_scale", 1.0);
+    let luma = effect.scalar("luma_scale", 1.0);
+    let matte = effect.flag("show_matte", false);
+
+    // A secondary whose grade is neutral changes nothing — unless the matte is
+    // being looked at, which is the whole of what the pass does while a
+    // qualifier is being dialled in.
+    if !matte && hue_shift == 0.0 && saturation == 1.0 && luma == 1.0 {
+        return None;
+    }
+
+    let mut params = [0.0f32; 16];
+    // Turns, not degrees: hue wraps, and `fract` wraps where a modulo of 360
+    // would need a sign convention the shader would have to get right twice.
+    params[0] = (effect.scalar("hue", 0.0) / 360.0).rem_euclid(1.0) as f32;
+    params[1] = (effect.scalar("hue_width", 30.0).max(0.0) / 360.0) as f32;
+    // Never zero: `smoothstep` with equal edges is undefined, and that is
+    // exactly the setting someone reaching for the hardest possible key picks.
+    params[2] = (effect.scalar("softness", 15.0).max(1e-3) / 360.0) as f32;
+    params[3] = effect.scalar("saturation_floor", 0.1).clamp(0.0, 1.0) as f32;
+    params[4] = (hue_shift / 360.0) as f32;
+    params[5] = saturation.max(0.0) as f32;
+    params[6] = luma.max(0.0) as f32;
+    params[7] = if matte { 1.0 } else { 0.0 };
+    Some(EffectPass { program: Program::Qualify, uniform: EffectUniform::new(params, size) })
 }
 
 fn sharpen_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
@@ -517,6 +706,15 @@ mod tests {
         effect.evaluate(Ticks::ZERO, builtin_registry().get(kind))
     }
 
+    fn with_params(kind: &str, overrides: &[(&str, ParamValue)]) -> EffectState {
+        let registry = builtin_registry();
+        let mut effect: Effect = registry.instantiate(kind, EffectId::from_raw(1)).unwrap();
+        for (key, value) in overrides {
+            *effect.param_mut(key).unwrap() = value.clone();
+        }
+        effect.evaluate(Ticks::ZERO, registry.get(kind))
+    }
+
     fn with(kind: &str, key: &str, value: ParamValue) -> EffectState {
         let mut effect: Effect =
             builtin_registry().instantiate(kind, EffectId::from_raw(1)).unwrap();
@@ -559,6 +757,95 @@ mod tests {
         assert!(passes_for(&no_mask, HD).is_empty());
         // A transform at its defaults is the identity, whatever its anchor is.
         assert!(passes_for(&state(kinds::TRANSFORM), HD).is_empty());
+    }
+
+    #[test]
+    fn a_grade_at_its_defaults_is_the_identity_and_costs_nothing() {
+        // Neutral in the controls has to mean neutral in the arithmetic, or an
+        // added grade would move the picture before anyone touched it.
+        let neutral = Rgba::new(0.5, 0.5, 0.5, 1.0);
+        let (slope, lift, exponent) =
+            three_way_response(neutral, 0.0, neutral, 0.0, neutral, 0.0);
+        assert_eq!(slope, [1.0; 3]);
+        assert_eq!(lift, [0.0; 3]);
+        assert_eq!(exponent, [1.0; 3]);
+        assert!(passes_for(&state(kinds::THREE_WAY), HD).is_empty());
+        assert!(passes_for(&state(kinds::WHITE_BALANCE), HD).is_empty());
+        assert!(passes_for(&state(kinds::HSL_SECONDARY), HD).is_empty());
+    }
+
+    #[test]
+    fn a_grade_keyframed_back_to_neutral_stops_costing_a_pass() {
+        // The no-op test is on the resolved response rather than on whether the
+        // user touched a control, so a wheel animated back to the centre is as
+        // free as one that was never moved.
+        let lifted = with(kinds::THREE_WAY, "shadow_level", ParamValue::scalar(0.5));
+        assert_eq!(passes_for(&lifted, HD).len(), 1);
+        let back = with(kinds::THREE_WAY, "shadow_level", ParamValue::scalar(0.0));
+        assert!(passes_for(&back, HD).is_empty());
+    }
+
+    #[test]
+    fn opposite_levels_are_reciprocal() {
+        // Half a stop up and half a stop down have to cancel exactly, or every
+        // undo-by-hand would leave the picture a little flatter than it was.
+        let neutral = Rgba::new(0.5, 0.5, 0.5, 1.0);
+        let (up, _, up_exp) = three_way_response(neutral, 0.0, neutral, 0.4, neutral, 0.4);
+        let (down, _, down_exp) =
+            three_way_response(neutral, 0.0, neutral, -0.4, neutral, -0.4);
+        for c in 0..3 {
+            assert!((up[c] * down[c] - 1.0).abs() < 1e-12, "gain");
+            assert!((up_exp[c] * down_exp[c] - 1.0).abs() < 1e-12, "gamma");
+        }
+    }
+
+    #[test]
+    fn a_white_balance_holds_the_luma_of_white() {
+        // Otherwise every cooling is also a darkening, and correcting one means
+        // spending the rest of the grade undoing the other.
+        for (temperature, tint) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.6, -0.3)] {
+            let g = white_balance_gains(temperature, tint);
+            let luma = LUMA[0] * g[0] + LUMA[1] * g[1] + LUMA[2] * g[2];
+            assert!((luma - 1.0).abs() < 1e-12, "{temperature}/{tint} changes brightness");
+        }
+        assert!(white_balance_gains(1.0, 0.0)[0] > 1.0, "warming raises red");
+        assert!(white_balance_gains(1.0, 0.0)[2] < 1.0, "and lowers blue");
+    }
+
+    #[test]
+    fn a_white_balance_is_drawn_by_the_colour_program() {
+        // Two registry kinds, one shader. The kinds the edit model names and
+        // the programs the GPU runs are deliberately not the same list, and
+        // this is the case that proves it rather than merely asserting it.
+        let warm = with(kinds::WHITE_BALANCE, "temperature", ParamValue::scalar(0.5));
+        let passes = passes_for(&warm, HD);
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].program(), Program::Color);
+    }
+
+    #[test]
+    fn a_secondary_showing_its_matte_draws_even_with_nothing_graded() {
+        // Dialling a qualifier in *is* looking at the matte, so the pass that
+        // would otherwise be skipped as a no-op is exactly the one wanted.
+        let matte = with(kinds::HSL_SECONDARY, "show_matte", ParamValue::Bool(true));
+        assert_eq!(passes_for(&matte, HD).len(), 1);
+        assert_eq!(passes_for(&matte, HD)[0].program(), Program::Qualify);
+    }
+
+    #[test]
+    fn a_hue_is_packed_in_turns_and_wraps() {
+        // Degrees on the control, turns in the shader, because `fract` wraps
+        // and a modulo of 360 needs a sign convention got right twice.
+        let at = |degrees: f64| {
+            let state = with_params(
+                kinds::HSL_SECONDARY,
+                &[("hue", ParamValue::scalar(degrees)), ("show_matte", ParamValue::Bool(true))],
+            );
+            passes_for(&state, HD)[0].uniform.params[0]
+        };
+        assert!((at(0.0) - 0.0).abs() < 1e-6);
+        assert!((at(180.0) - 0.5).abs() < 1e-6);
+        assert!((at(360.0) - 0.0).abs() < 1e-6, "a full turn is back at the start");
     }
 
     #[test]

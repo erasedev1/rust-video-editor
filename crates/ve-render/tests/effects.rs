@@ -509,6 +509,272 @@ fn mask_half() -> EffectState {
     )
 }
 
+// --- Grading -----------------------------------------------------------------
+
+const GREY: [u8; 4] = [128, 128, 128, 255];
+
+fn wheel(r: f64, g: f64, b: f64) -> ParamValue {
+    ParamValue::color(ve_core::Rgba::new(r, g, b, 1.0))
+}
+
+#[test]
+fn lifting_the_shadows_moves_black_and_leaves_white_where_it_was() {
+    // That is the whole point of a lift as opposed to an exposure: it is the
+    // bottom of the range being dragged up, with the top pinned. A grade that
+    // moved white too would be a gain wearing a lift's label.
+    let source = frame(SIZE, |x, _| if x < 32 { BLACK } else { WHITE });
+    let pixels = run(
+        SIZE,
+        &source,
+        &[effect(kinds::THREE_WAY, &[("shadow_level", ParamValue::scalar(1.0))])],
+    );
+    // A full shadow level lifts black a quarter of the way up the range.
+    let lifted = (0.25_f64 * 255.0).round() as u8;
+    assert_close(pixel(&pixels, SIZE, 16, 32), [lifted, lifted, lifted, 255], "black lifted");
+    assert_close(pixel(&pixels, SIZE, 48, 32), WHITE, "white pinned");
+}
+
+#[test]
+fn raising_the_highlights_moves_white_and_leaves_black_where_it_was() {
+    let source = frame(SIZE, |x, _| if x < 32 { BLACK } else { GREY });
+    let pixels = run(
+        SIZE,
+        &source,
+        &[effect(kinds::THREE_WAY, &[("highlight_level", ParamValue::scalar(1.0))])],
+    );
+    // Half a stop per unit, so a full level is a gain of √2. Measured on grey
+    // rather than on white, which would clip and prove nothing.
+    let gained = (128.0 * 2.0_f64.sqrt()).round() as u8;
+    assert_close(pixel(&pixels, SIZE, 16, 32), BLACK, "black pinned");
+    assert_close(pixel(&pixels, SIZE, 48, 32), [gained, gained, gained, 255], "grey gained");
+}
+
+#[test]
+fn the_midtones_bend_without_moving_either_end() {
+    let source = frame(SIZE, |x, _| match x / 16 {
+        0 => BLACK,
+        1 => GREY,
+        _ => WHITE,
+    });
+    let pixels = run(
+        SIZE,
+        &source,
+        &[effect(kinds::THREE_WAY, &[("midtone_level", ParamValue::scalar(1.0))])],
+    );
+    assert_close(pixel(&pixels, SIZE, 8, 32), BLACK, "black is a fixed point of a power");
+    assert_close(pixel(&pixels, SIZE, 40, 32), WHITE, "and so is white");
+
+    // The exponent is 2^-0.5, which brightens: 0.502^0.707 is about 0.617.
+    let bent = ((128.0_f64 / 255.0).powf(2.0_f64.powf(-0.5)) * 255.0).round() as u8;
+    assert_close(pixel(&pixels, SIZE, 24, 32), [bent, bent, bent, 255], "midtones bent");
+    assert!(bent > 128, "a positive midtone level brightens");
+}
+
+#[test]
+fn a_shadow_wheel_colours_the_darks_without_touching_the_whites() {
+    // A colourist's first move: warm the shadows, leave the highlights neutral.
+    // Measured on a dark grey rather than on black, because a wheel pushes one
+    // channel down as well as another up and black has nowhere lower to go.
+    let dark = [64, 64, 64, 255];
+    let source = frame(SIZE, |x, _| if x < 32 { dark } else { WHITE });
+    let pixels = run(
+        SIZE,
+        &source,
+        // Red above mid grey, blue below: warm.
+        &[effect(kinds::THREE_WAY, &[("shadows", wheel(0.75, 0.5, 0.25))])],
+    );
+
+    // Half a deflection each way, so a lift of ±0.125 — and a slope of
+    // `gain − lift` that follows it, which is what keeps white pinned.
+    let lift = [0.125_f64, 0.0, -0.125];
+    let expected: Vec<u8> = (0..3)
+        .map(|c| (((64.0 / 255.0) * (1.0 - lift[c]) + lift[c]) * 255.0).round() as u8)
+        .collect();
+    let shadow = pixel(&pixels, SIZE, 16, 32);
+    assert_close(shadow, [expected[0], expected[1], expected[2], 255], "warmed darks");
+    assert!(shadow[0] > shadow[1] && shadow[1] > shadow[2], "warm: {shadow:?}");
+    assert_close(pixel(&pixels, SIZE, 48, 32), WHITE, "white is untouched by a lift");
+}
+
+#[test]
+fn a_grade_and_its_opposite_cancel() {
+    // Half a stop up and half a stop down are reciprocal by construction, which
+    // is what makes the sliders usable: pulling one back to where it was gets
+    // the picture back rather than leaving it slightly flatter than it started.
+    let source = solid(SIZE, GREY);
+    let pixels = run(
+        SIZE,
+        &source,
+        &[
+            effect(kinds::THREE_WAY, &[("midtone_level", ParamValue::scalar(0.5))]),
+            effect(kinds::THREE_WAY, &[("midtone_level", ParamValue::scalar(-0.5))]),
+        ],
+    );
+    assert_close(pixel(&pixels, SIZE, 32, 32), GREY, "back where it started");
+}
+
+#[test]
+fn a_grade_does_not_depend_on_coverage() {
+    // The same colour at two coverages. A decoded frame carries straight
+    // colour, so both sides are the same number and only the alpha differs.
+    let source = frame(SIZE, |x, _| if x < 32 { [64, 64, 64, 255] } else { [64, 64, 64, 128] });
+    let pixels = run(
+        SIZE,
+        &source,
+        &[effect(kinds::THREE_WAY, &[("highlight_level", ParamValue::scalar(1.0))])],
+    );
+    // Both pixels are the same colour at different coverage, so both are gained
+    // by the same factor — half a stop — and written back premultiplied.
+    let gained = 64.0 * 2.0_f64.sqrt();
+    assert_close(
+        pixel(&pixels, SIZE, 16, 32),
+        [gained.round() as u8, gained.round() as u8, gained.round() as u8, 255],
+        "opaque",
+    );
+    let half = (gained * 0.5).round() as u8;
+    assert_close(pixel(&pixels, SIZE, 48, 32), [half, half, half, 128], "half covered");
+}
+
+// --- White balance -----------------------------------------------------------
+
+#[test]
+fn warming_trades_blue_for_red_and_keeps_the_brightness() {
+    let source = solid(SIZE, GREY);
+    let pixels = run(
+        SIZE,
+        &source,
+        &[effect(kinds::WHITE_BALANCE, &[("temperature", ParamValue::scalar(1.0))])],
+    );
+    let warm = pixel(&pixels, SIZE, 32, 32);
+    assert!(warm[0] > 128, "red is raised: {warm:?}");
+    assert!(warm[2] < 128, "blue is lowered: {warm:?}");
+
+    // Rec. 709 luma is what is held constant, so the grey keeps its weight.
+    let luma = 0.2126 * warm[0] as f64 + 0.7152 * warm[1] as f64 + 0.0722 * warm[2] as f64;
+    assert!((luma - 128.0).abs() < 3.0, "luma is preserved: {luma} from {warm:?}");
+}
+
+#[test]
+fn cooling_is_the_inverse_of_warming() {
+    let source = solid(SIZE, GREY);
+    let warmed = run(
+        SIZE,
+        &source,
+        &[
+            effect(kinds::WHITE_BALANCE, &[("temperature", ParamValue::scalar(0.5))]),
+            effect(kinds::WHITE_BALANCE, &[("temperature", ParamValue::scalar(-0.5))]),
+        ],
+    );
+    assert_close(pixel(&warmed, SIZE, 32, 32), GREY, "warmed and cooled back");
+}
+
+#[test]
+fn a_tint_moves_green_against_magenta() {
+    let source = solid(SIZE, GREY);
+    let green = run(
+        SIZE,
+        &source,
+        &[effect(kinds::WHITE_BALANCE, &[("tint", ParamValue::scalar(-1.0))])],
+    );
+    let g = pixel(&green, SIZE, 32, 32);
+    assert!(g[1] > 128, "green is raised: {g:?}");
+    assert!(g[0] < 128 && g[2] < 128, "red and blue fall together: {g:?}");
+    assert_eq!(g[0], g[2], "a tint does not disturb the warm/cool axis");
+}
+
+// --- HSL secondary -----------------------------------------------------------
+
+#[test]
+fn a_secondary_grades_the_hue_it_selected_and_nothing_else() {
+    // Red on the left, blue on the right, with the band centred on red.
+    let blue = [0, 0, 255, 255];
+    let source = frame(SIZE, |x, _| if x < 32 { RED } else { blue });
+    let pixels = run(
+        SIZE,
+        &source,
+        &[effect(
+            kinds::HSL_SECONDARY,
+            &[
+                ("hue", ParamValue::scalar(0.0)),
+                ("hue_width", ParamValue::scalar(20.0)),
+                ("softness", ParamValue::scalar(5.0)),
+                ("saturation_scale", ParamValue::scalar(0.0)),
+            ],
+        )],
+    );
+    // Selected: drained to its own lightness, which for full red is half grey.
+    let drained = pixel(&pixels, SIZE, 16, 32);
+    assert_eq!(drained[0], drained[1], "the selected red is now neutral: {drained:?}");
+    assert_eq!(drained[1], drained[2], "the selected red is now neutral: {drained:?}");
+    // Not selected: untouched.
+    assert_close(pixel(&pixels, SIZE, 48, 32), blue, "blue is outside the band");
+}
+
+#[test]
+fn a_band_centred_on_red_reaches_across_the_seam() {
+    // Hue wraps, and red sits exactly on the wrap. A band centred on 0 that
+    // only reached upwards would select orange and not magenta.
+    let magenta = [255, 0, 128, 255];
+    let orange = [255, 160, 0, 255];
+    let source = frame(SIZE, |x, _| if x < 32 { magenta } else { orange });
+    let pixels = run(
+        SIZE,
+        &source,
+        &[effect(
+            kinds::HSL_SECONDARY,
+            &[
+                ("hue", ParamValue::scalar(0.0)),
+                ("hue_width", ParamValue::scalar(45.0)),
+                ("softness", ParamValue::scalar(1.0)),
+                ("show_matte", ParamValue::Bool(true)),
+            ],
+        )],
+    );
+    assert_close(pixel(&pixels, SIZE, 16, 32), WHITE, "magenta is inside the band");
+    assert_close(pixel(&pixels, SIZE, 48, 32), WHITE, "and so is orange");
+}
+
+#[test]
+fn the_saturation_floor_keeps_greys_out_of_the_key() {
+    // Without it, a band centred anywhere selects every neutral in the frame,
+    // because grey's hue is whatever the arithmetic happened to produce.
+    let source = frame(SIZE, |x, _| if x < 32 { RED } else { GREY });
+    let pixels = run(
+        SIZE,
+        &source,
+        &[effect(
+            kinds::HSL_SECONDARY,
+            &[
+                ("hue", ParamValue::scalar(0.0)),
+                ("hue_width", ParamValue::scalar(180.0)),
+                ("saturation_floor", ParamValue::scalar(0.3)),
+                ("show_matte", ParamValue::Bool(true)),
+            ],
+        )],
+    );
+    assert_close(pixel(&pixels, SIZE, 16, 32), WHITE, "saturated red is selected");
+    assert_close(pixel(&pixels, SIZE, 48, 32), BLACK, "grey is not");
+}
+
+#[test]
+fn shifting_a_hue_turns_it_without_changing_how_bright_it_is() {
+    let source = solid(SIZE, RED);
+    let pixels = run(
+        SIZE,
+        &source,
+        &[effect(
+            kinds::HSL_SECONDARY,
+            &[
+                ("hue", ParamValue::scalar(0.0)),
+                ("hue_width", ParamValue::scalar(30.0)),
+                ("hue_shift", ParamValue::scalar(120.0)),
+            ],
+        )],
+    );
+    // A third of a turn from red is green, at the same saturation and lightness.
+    assert_close(pixel(&pixels, SIZE, 32, 32), [0, 255, 0, 255], "red turned to green");
+}
+
 #[test]
 fn a_pass_in_linear_light_differs_from_the_same_pass_encoded() {
     // The colour space is the attachment's, exactly as it is for compositing:
