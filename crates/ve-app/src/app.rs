@@ -281,6 +281,85 @@ impl VergeApp {
                     }
                 });
 
+                ui.menu_button("Media", |ui| {
+                    let running = self.state.proxies.is_running();
+                    let ready = self
+                        .state
+                        .project
+                        .assets
+                        .iter()
+                        .filter(|a| a.info.has_video() && a.picture_source(None, true).is_proxy)
+                        .count();
+
+                    let mut using = self.state.project.settings.use_proxies;
+                    if ui
+                        .add_enabled(ready > 0, egui::Checkbox::new(&mut using, "Use Proxies"))
+                        .on_hover_text(
+                            "Cut with the smaller stand-ins.\nAn export always renders \
+                             the originals.",
+                        )
+                        .on_disabled_hover_text("Build proxies first")
+                        .clicked()
+                    {
+                        actions_out.push(Action::SetUseProxies(using));
+                        ui.close();
+                    }
+                    ui.separator();
+
+                    if ui
+                        .add_enabled(!running, egui::Button::new("Build Proxies"))
+                        .on_hover_text("Build one for anything that has not got one")
+                        .clicked()
+                    {
+                        actions_out.push(Action::BuildProxies);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(!running, egui::Button::new("Rebuild All Proxies"))
+                        .on_hover_text("Build every one again, at the size below")
+                        .clicked()
+                    {
+                        actions_out.push(Action::RebuildProxies);
+                        ui.close();
+                    }
+                    if ui.add_enabled(running, egui::Button::new("Stop Building")).clicked() {
+                        actions_out.push(Action::CancelProxyBuild);
+                        ui.close();
+                    }
+
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("Size").small().color(crate::theme::TEXT_FAINT),
+                    );
+                    for scale in ve_export::ProxyScale::ALL {
+                        let chosen = self.state.proxies.scale == scale;
+                        if ui
+                            .add_enabled(
+                                !running,
+                                egui::Button::new(format!(
+                                    "{} {}",
+                                    if chosen { "●" } else { "○" },
+                                    scale.label()
+                                )),
+                            )
+                            .clicked()
+                        {
+                            actions_out.push(Action::SetProxyScale(scale));
+                            ui.close();
+                        }
+                    }
+
+                    ui.separator();
+                    if ui
+                        .add_enabled(ready > 0, egui::Button::new("Forget Proxies"))
+                        .on_hover_text("Stop using them. The files stay on disk.")
+                        .clicked()
+                    {
+                        actions_out.push(Action::ForgetProxies);
+                        ui.close();
+                    }
+                });
+
                 ui.menu_button("Edit", |ui| {
                     let undo = self.state.history.undo_name().map(str::to_string);
                     let redo = self.state.history.redo_name().map(str::to_string);
@@ -811,6 +890,7 @@ impl eframe::App for VergeApp {
 
         // 5. Housekeeping.
         self.poll_export();
+        actions::poll_proxies(&mut self.state, &mut self.engine);
         self.maybe_autosave();
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.state.window_title()));
 
@@ -833,10 +913,10 @@ impl eframe::App for VergeApp {
         // keeps an idle editor off the CPU entirely.
         if playing || pending > 0 || waveform_progress {
             ctx.request_repaint();
-        } else if self.state.export.is_running() {
-            // An export reports about ten times a second and nothing else is
-            // happening, so this is the one case where repainting on a timer
-            // beats repainting continuously.
+        } else if self.state.export.is_running() || self.state.proxies.is_running() {
+            // An export or a proxy build reports about ten times a second and
+            // nothing else is happening, so these are the cases where
+            // repainting on a timer beats repainting continuously.
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }

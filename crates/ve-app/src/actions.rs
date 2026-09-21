@@ -12,11 +12,11 @@ use ve_command::{
     property_ref, AddClip, AddEffect, AddMarker, AddTrack, ClipProperty, Command, Compound,
     CrossfadeClips, EditKeyframes, EffectHost, KeyframeEdit, KeyframePoint, MoveClip,
     MoveEffect, MoveTrack, PropertyValue, RemoveClip, RemoveEffect, RemoveMarker, RemoveTrack,
-    RenameEffect, RollEdit, SetClipBlendMode, SetClipEnabled, SetClipFade, SetClipMotionBlur,
-    SetClipProperty, SetClipSpeed, SetCompositionSettings, SetEffectEnabled, SetEffectOption,
-    SetSequenceColorSpace, SetSequenceFormat, SetSequenceMotionBlur, SetTrackFlag,
-    SetTrackLevel, ShiftClips, SlideClip, SlipClip, SplitClip, TrackFlag, TrackLevel, TrimClip,
-    TrimEdge,
+    RenameEffect, RollEdit, SetAssetProxy, SetClipBlendMode, SetClipEnabled, SetClipFade,
+    SetClipMotionBlur, SetClipProperty, SetClipSpeed, SetCompositionSettings, SetEffectEnabled,
+    SetEffectOption, SetSequenceColorSpace, SetSequenceFormat, SetSequenceMotionBlur,
+    SetTrackFlag, SetTrackLevel, SetUseProxies, ShiftClips, SlideClip, SlipClip, SplitClip,
+    TrackFlag, TrackLevel, TrimClip, TrimEdge,
 };
 use ve_core::{
     AssetId, BlendMode, Clip, ClipId, ColorSpace, EffectId, Fade, FadeCurve, FadeEdge,
@@ -52,6 +52,20 @@ pub enum Action {
     /// command line without the dialogue existing at all.
     StartExport(Box<ve_export::ExportSettings>),
     CancelExport,
+
+    // Proxies. Building is a background job like an export; using them is a
+    // switch on the project, so it survives being closed and reopened.
+    /// Builds a proxy for every video asset that has not got a usable one.
+    BuildProxies,
+    /// Builds one again whether or not it already has a proxy, for footage
+    /// that was replaced on disk or a size that turned out wrong.
+    RebuildProxies,
+    CancelProxyBuild,
+    SetProxyScale(ve_export::ProxyScale),
+    SetUseProxies(bool),
+    /// Forgets every proxy reference. The files on disk are left alone: this
+    /// is the project pointing at them, not the things themselves.
+    ForgetProxies,
 
     // Edit
     Undo,
@@ -436,6 +450,73 @@ pub fn dispatch(
             }
             None => state.set_status(Status::warning("no export is running")),
         },
+
+        Action::BuildProxies => start_proxy_build(state, false),
+        Action::RebuildProxies => start_proxy_build(state, true),
+
+        Action::CancelProxyBuild => match &state.proxies.job {
+            Some(job) => {
+                job.cancel();
+                state.set_status(Status::info("stopping the proxy build…"));
+            }
+            None => state.set_status(Status::warning("no proxy build is running")),
+        },
+
+        Action::SetProxyScale(scale) => {
+            if state.proxies.is_running() {
+                state.set_status(Status::warning(
+                    "a proxy build is already running at the other size",
+                ));
+                return;
+            }
+            state.proxies.scale = scale;
+        }
+
+        Action::SetUseProxies(enabled) => {
+            let command = SetUseProxies::new(enabled);
+            if !command.would_change(&state.project) {
+                return;
+            }
+            if state.history.execute(&mut state.project, Box::new(command)).is_err() {
+                return;
+            }
+            // Which file a worker decodes is fixed when it is opened, so the
+            // switch only means anything once they have been replaced.
+            let failures = engine.reopen_project_assets(&state.project);
+            for (asset, why) in &failures {
+                log::warn!("could not reopen asset {asset}: {why}");
+            }
+            state.set_status(Status::info(if enabled {
+                "cutting on proxies".to_string()
+            } else {
+                "cutting at full resolution".to_string()
+            }));
+        }
+
+        Action::ForgetProxies => {
+            let assets: Vec<AssetId> =
+                state.project.assets.iter().filter(|a| a.has_proxy()).map(|a| a.id).collect();
+            if assets.is_empty() {
+                state.set_status(Status::warning("no proxies to forget"));
+                return;
+            }
+            let count = assets.len();
+            // One undo step for the lot: the user asked once.
+            let mut compound = Compound::new("Forget Proxies");
+            for asset in assets {
+                compound.push(Box::new(SetAssetProxy::detach(asset)));
+            }
+            if state.history.execute(&mut state.project, Box::new(compound)).is_ok() {
+                let failures = engine.reopen_project_assets(&state.project);
+                for (asset, why) in &failures {
+                    log::warn!("could not reopen asset {asset}: {why}");
+                }
+                state.set_status(Status::info(format!(
+                    "forgot {count} {}; the files are still on disk",
+                    if count == 1 { "proxy" } else { "proxies" }
+                )));
+            }
+        }
 
         Action::Undo => match state.history.undo(&mut state.project) {
             Ok(name) => {
@@ -1623,6 +1704,160 @@ fn adopt_format_from(
             "sequence set to {}×{} at {rate}",
             resolution.width, resolution.height
         )));
+    }
+}
+
+// ---- proxies ----------------------------------------------------------
+
+/// Starts building proxies for the project's video assets.
+///
+/// `rebuild` decides whether assets that already have a usable proxy are done
+/// again — which is what "the footage on disk changed" or "a quarter was too
+/// small" needs, and what an ordinary build should not waste minutes on.
+fn start_proxy_build(state: &mut EditorState, rebuild: bool) {
+    if state.proxies.is_running() {
+        state.set_status(Status::warning("a proxy build is already running"));
+        return;
+    }
+
+    // Proxies live beside the project file, so there has to be one. Writing
+    // them somewhere temporary instead would mean a folder of orphaned files
+    // that nothing ever points at again.
+    let Some(project_path) = state.path.clone() else {
+        state.set_status(Status::warning(
+            "save the project first, so its proxies have somewhere to live beside it",
+        ));
+        return;
+    };
+    let dir = ve_export::proxy_dir_for(&project_path);
+    let scale = state.proxies.scale;
+
+    let items: Vec<_> = state
+        .project
+        .assets
+        .iter()
+        .filter(|a| !a.offline && a.info.has_video())
+        // An asset whose proxy is already on disk is skipped unless this is a
+        // rebuild. One whose proxy has *gone* is built again either way: that
+        // is exactly the case this is for.
+        .filter(|a| rebuild || !a.picture_source(None, true).is_proxy)
+        .filter_map(|a| ve_export::ProxySettings::for_asset(a, &dir, scale).map(|s| (a.id, s)))
+        .collect();
+
+    if items.is_empty() {
+        state.set_status(Status::info(if state.project.assets.is_empty() {
+            "there is no media to build proxies for".to_string()
+        } else {
+            "every clip already has a proxy".to_string()
+        }));
+        return;
+    }
+
+    let count = items.len();
+    state.proxies.last = None;
+    state.set_status(Status::info(format!(
+        "building {count} {} at {}…",
+        if count == 1 { "proxy" } else { "proxies" },
+        scale.label().to_lowercase()
+    )));
+    state.proxies.job =
+        Some(ve_export::ProxyJob::start(items, state.proxies.metrics.clone(), dir));
+}
+
+/// Takes whatever the running proxy build has said and acts on it.
+///
+/// Called once a frame from the shell's housekeeping, and directly by tests —
+/// which is why it lives here rather than in the window, and why it takes the
+/// state and the engine rather than the application.
+///
+/// Each finished file is attached to its asset through a command, so the
+/// reference is in the undo history and marks the project dirty: a proxy built
+/// and then not saved would be a file on disk that nothing points at.
+pub fn poll_proxies(state: &mut EditorState, engine: &mut PlaybackEngine) {
+    let Some(job) = state.proxies.job.as_mut() else { return };
+
+    let events = job.poll();
+    let mut done = false;
+    let mut built = 0usize;
+    let mut failed = 0usize;
+    let mut attached = false;
+
+    for event in events {
+        match event {
+            ve_export::ProxyEvent::Progress(_) => {}
+            ve_export::ProxyEvent::Built { asset, media, report } => {
+                log::info!(
+                    "built {} — {}×{}, {} frames in {:.1}s",
+                    report.path.display(),
+                    report.size.width,
+                    report.size.height,
+                    report.frames,
+                    report.elapsed.as_secs_f64()
+                );
+                let command = SetAssetProxy::attach(asset, media);
+                if state.history.execute(&mut state.project, Box::new(command)).is_ok() {
+                    built += 1;
+                    attached = true;
+                }
+            }
+            ve_export::ProxyEvent::Failed { asset, message } => {
+                let name = state
+                    .project
+                    .asset(asset)
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| format!("asset {asset}"));
+                let note = format!("no proxy for {name}: {message}");
+                log::warn!("{note}");
+                state.warnings.push(note);
+                failed += 1;
+            }
+            ve_export::ProxyEvent::Finished => done = true,
+            ve_export::ProxyEvent::Cancelled => {
+                state.set_status(Status::info("proxy build cancelled"));
+                state.proxies.last = Some("cancelled".into());
+                done = true;
+            }
+        }
+    }
+
+    // Attaching a proxy changes which file an asset should decode from, but
+    // only while proxies are switched on — otherwise the workers are already
+    // reading the right thing and replacing them would be churn for nothing.
+    if attached && state.project.settings.use_proxies {
+        let failures = engine.reopen_project_assets(&state.project);
+        for (asset, why) in &failures {
+            log::warn!("could not reopen asset {asset}: {why}");
+        }
+    }
+
+    if built > 0 || failed > 0 {
+        let mut summary = format!("{built} built");
+        if failed > 0 {
+            summary.push_str(&format!(", {failed} failed"));
+        }
+        state.proxies.last = Some(summary);
+    }
+
+    if done {
+        // Dropping the job joins its thread, which is where a cancelled build
+        // removes the file it was part way through.
+        state.proxies.job = None;
+        if built > 0 {
+            let line = format!(
+                "{built} {} built{}",
+                if built == 1 { "proxy" } else { "proxies" },
+                if failed > 0 { format!(", {failed} failed") } else { String::new() }
+            );
+            // A build that lost a file says so as a warning rather than
+            // reporting a round number that quietly leaves one out.
+            state.set_status(if failed > 0 {
+                Status::warning(line)
+            } else {
+                Status::info(line)
+            });
+        } else if failed > 0 {
+            state.set_status(Status::error(format!("no proxies were built; {failed} failed")));
+        }
     }
 }
 

@@ -18,6 +18,7 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
             }
         });
     });
+    proxy_bar(ui, state, actions);
     ui.separator();
 
     if state.project.assets.is_empty() {
@@ -35,6 +36,7 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
 
     let selected_asset = state.selection.asset;
     let target_track = default_track_for(state);
+    let using_proxies = state.project.settings.use_proxies;
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         let assets: Vec<_> = state.project.assets.iter().map(|a| a.id).collect();
@@ -46,6 +48,7 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
             let offline = asset.offline;
             let duration = asset.duration();
             let summary = summarise(asset);
+            let proxy_badge = proxy_badge(asset, using_proxies);
 
             let response = ui
                 .scope(|ui| {
@@ -66,6 +69,14 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
                                         .on_hover_text("media is missing");
                                     }
                                     ui.label(RichText::new(&name).color(theme::TEXT));
+                                    if let Some(badge) = &proxy_badge {
+                                        ui.label(
+                                            RichText::new(&badge.text)
+                                                .small()
+                                                .color(badge.colour),
+                                        )
+                                        .on_hover_text(&badge.hover);
+                                    }
                                 });
                                 ui.label(
                                     RichText::new(summary).small().color(theme::TEXT_FAINT),
@@ -120,4 +131,119 @@ fn default_track_for(state: &EditorState) -> Option<ve_core::TrackId> {
         }
     }
     seq.tracks.iter().find(|t| t.kind == TrackKind::Video).map(|t| t.id)
+}
+
+/// What the proxy row above the media list says, and the two things it does.
+///
+/// In the panel rather than only in a menu because the state it reports —
+/// whether the pictures on screen are the real ones — is the sort of thing a
+/// user needs to be able to see rather than remember.
+fn proxy_bar(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
+    let running = state.proxies.is_running();
+    let with_video = state.project.assets.iter().filter(|a| a.info.has_video()).count();
+    if with_video == 0 && !running {
+        return;
+    }
+
+    ui.horizontal(|ui| {
+        if running {
+            let progress = state.proxies.job.as_ref().map(|j| j.progress());
+            let fraction = progress.map(|p| p.fraction()).unwrap_or(0.0);
+            let (item, items) = progress.map(|p| (p.item, p.items)).unwrap_or((0, 0));
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .desired_width(110.0)
+                    .text(RichText::new(format!("proxy {item}/{items}")).small()),
+            );
+            if ui.small_button("Stop").clicked() {
+                actions.push(Action::CancelProxyBuild);
+            }
+            return;
+        }
+
+        // How many of the video assets can actually be decoded through right
+        // now — an attached proxy whose file has gone does not count, which is
+        // the number that matters and the one a plain `has_proxy` would get
+        // wrong.
+        let ready = state
+            .project
+            .assets
+            .iter()
+            .filter(|a| a.info.has_video() && a.picture_source(None, true).is_proxy)
+            .count();
+
+        let mut using = state.project.settings.use_proxies;
+        let toggle = ui
+            .add_enabled(
+                ready > 0,
+                egui::Checkbox::new(&mut using, RichText::new("Proxies").small()),
+            )
+            .on_hover_text(if ready > 0 {
+                "Cut with the smaller stand-ins. Exports always render the originals."
+            } else {
+                "Build proxies first"
+            })
+            .on_disabled_hover_text("Build proxies first");
+        if toggle.changed() {
+            actions.push(Action::SetUseProxies(using));
+        }
+
+        ui.label(
+            RichText::new(format!("{ready}/{with_video}"))
+                .small()
+                .color(if ready == with_video { theme::TEXT_FAINT } else { theme::TEXT_DIM }),
+        )
+        .on_hover_text("How much of the footage has a proxy on disk");
+
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .small_button("Build")
+                .on_hover_text("Build proxies for anything that has not got one")
+                .clicked()
+            {
+                actions.push(Action::BuildProxies);
+            }
+        });
+    });
+}
+
+/// The small mark beside an asset's name saying where its picture comes from.
+struct ProxyBadge {
+    text: String,
+    colour: egui::Color32,
+    hover: String,
+}
+
+fn proxy_badge(asset: &ve_core::MediaAsset, using_proxies: bool) -> Option<ProxyBadge> {
+    if !asset.info.has_video() || !asset.has_proxy() {
+        return None;
+    }
+    let proxy = asset.proxy.as_ref()?;
+    let on_disk = asset.picture_source(None, true).is_proxy;
+
+    // Three states worth telling apart, because the user's next move differs
+    // for each: in use, built but switched off, and referenced but gone.
+    Some(if !on_disk {
+        ProxyBadge {
+            text: "proxy?".into(),
+            colour: theme::OFFLINE,
+            hover: format!(
+                "{} is missing, so this clip is decoding at full resolution.\nBuild \
+                 proxies again to replace it.",
+                proxy.path.display()
+            ),
+        }
+    } else if using_proxies {
+        ProxyBadge {
+            text: format!("proxy {}p", proxy.size.height),
+            colour: theme::ACCENT,
+            hover: format!("cutting on {}", proxy.path.display()),
+        }
+    } else {
+        ProxyBadge {
+            text: "proxy".into(),
+            colour: theme::TEXT_FAINT,
+            hover: format!("{} is built but switched off", proxy.path.display()),
+        }
+    })
 }

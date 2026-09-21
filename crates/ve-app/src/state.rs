@@ -6,7 +6,7 @@ use std::time::Duration;
 use ve_command::{ClipProperty, History, KeyframePoint};
 use ve_core::{AssetId, Clip, ClipId, CompositionId, LayerId, Project, SequenceId, TrackId};
 use ve_engine::{Timebase, Viewing};
-use ve_export::{ExportJob, ExportSettings};
+use ve_export::{ExportJob, ExportSettings, ProxyJob, ProxyScale};
 use ve_metrics::Metrics;
 use ve_project::Autosave;
 use ve_render::GpuContext;
@@ -652,6 +652,31 @@ impl ExportState {
     }
 }
 
+/// The proxy build that may be running, and how the next one is set up.
+///
+/// There is no dialogue: building proxies has exactly two decisions in it —
+/// how small, and go — and a window to hold them would be a window in the way.
+#[derive(Default)]
+pub struct ProxyState {
+    /// The build in progress, if any. One at a time, for the same reason as an
+    /// export: two would compete for the same decoders and finish later than
+    /// running them in turn.
+    pub job: Option<ProxyJob>,
+    /// How small the next build makes them.
+    pub scale: ProxyScale,
+    /// What the last build came to, shown in the status bar until the next.
+    pub last: Option<String>,
+    /// Where a build's own timings go — the editor's registry, so the overlay
+    /// reports them beside everything else.
+    pub metrics: Metrics,
+}
+
+impl ProxyState {
+    pub fn is_running(&self) -> bool {
+        self.job.as_ref().is_some_and(|j| j.is_running())
+    }
+}
+
 /// Everything the editor knows, apart from the GPU and the transport.
 ///
 /// Deliberately free of any egui type, so the whole action layer can be driven
@@ -677,6 +702,8 @@ pub struct EditorState {
     pub show_performance_overlay: bool,
     /// The export dialogue, and the export it may have started.
     pub export: ExportState,
+    /// The proxy build that may be running.
+    pub proxies: ProxyState,
     /// The composition the user has open, if any. While one is open the
     /// timeline, the preview and the transport are all about *it* rather than
     /// about the sequence — which is what "open a composition" has to mean for
@@ -711,6 +738,7 @@ impl EditorState {
             warnings: Vec::new(),
             show_performance_overlay: cfg!(debug_assertions),
             export: ExportState::default(),
+            proxies: ProxyState::default(),
             open_composition: None,
             revision: 0,
         }

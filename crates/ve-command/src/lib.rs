@@ -26,6 +26,7 @@ mod effect_commands;
 mod history;
 mod keyframe_commands;
 mod property_commands;
+mod proxy_commands;
 mod structure_commands;
 
 pub use audio_commands::{CrossfadeClips, SetClipFade, SetTrackLevel, TrackLevel};
@@ -49,6 +50,7 @@ pub use property_commands::{
     ClipProperty, PropertyValue, RemoveClipKeyframe, SetClipKeyframe, SetClipProperty,
     SetLayerProperty,
 };
+pub use proxy_commands::{SetAssetProxy, SetUseProxies};
 pub use structure_commands::{
     AddMarker, AddTrack, MoveTrack, RemoveMarker, RemoveTrack, SetClipBlendMode,
     SetClipEnabled, SetClipMotionBlur, SetSequenceColorSpace, SetSequenceFormat,
