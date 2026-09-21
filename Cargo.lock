@@ -3705,6 +3705,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ve-caption"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "tempfile",
+ "thiserror 2.0.20",
+ "ve-core",
+ "ve-time",
+]
+
+[[package]]
 name = "ve-command"
 version = "0.1.0"
 dependencies = [

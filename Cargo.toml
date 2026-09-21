@@ -5,6 +5,7 @@ members = [
     "crates/ve-core",
     "crates/ve-project",
     "crates/ve-command",
+    "crates/ve-caption",
     "crates/ve-media",
     "crates/ve-render",
     "crates/ve-engine",
@@ -26,6 +27,7 @@ ve-time = { path = "crates/ve-time" }
 ve-core = { path = "crates/ve-core" }
 ve-project = { path = "crates/ve-project" }
 ve-command = { path = "crates/ve-command" }
+ve-caption = { path = "crates/ve-caption" }
 ve-media = { path = "crates/ve-media" }
 ve-render = { path = "crates/ve-render" }
 ve-engine = { path = "crates/ve-engine" }
