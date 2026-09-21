@@ -12,6 +12,7 @@
 //! the same call with the same value.
 
 use egui::{Context, RichText, Ui};
+use ve_caption::CaptionFormat;
 use ve_export::{AudioCodec, AudioSettings, ExportRange, ExportSettings, Quality, VideoCodec};
 use ve_time::Rate;
 
@@ -263,6 +264,54 @@ fn settings_body(
                 }
             });
             ui.end_row();
+
+            // Only when there is something to write. A control for a file the
+            // sequence has no captions to fill would be a question with one
+            // answer.
+            if !sequence.captions.is_empty() {
+                ui.label(RichText::new("Captions").color(theme::TEXT_DIM));
+                ui.horizontal(|ui| {
+                    let mut wanted = draft.captions.is_some();
+                    if ui.checkbox(&mut wanted, "Write files").clicked() {
+                        draft.captions = wanted.then_some(CaptionFormat::SubRip);
+                    }
+                    if let Some(format) = draft.captions {
+                        egui::ComboBox::from_id_salt("export-caption-format")
+                            .selected_text(format.label())
+                            .width(130.0)
+                            .show_ui(ui, |ui| {
+                                for option in CaptionFormat::ALL {
+                                    if ui
+                                        .selectable_label(format == option, option.label())
+                                        .clicked()
+                                    {
+                                        draft.captions = Some(option);
+                                    }
+                                }
+                            });
+                        // Naming the files outright, because "beside the video"
+                        // is exactly the part that is easy to miss.
+                        let stem = draft
+                            .path
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let names: Vec<String> = sequence
+                            .captions
+                            .iter()
+                            .map(|t| format!("{stem}.{}.{}", t.language, format.extension()))
+                            .collect();
+                        ui.label(
+                            RichText::new(names.join("  "))
+                                .small()
+                                .monospace()
+                                .color(theme::TEXT_FAINT),
+                        )
+                        .on_hover_text("written beside the video when the render finishes");
+                    }
+                });
+                ui.end_row();
+            }
         });
 
     ui.add_space(6.0);

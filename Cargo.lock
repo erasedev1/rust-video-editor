@@ -3692,6 +3692,7 @@ dependencies = [
  "parking_lot",
  "rfd",
  "tempfile",
+ "ve-caption",
  "ve-command",
  "ve-core",
  "ve-engine",

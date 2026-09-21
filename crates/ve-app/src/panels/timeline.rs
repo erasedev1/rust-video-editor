@@ -9,7 +9,7 @@
 
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, Ui};
 use ve_command::TrimEdge;
-use ve_core::{FadeEdge, Sequence, TrackKind};
+use ve_core::{CaptionTrackId, CueId, FadeEdge, Sequence, TrackKind};
 use ve_engine::AudioLevels;
 use ve_media::WaveformService;
 use ve_time::{Rate, Ticks, TimeRange};
@@ -32,6 +32,12 @@ const FADE_GRIP_PX: f32 = 7.0;
 /// How far down a clip the fade grips reach. Shallow, so the rest of the clip's
 /// top edge still starts a move and the corners still start a trim.
 const FADE_BAND_PX: f32 = 11.0;
+/// Height of a caption lane.
+///
+/// Fixed rather than resizable like a track's: a cue is one line of text, and
+/// there is nothing a taller lane would show. It sits under the audio tracks,
+/// where a caption lane sits in every editor that has one.
+const CAPTION_LANE_PX: f32 = 26.0;
 
 #[allow(clippy::too_many_arguments)]
 pub fn show(
@@ -69,7 +75,7 @@ pub fn show(
 
     draw_ruler(&painter, ruler_rect, state, &sequence, lanes_left);
     let hover = response.hover_pos();
-    let (lanes, content_height) = draw_tracks(
+    let (lanes, caption_lanes, content_height) = draw_tracks(
         &painter,
         lane_area,
         state,
@@ -86,7 +92,17 @@ pub fn show(
     draw_playhead(&painter, full, ruler_rect, state, playhead, lanes_left);
     draw_marquee(&painter, lane_area, state, &response, lanes_left);
 
-    handle_pointer(ui, state, &sequence, &response, &lanes, ruler_rect, lanes_left, actions);
+    handle_pointer(
+        ui,
+        state,
+        &sequence,
+        &response,
+        &lanes,
+        &caption_lanes,
+        ruler_rect,
+        lanes_left,
+        actions,
+    );
 }
 
 fn toolbar(ui: &mut Ui, state: &mut EditorState, actions: &mut Vec<Action>) {
@@ -183,6 +199,12 @@ struct Lane {
     /// this costs nothing for a track stack that is scrolled off screen.
     switches: [Rect; 3],
     locked: bool,
+}
+
+/// A caption track's row, for the pointer pass.
+struct CaptionLane {
+    track: CaptionTrackId,
+    rect: Rect,
 }
 
 /// The three header switches, in the order [`Lane::switches`] holds them.
@@ -284,7 +306,7 @@ fn draw_tracks(
     header_width: f32,
     left: f32,
     hover: Option<Pos2>,
-) -> (Vec<Lane>, f32) {
+) -> (Vec<Lane>, Vec<CaptionLane>, f32) {
     let view = &state.timeline;
     let lanes_left = left + header_width;
     let visible =
@@ -348,7 +370,128 @@ fn draw_tracks(
         lanes.push(Lane { track: track.id, rect: lane_rect, switches, locked: track.locked });
         y += height;
     }
-    (lanes, content_height)
+
+    // Caption lanes sit under the tracks: they are not layers, and nothing
+    // about their order means anything, so there is no reason for them to be
+    // anywhere else.
+    let mut caption_lanes = Vec::new();
+    for captions in &sequence.captions {
+        let height = CAPTION_LANE_PX;
+        content_height += height;
+        if y + height < area.top() || y > area.bottom() {
+            y += height;
+            continue;
+        }
+
+        let top = y.max(area.top());
+        let bottom = (y + height).min(area.bottom());
+        let lane_rect =
+            Rect::from_min_max(Pos2::new(lanes_left, top), Pos2::new(area.right(), bottom));
+        let header_rect =
+            Rect::from_min_max(Pos2::new(left, top), Pos2::new(lanes_left, bottom));
+
+        painter.rect_filled(lane_rect, 0.0, theme::TRACK_LANE_ALT);
+        painter.rect_filled(header_rect, 0.0, theme::TRACK_HEADER);
+        painter.line_segment(
+            [lane_rect.left_bottom(), lane_rect.right_bottom()],
+            Stroke::new(1.0, theme::SEPARATOR),
+        );
+        draw_caption_header(painter, header_rect, state, captions);
+        draw_grid(painter, lane_rect, state, sequence, lanes_left);
+
+        for cue in captions.cues_in_range(visible) {
+            draw_cue(painter, lane_rect, state, cue, lanes_left);
+        }
+
+        caption_lanes.push(CaptionLane { track: captions.id, rect: lane_rect });
+        y += height;
+    }
+
+    (lanes, caption_lanes, content_height)
+}
+
+/// A caption lane's header: what the track is called, and its language.
+///
+/// The language is shown rather than hidden in the inspector because it is what
+/// tells two caption lanes apart, and because it is what names the file the
+/// track exports to.
+fn draw_caption_header(
+    painter: &egui::Painter,
+    rect: Rect,
+    state: &EditorState,
+    captions: &ve_core::CaptionTrack,
+) {
+    let selected = state.selection.captions == Some(captions.id);
+    if selected {
+        painter.rect_filled(
+            Rect::from_min_max(rect.left_top(), Pos2::new(rect.left() + 2.0, rect.bottom())),
+            0.0,
+            theme::ACCENT,
+        );
+    }
+    painter.text(
+        Pos2::new(rect.left() + 8.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        &captions.name,
+        FontId::proportional(11.0),
+        if selected { theme::TEXT } else { theme::TEXT_DIM },
+    );
+    painter.text(
+        Pos2::new(rect.right() - 8.0, rect.center().y),
+        Align2::RIGHT_CENTER,
+        &captions.language,
+        FontId::monospace(10.0),
+        theme::TEXT_FAINT,
+    );
+}
+
+/// One caption, as a box with as much of its text as fits.
+fn draw_cue(
+    painter: &egui::Painter,
+    lane: Rect,
+    state: &EditorState,
+    cue: &ve_core::Cue,
+    lanes_left: f32,
+) {
+    let view = &state.timeline;
+    let x0 = lanes_left + view.x_of(cue.start);
+    let x1 = lanes_left + view.x_of(cue.end());
+    let left = x0.max(lane.left());
+    let right = x1.min(lane.right());
+    if right <= left {
+        return;
+    }
+
+    let rect = Rect::from_min_max(
+        Pos2::new(left, lane.top() + 3.0),
+        Pos2::new(right, lane.bottom() - 3.0),
+    );
+    let selected = state.selection.cue == Some(cue.id);
+    painter.rect_filled(rect, CornerRadius::same(3), theme::CAPTION_CUE);
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(3),
+        Stroke::new(
+            if selected { 1.5 } else { 1.0 },
+            if selected { theme::CLIP_SELECTED } else { theme::SEPARATOR },
+        ),
+        egui::StrokeKind::Inside,
+    );
+
+    // Lines are joined with a space: the lane is one line high, and a caption
+    // that reads "- Who's there? - It's me." in the timeline is still the
+    // caption the user is looking for.
+    let text = ve_caption::strip_markup(&cue.text).replace('\n', " ");
+    let text = if text.trim().is_empty() { "(empty)".to_string() } else { text };
+    if rect.width() > 24.0 {
+        painter.text(
+            Pos2::new(rect.left() + 5.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            elide(&text, rect.width() - 10.0),
+            FontId::proportional(10.0),
+            theme::TEXT,
+        );
+    }
 }
 
 /// A slim indicator of how far down the track stack is scrolled.
@@ -946,6 +1089,7 @@ fn handle_pointer(
     sequence: &Sequence,
     response: &egui::Response,
     lanes: &[Lane],
+    caption_lanes: &[CaptionLane],
     ruler: Rect,
     lanes_left: f32,
     actions: &mut Vec<Action>,
@@ -962,6 +1106,13 @@ fn handle_pointer(
     // A click on a track header switch is not a gesture: it toggles and stops
     // there, so it is answered before any drag can be started.
     if response.clicked() && pointer.x < lanes_left && pointer.y > ruler.bottom() {
+        // A caption lane's header has no switches, only the track it names.
+        if let Some(lane) = caption_lanes.iter().find(|l| l.rect.y_range().contains(pointer.y))
+        {
+            actions.push(Action::SelectCaptionTrack(lane.track));
+            state.drag = TimelineDrag::None;
+            return;
+        }
         if let Some((track, flag, value)) = hit_test_switch(sequence, lanes, pointer) {
             actions.push(Action::SetTrackFlag { track, flag, value });
         }
@@ -986,6 +1137,37 @@ fn handle_pointer(
 
         if grab.y <= ruler.bottom() {
             state.drag = TimelineDrag::Playhead;
+        } else if let Some(lane) = caption_lanes.iter().find(|l| l.rect.contains(grab)) {
+            actions.push(Action::SelectCaptionTrack(lane.track));
+            match hit_test_cue(state, sequence, lane, grab, lanes_left) {
+                Some((cue, edge)) => {
+                    actions.push(Action::SelectCue { track: lane.track, cue });
+                    state.drag = match edge {
+                        Some(edge) => TimelineDrag::TrimCue { cue, track: lane.track, edge },
+                        None => {
+                            let start = sequence
+                                .caption_track(lane.track)
+                                .and_then(|t| t.cue(cue))
+                                .map(|c| c.start)
+                                .unwrap_or(grab_time);
+                            TimelineDrag::MoveCue {
+                                cue,
+                                track: lane.track,
+                                grab_offset: grab_time - start,
+                            }
+                        }
+                    };
+                }
+                None => {
+                    // Empty caption lane: the same as empty track space, minus
+                    // the marquee — a rectangle swept over captions would have
+                    // to mean a multiple selection the commands do not have.
+                    let to = snap(state, sequence, grab_time, None);
+                    actions.push(Action::ScrubTo(to));
+                    state.drag = TimelineDrag::None;
+                }
+            }
+            return;
         } else if let Some(lane) = lanes.iter().find(|l| l.rect.contains(grab)) {
             let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
             // A fade grip is answered before anything else: it sits in a clip's
@@ -1110,6 +1292,28 @@ fn handle_pointer(
                             FadeEdgeKind::Out => FadeEdge::Out,
                         })
                         .curve,
+                    coalesce: true,
+                });
+            }
+            TimelineDrag::MoveCue { cue, track, grab_offset } => {
+                let raw = (time_at_pointer - grab_offset).clamp_non_negative();
+                // Snapped to clip edges and markers like everything else, but
+                // not to the frame grid: a caption is timed in milliseconds by
+                // both formats, and rounding every drag to a frame would make
+                // an imported file drift on its way back out.
+                let to = snap(state, sequence, raw, None);
+                actions.push(Action::MoveCueTo { track, cue, to, coalesce: true });
+            }
+            TimelineDrag::TrimCue { cue, track, edge } => {
+                let to = snap(state, sequence, time_at_pointer, None);
+                actions.push(Action::TrimCueTo {
+                    track,
+                    cue,
+                    edge: match edge {
+                        TrimEdgeKind::Start => TrimEdge::Start,
+                        TrimEdgeKind::End => TrimEdge::End,
+                    },
+                    to,
                     coalesce: true,
                 });
             }
@@ -1283,6 +1487,32 @@ fn hit_test_clip(
         None
     };
     Some((clip.id, edge))
+}
+
+/// Which caption a press landed on, and whether it took hold of an edge.
+fn hit_test_cue(
+    state: &EditorState,
+    sequence: &Sequence,
+    lane: &CaptionLane,
+    pointer: Pos2,
+    lanes_left: f32,
+) -> Option<(CueId, Option<TrimEdgeKind>)> {
+    let captions = sequence.caption_track(lane.track)?;
+    let at = state.timeline.time_at(pointer.x - lanes_left);
+    let cue = captions.cue_at(at)?;
+
+    let x0 = lanes_left + state.timeline.x_of(cue.start);
+    let x1 = lanes_left + state.timeline.x_of(cue.end());
+    let handles_fit = (x1 - x0) > TRIM_HANDLE_PX * 3.0;
+
+    let edge = if handles_fit && (pointer.x - x0).abs() <= TRIM_HANDLE_PX {
+        Some(TrimEdgeKind::Start)
+    } else if handles_fit && (x1 - pointer.x).abs() <= TRIM_HANDLE_PX {
+        Some(TrimEdgeKind::End)
+    } else {
+        None
+    };
+    Some((cue.id, edge))
 }
 
 /// Applies edge snapping, if it is on.

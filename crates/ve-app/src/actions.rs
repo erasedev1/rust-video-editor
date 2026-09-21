@@ -9,26 +9,27 @@
 use std::path::PathBuf;
 
 use ve_command::{
-    property_ref, AddClip, AddEffect, AddMarker, AddTrack, ClipProperty, Command, Compound,
-    CreateMulticamGroup, CrossfadeClips, CutToAngle, EditKeyframes, EffectHost, KeyframeEdit,
-    KeyframePoint, MoveClip, MoveEffect, MoveTrack, NewAngle, PropertyValue, RemoveClip,
-    RemoveEffect, RemoveMarker, RemoveMulticamGroup, RemoveTrack, RenameEffect,
-    ResyncMulticamGroup, RollEdit, SetAngleEnabled, SetAngleOffset, SetAssetProxy,
-    SetClipAngle, SetClipBlendMode, SetClipEnabled, SetClipFade, SetClipMotionBlur,
-    SetClipProperty, SetClipSpeed, SetCompositionSettings, SetEffectEnabled, SetEffectOption,
-    SetSequenceColorSpace, SetSequenceFormat, SetSequenceMotionBlur, SetTrackFlag,
-    SetTrackLevel, SetUseProxies, ShiftClips, SlideClip, SlipClip, SplitClip, TrackFlag,
-    TrackLevel, TrimClip, TrimEdge,
+    property_ref, AddCaptionTrack, AddClip, AddCue, AddEffect, AddMarker, AddTrack,
+    ClipProperty, Command, Compound, CreateMulticamGroup, CrossfadeClips, CutToAngle,
+    EditKeyframes, EffectHost, KeyframeEdit, KeyframePoint, MoveClip, MoveEffect, MoveTrack,
+    NewAngle, PropertyValue, RemoveCaptionTrack, RemoveClip, RemoveCue, RemoveEffect,
+    RemoveMarker, RemoveMulticamGroup, RemoveTrack, RenameEffect, ReplaceCues,
+    ResyncMulticamGroup, RetimeCue, RollEdit, SetAngleEnabled, SetAngleOffset, SetAssetProxy,
+    SetCaptionLanguage, SetClipAngle, SetClipBlendMode, SetClipEnabled, SetClipFade,
+    SetClipMotionBlur, SetClipProperty, SetClipSpeed, SetCompositionSettings, SetCueText,
+    SetEffectEnabled, SetEffectOption, SetSequenceColorSpace, SetSequenceFormat,
+    SetSequenceMotionBlur, SetTrackFlag, SetTrackLevel, SetUseProxies, ShiftClips, SlideClip,
+    SlipClip, SplitClip, TrackFlag, TrackLevel, TrimClip, TrimEdge,
 };
 use ve_core::{
-    AngleId, AssetId, BlendMode, Clip, ClipId, ColorSpace, EffectId, Fade, FadeCurve, FadeEdge,
-    Interpolation, MarkerId, MotionBlur, MulticamId, ParamValue, Project, SequenceId, Source,
-    Speed, SyncMethod, TrackId, TrackKind,
+    AngleId, AssetId, BlendMode, CaptionTrackId, Clip, ClipId, ColorSpace, CueId, EffectId,
+    Fade, FadeCurve, FadeEdge, Interpolation, MarkerId, MotionBlur, MulticamId, ParamValue,
+    Project, SequenceId, Source, Speed, SyncMethod, TrackId, TrackKind,
 };
 use ve_engine::PlaybackEngine;
 use ve_media::WaveformService;
 use ve_project::{autosave, store};
-use ve_time::Ticks;
+use ve_time::{Ticks, TimeRange};
 
 use crate::state::{AnimationMode, EditorState, PendingSync, ScopeKind, Status, TimelineTool};
 use ve_render::WaveformMode;
@@ -166,6 +167,54 @@ pub enum Action {
     /// length, without cutting.
     SwitchToAngle(usize),
     ToggleAngleViewer,
+
+    // Captions. A caption track is per language; the cues on it are text with a
+    // span, and every one of these edits states where that span now is.
+    AddCaptionTrack,
+    RemoveCaptionTrack(CaptionTrackId),
+    SetCaptionLanguage {
+        track: CaptionTrackId,
+        language: String,
+    },
+    /// Makes a caption track the one new captions land on and the preview
+    /// draws.
+    SelectCaptionTrack(CaptionTrackId),
+    SelectCue {
+        track: CaptionTrackId,
+        cue: CueId,
+    },
+    /// Puts a caption at the playhead, making a caption track first if the
+    /// sequence has none.
+    AddCaptionAtPlayhead,
+    SetCueText {
+        track: CaptionTrackId,
+        cue: CueId,
+        text: String,
+    },
+    MoveCueTo {
+        track: CaptionTrackId,
+        cue: CueId,
+        to: Ticks,
+        coalesce: bool,
+    },
+    TrimCueTo {
+        track: CaptionTrackId,
+        cue: CueId,
+        edge: TrimEdge,
+        to: Ticks,
+        coalesce: bool,
+    },
+    /// Reads a `.srt` or `.vtt` file onto a caption track of its own.
+    ImportCaptions(PathBuf),
+    /// Writes one caption track out as a file, timed from the start of the
+    /// sequence.
+    ExportCaptions {
+        track: CaptionTrackId,
+        path: PathBuf,
+    },
+    /// Whether captions are drawn over the preview.
+    ToggleCaptionOverlay,
+
     // Whether one clip is smeared across the shutter when it moves.
     SetClipMotionBlur {
         clip: ClipId,
@@ -587,6 +636,26 @@ pub fn dispatch(
         // user cannot see coming.
         Action::DeleteSelected if !state.keyframes.is_empty() => {
             delete_selected_keyframes(state, sequence_id)
+        }
+
+        // Then a caption, by the same rule: taking hold of one let go of the
+        // clips, so Delete is never ambiguous about which it means.
+        Action::DeleteSelected | Action::RippleDeleteSelected
+            if state.selection.cue.is_some() =>
+        {
+            let (Some(track), Some(cue)) = (state.selection.captions, state.selection.cue)
+            else {
+                return;
+            };
+            let command = Box::new(RemoveCue::new(sequence_id, track, cue));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.selection.cue = None;
+                    state.mark_edited();
+                    state.set_status(Status::info("caption deleted"));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
         }
 
         Action::DeleteSelected => delete_selected(state, sequence_id, false),
@@ -1557,6 +1626,127 @@ pub fn dispatch(
                 "angle viewer open — press 1-9 to cut"
             } else {
                 "angle viewer closed"
+            }));
+        }
+
+        Action::AddCaptionTrack => {
+            let id = state.project.new_caption_track_id();
+            let command = Box::new(AddCaptionTrack::new(sequence_id).with_id(id));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    state.selection.captions = Some(id);
+                    state.mark_edited();
+                    state.set_status(Status::info("caption track added"));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::RemoveCaptionTrack(track) => {
+            let command = Box::new(RemoveCaptionTrack::new(sequence_id, track));
+            match state.history.execute(&mut state.project, command) {
+                Ok(()) => {
+                    if state.selection.captions == Some(track) {
+                        state.selection.captions = None;
+                        state.selection.cue = None;
+                    }
+                    state.mark_edited();
+                    state.set_status(Status::info("caption track deleted"));
+                }
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SetCaptionLanguage { track, language } => {
+            let command = Box::new(SetCaptionLanguage::new(sequence_id, track, language));
+            match state.history.execute_coalesced(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::SelectCaptionTrack(track) => {
+            state.selection.captions = Some(track);
+            state.selection.cue = None;
+        }
+
+        Action::SelectCue { track, cue } => {
+            state.selection.select_cue(track, cue);
+            // A caption and a clip cannot both be in hand, so the animation
+            // editor's keyframes go too — they belong to a clip.
+            state.keyframes.clear();
+        }
+
+        Action::AddCaptionAtPlayhead => add_caption_at_playhead(state, sequence_id, engine),
+
+        Action::SetCueText { track, cue, text } => {
+            let command = Box::new(SetCueText::new(sequence_id, track, cue, text));
+            match state.history.execute_coalesced(&mut state.project, command) {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
+            }
+        }
+
+        Action::MoveCueTo { track, cue, to, coalesce } => {
+            let Some(current) = state
+                .project
+                .sequence(sequence_id)
+                .and_then(|s| s.caption_track(track))
+                .and_then(|t| t.cue(cue))
+            else {
+                return;
+            };
+            let command =
+                Box::new(RetimeCue::moving(sequence_id, track, cue, to, current.duration));
+            run_cue_edit(state, command, coalesce);
+        }
+
+        Action::TrimCueTo { track, cue, edge, to, coalesce } => {
+            let Some(current) = state
+                .project
+                .sequence(sequence_id)
+                .and_then(|s| s.caption_track(track))
+                .and_then(|t| t.cue(cue))
+            else {
+                return;
+            };
+            let span = match edge {
+                TrimEdge::Start => TimeRange::from_bounds(to, current.end()),
+                TrimEdge::End => TimeRange::from_bounds(current.start, to),
+            };
+            if span.duration.raw() <= 0 {
+                return;
+            }
+            let command = Box::new(RetimeCue::trimming(sequence_id, track, cue, span));
+            run_cue_edit(state, command, coalesce);
+        }
+
+        Action::ImportCaptions(path) => import_captions(state, sequence_id, &path),
+
+        Action::ExportCaptions { track, path } => {
+            let Some(captions) =
+                state.project.sequence(sequence_id).and_then(|s| s.caption_track(track))
+            else {
+                state.set_status(Status::warning("that caption track is gone"));
+                return;
+            };
+            match ve_caption::write(&path, captions.cues()) {
+                Ok(()) => state.set_status(Status::info(format!(
+                    "wrote {} caption{} to {}",
+                    captions.len(),
+                    plural(captions.len()),
+                    path.display()
+                ))),
+                Err(e) => state.set_status(Status::error(e.to_string())),
+            }
+        }
+
+        Action::ToggleCaptionOverlay => {
+            state.show_captions = !state.show_captions;
+            state.set_status(Status::info(if state.show_captions {
+                "captions shown over the preview"
+            } else {
+                "captions hidden — they are still exported"
             }));
         }
 
@@ -2551,5 +2741,157 @@ fn paste_keyframes(state: &mut EditorState, engine: &PlaybackEngine, sequence: S
             state.set_status(Status::info(format!("pasted {count} keyframe{}", plural(count))));
         }
         Err(e) => state.set_status(Status::warning(e.to_string())),
+    }
+}
+
+/// Runs a cue edit, coalescing it into the gesture in progress when asked.
+///
+/// A refused step is ordinary during a drag — the pointer is over the
+/// neighbouring cue — so it leaves the status bar alone rather than flashing a
+/// message on every pointer move.
+fn run_cue_edit(state: &mut EditorState, command: Box<dyn Command>, coalesce: bool) {
+    let result = if coalesce {
+        state.history.execute_coalesced(&mut state.project, command)
+    } else {
+        state.history.execute(&mut state.project, command)
+    };
+    match result {
+        Ok(()) => state.mark_edited(),
+        Err(_) if coalesce => {}
+        Err(e) => state.set_status(Status::warning(e.to_string())),
+    }
+}
+
+/// Puts a caption at the playhead.
+///
+/// Three decisions worth stating. It goes on the **selected** caption track, or
+/// the first one, or a new one if the sequence has none — asking the user to
+/// make a track before they can write a caption would be a form to fill in.
+/// It is **two seconds** long, which is what a line of dialogue needs to be
+/// read. And it is shortened rather than refused when the next caption is
+/// closer than that, because a caption every second is a real thing that fast
+/// dialogue needs.
+fn add_caption_at_playhead(
+    state: &mut EditorState,
+    sequence: SequenceId,
+    engine: &PlaybackEngine,
+) {
+    let at = engine.clock().position();
+    let existing = state
+        .selection
+        .captions
+        .filter(|id| {
+            state.project.sequence(sequence).is_some_and(|s| s.caption_track(*id).is_some())
+        })
+        .or_else(|| state.project.sequence(sequence)?.captions.first().map(|t| t.id));
+
+    let mut command = Compound::new("Add Caption");
+    let track = match existing {
+        Some(track) => track,
+        None => {
+            let id = state.project.new_caption_track_id();
+            command.push(Box::new(AddCaptionTrack::new(sequence).with_id(id)));
+            id
+        }
+    };
+
+    // How much room there is before the next caption. A caption laid over its
+    // neighbour is refused by the model, so the length is chosen to fit rather
+    // than offered and rejected.
+    let room = match state.project.sequence(sequence).and_then(|s| s.caption_track(track)) {
+        Some(captions) => {
+            if captions.cue_at(at).is_some() {
+                state.set_status(Status::warning("there is already a caption here"));
+                return;
+            }
+            captions
+                .cues()
+                .iter()
+                .find(|c| c.start > at)
+                .map(|c| c.start - at)
+                .unwrap_or(ve_caption::DEFAULT_CUE_DURATION)
+        }
+        None => ve_caption::DEFAULT_CUE_DURATION,
+    };
+    let duration = room.min(ve_caption::DEFAULT_CUE_DURATION);
+    if duration.raw() <= 0 {
+        state.set_status(Status::warning("there is no room for a caption here"));
+        return;
+    }
+
+    let cue_id = state.project.new_cue_id();
+    command.push(Box::new(
+        AddCue::new(sequence, track, TimeRange::new(at, duration), "").with_id(cue_id),
+    ));
+
+    match state.history.execute(&mut state.project, Box::new(command)) {
+        Ok(()) => {
+            state.selection.select_cue(track, cue_id);
+            state.mark_edited();
+            state.set_status(Status::info("caption added — type it in the inspector"));
+        }
+        Err(e) => state.set_status(Status::warning(e.to_string())),
+    }
+}
+
+/// Reads a caption file onto a caption track of its own.
+///
+/// A new track every time, rather than replacing what is on the selected one:
+/// an import is usually a language arriving, and quietly overwriting an hour of
+/// someone's corrections because the wrong lane was selected is not a mistake
+/// worth making possible. The language comes from the file's name when it
+/// carries one — `film.pt-BR.srt` — so the track arrives tagged.
+fn import_captions(state: &mut EditorState, sequence: SequenceId, path: &std::path::Path) {
+    let file = match ve_caption::read(path) {
+        Ok(file) => file,
+        Err(e) => {
+            state.set_status(Status::error(e.to_string()));
+            return;
+        }
+    };
+    let warnings = file.warnings.clone();
+    let language = ve_caption::language_from_path(path);
+
+    let track_id = state.project.new_caption_track_id();
+    let mut add = AddCaptionTrack::new(sequence).with_id(track_id);
+    if let Some(language) = language.clone() {
+        add = add.with_language(language);
+    }
+
+    let cues = {
+        let project = &mut state.project;
+        file.into_cues(|| project.new_cue_id())
+    };
+    let count = cues.len();
+    let command = Compound::new("Import Captions")
+        .with(Box::new(add))
+        .with(Box::new(ReplaceCues::new(sequence, track_id, cues)));
+
+    match state.history.execute(&mut state.project, Box::new(command)) {
+        Ok(()) => {
+            state.selection.captions = Some(track_id);
+            state.selection.cue = None;
+            state.mark_edited();
+            let mut line = format!("imported {count} caption{}", plural(count));
+            if let Some(language) = language {
+                line.push_str(&format!(" as {language}"));
+            }
+            // The file's own problems are worth saying out loud: a caption
+            // dropped silently is a line of dialogue nobody will see missing
+            // until it is delivered.
+            if let Some(first) = warnings.first() {
+                line.push_str(&format!(" — {first}"));
+                if warnings.len() > 1 {
+                    line.push_str(&format!(" (and {} more)", warnings.len() - 1));
+                }
+            }
+            state.set_status(if warnings.is_empty() {
+                Status::info(line)
+            } else {
+                Status::warning(line)
+            });
+            state.warnings.extend(warnings);
+        }
+        Err(e) => state.set_status(Status::error(e.to_string())),
     }
 }

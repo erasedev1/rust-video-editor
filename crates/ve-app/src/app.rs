@@ -524,6 +524,85 @@ impl VergeApp {
                     }
                 });
 
+                ui.menu_button("Captions", |ui| {
+                    if ui.button("Add Caption at Playhead    C").clicked() {
+                        actions_out.push(Action::AddCaptionAtPlayhead);
+                        ui.close();
+                    }
+                    if ui.button("New Caption Track").clicked() {
+                        actions_out.push(Action::AddCaptionTrack);
+                        ui.close();
+                    }
+                    let showing = self.state.show_captions;
+                    if ui
+                        .button(if showing {
+                            "Hide Over Preview    Shift+C"
+                        } else {
+                            "Show Over Preview    Shift+C"
+                        })
+                        .on_hover_text("an overlay in the editor; an export writes the files")
+                        .clicked()
+                    {
+                        actions_out.push(Action::ToggleCaptionOverlay);
+                        ui.close();
+                    }
+                    ui.separator();
+
+                    if ui.button("Import Captions…").clicked() {
+                        if let Some(path) = crate::dialogs::pick_caption_file_to_open() {
+                            actions_out.push(Action::ImportCaptions(path));
+                        }
+                        ui.close();
+                    }
+
+                    // Everything below acts on the caption track last touched,
+                    // which is also the one the preview draws.
+                    let target = self.state.selection.captions;
+                    let track =
+                        target.and_then(|id| self.state.active_sequence()?.caption_track(id));
+                    match track {
+                        Some(track) => ui.label(
+                            egui::RichText::new(format!(
+                                "Selected: {} ({}, {} caption(s))",
+                                track.name,
+                                track.language,
+                                track.len()
+                            ))
+                            .small()
+                            .color(theme::TEXT_DIM),
+                        ),
+                        None => ui.label(
+                            egui::RichText::new("No caption track selected")
+                                .small()
+                                .color(theme::TEXT_FAINT),
+                        ),
+                    };
+
+                    let (language, name) =
+                        track.map(|t| (t.language.clone(), t.name.clone())).unwrap_or_default();
+                    if ui
+                        .add_enabled(track.is_some(), egui::Button::new("Export Captions…"))
+                        .clicked()
+                    {
+                        if let (Some(id), Some(path)) = (
+                            target,
+                            crate::dialogs::pick_caption_file_to_save(&format!(
+                                "{name}.{language}"
+                            )),
+                        ) {
+                            actions_out.push(Action::ExportCaptions { track: id, path });
+                        }
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(track.is_some(), egui::Button::new("Delete Caption Track"))
+                        .clicked()
+                    {
+                        actions_out.extend(target.map(Action::RemoveCaptionTrack));
+                        ui.close();
+                    }
+                });
+
                 ui.menu_button("Marker", |ui| {
                     if ui.button("Add Marker    M").clicked() {
                         actions_out.push(Action::AddMarkerAtPlayhead);

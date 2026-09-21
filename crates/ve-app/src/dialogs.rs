@@ -71,3 +71,31 @@ pub fn pick_project_to_save(suggested: &str) -> Option<PathBuf> {
         None => path.with_extension(ve_project::PROJECT_EXTENSION),
     })
 }
+
+/// Extensions offered in the caption dialogs.
+const CAPTION_EXTENSIONS: &[&str] = &["srt", "vtt"];
+
+pub fn pick_caption_file_to_open() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Captions", CAPTION_EXTENSIONS)
+        .set_title("Import captions")
+        .pick_file()
+}
+
+/// Where a caption track should be written.
+///
+/// The suggested name carries the track's language, because that is the
+/// convention a player reads to find the right file — `film.pt-BR.srt`.
+pub fn pick_caption_file_to_save(suggested: &str) -> Option<PathBuf> {
+    let path = rfd::FileDialog::new()
+        .add_filter("Captions", CAPTION_EXTENSIONS)
+        .set_file_name(format!("{suggested}.srt"))
+        .set_title("Export captions")
+        .save_file()?;
+    // Without an extension there would be no format to write, so the default
+    // is the one almost everything reads.
+    Some(match path.extension() {
+        Some(_) => path,
+        None => path.with_extension("srt"),
+    })
+}

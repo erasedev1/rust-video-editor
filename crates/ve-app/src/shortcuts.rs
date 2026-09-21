@@ -135,6 +135,15 @@ pub fn collect(
         if i.consume_key(plain, Key::W) {
             actions.push(Action::ToggleScopes);
         }
+        // C for caption, and Shift+C for whether they are drawn over the
+        // picture — the one you reach for while grading a shot with dialogue
+        // over it.
+        if i.consume_key(plain, Key::C) {
+            actions.push(Action::AddCaptionAtPlayhead);
+        }
+        if i.consume_key(shift, Key::C) {
+            actions.push(Action::ToggleCaptionOverlay);
+        }
         if i.consume_key(plain, Key::A) {
             actions.push(Action::ToggleAnimationEditor);
         }
@@ -196,6 +205,8 @@ pub const BINDINGS: &[Binding] = &[
     Binding { label: "Ripple delete", keys: "Shift + Delete" },
     Binding { label: "Close gap at playhead", keys: "Ctrl + Backspace" },
     Binding { label: "Crossfade two overlapping clips", keys: "Ctrl + Shift + F" },
+    Binding { label: "Add a caption at the playhead", keys: "C" },
+    Binding { label: "Show captions over the preview", keys: "Shift + C" },
     Binding { label: "Angle viewer", keys: "Ctrl + M" },
     Binding { label: "Cut to an angle", keys: "1 – 9" },
     Binding { label: "Switch to an angle without cutting", keys: "Shift + 1 – 9" },

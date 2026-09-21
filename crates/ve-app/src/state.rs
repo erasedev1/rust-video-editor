@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ve_command::{ClipProperty, History, KeyframePoint};
-use ve_core::{AssetId, Clip, ClipId, CompositionId, LayerId, Project, SequenceId, TrackId};
+use ve_core::{
+    AssetId, CaptionTrackId, Clip, ClipId, CompositionId, CueId, LayerId, Project, SequenceId,
+    TrackId,
+};
 use ve_engine::{Timebase, Viewing};
 use ve_export::{ExportJob, ExportSettings, ProxyJob, ProxyScale};
 use ve_metrics::Metrics;
@@ -23,6 +26,13 @@ pub struct Selection {
     /// The track most recently interacted with, which is where a paste or an
     /// import-to-timeline lands.
     pub track: Option<TrackId>,
+    /// The caption track most recently interacted with: where a new caption
+    /// goes, and which track's cues the preview draws.
+    pub captions: Option<CaptionTrackId>,
+    /// The caption in hand. Separate from `clips` for the reason keyframes are
+    /// separate: the two answer different questions, and a cue being selected
+    /// must not make Delete take a clip.
+    pub cue: Option<CueId>,
     pub asset: Option<AssetId>,
 }
 
@@ -35,9 +45,13 @@ impl Selection {
         self.clips.clear();
         self.clips.push(clip);
         self.track = Some(track);
+        // Taking hold of a clip lets go of a caption, so Delete is never
+        // ambiguous about which of the two it means.
+        self.cue = None;
     }
 
     pub fn toggle(&mut self, clip: ClipId, track: TrackId) {
+        self.cue = None;
         match self.clips.iter().position(|c| *c == clip) {
             Some(i) => {
                 self.clips.remove(i);
@@ -50,6 +64,19 @@ impl Selection {
     pub fn clear(&mut self) {
         self.clips.clear();
         self.layers.clear();
+        self.cue = None;
+    }
+
+    /// Takes hold of a caption, letting go of any clips.
+    ///
+    /// The same rule the keyframe selection follows: whichever was taken hold
+    /// of last is what Delete acts on, so the two can coexist without Delete
+    /// ever being ambiguous.
+    pub fn select_cue(&mut self, track: CaptionTrackId, cue: CueId) {
+        self.clips.clear();
+        self.layers.clear();
+        self.captions = Some(track);
+        self.cue = Some(cue);
     }
 
     pub fn select_only_layer(&mut self, layer: LayerId) {
@@ -587,6 +614,12 @@ pub enum TimelineDrag {
     /// pointer says it is, measured from that end, so the gesture states an
     /// absolute destination and merges into one undo step like every other drag.
     FadeHandle { clip: ClipId, edge: FadeEdgeKind },
+    /// Sliding a caption along its track. `grab_offset` is how far into the cue
+    /// the pointer took hold, as for a clip.
+    MoveCue { cue: CueId, track: CaptionTrackId, grab_offset: Ticks },
+    /// Dragging a caption's edge. A cue has no source to run out of, so the
+    /// only limit is the neighbour.
+    TrimCue { cue: CueId, track: CaptionTrackId, edge: TrimEdgeKind },
 }
 
 /// Which end of a clip a fade drag has hold of. Mirrors `ve_core::FadeEdge`
@@ -759,6 +792,14 @@ pub struct EditorState {
     /// about the sequence — which is what "open a composition" has to mean for
     /// it to be editable at all.
     pub open_composition: Option<CompositionId>,
+    /// Whether captions are drawn over the preview.
+    ///
+    /// A view setting rather than project data. A track that could be hidden
+    /// from the preview *and* from an export would be a trap — hide it to check
+    /// a shot, deliver without it, find out from the client — so what the
+    /// preview draws is a switch in the editor and an export always writes
+    /// every caption track it is asked for.
+    pub show_captions: bool,
     /// Whether the angle viewer is open. Off by default: it costs a decode per
     /// camera per frame, which is not a price to pay for a timeline that has no
     /// multicam in it.
@@ -804,6 +845,7 @@ impl EditorState {
             export: ExportState::default(),
             proxies: ProxyState::default(),
             open_composition: None,
+            show_captions: true,
             show_angle_viewer: false,
             multicam_picks: Vec::new(),
             pending_sync: None,

@@ -36,6 +36,10 @@ pub const CLIP_VIDEO_TOP: Color32 = Color32::from_rgb(0x3c, 0x63, 0x85);
 pub const CLIP_AUDIO: Color32 = Color32::from_rgb(0x2c, 0x53, 0x45);
 pub const CLIP_AUDIO_TOP: Color32 = Color32::from_rgb(0x38, 0x69, 0x57);
 pub const CLIP_SELECTED: Color32 = Color32::from_rgb(0xf0, 0xf4, 0xf8);
+/// A caption on the timeline. Deliberately unlike either clip colour: a cue is
+/// text rather than media, and a lane of them should not read as a third kind
+/// of track.
+pub const CAPTION_CUE: Color32 = Color32::from_rgb(0x46, 0x3b, 0x60);
 pub const CLIP_DISABLED: Color32 = Color32::from_rgb(0x30, 0x33, 0x38);
 
 /// The waveform inside an audio clip. Two tones: the peak envelope, and the

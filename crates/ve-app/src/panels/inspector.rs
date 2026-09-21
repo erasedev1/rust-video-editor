@@ -29,6 +29,14 @@ pub fn show(
     ui.separator();
 
     let Some(sequence) = state.active_sequence() else { return };
+
+    // A caption in hand takes the panel: it is what the user is editing, and
+    // the clip underneath it is not what they asked about.
+    if state.selection.cue.is_some() {
+        caption_section(ui, state, actions);
+        return;
+    }
+
     let Some(clip_id) = state.selection.only() else {
         ui.add_space(12.0);
         ui.vertical_centered(|ui| {
@@ -53,6 +61,7 @@ pub fn show(
         // the panel is otherwise empty, and they describe what the preview is
         // showing.
         track_section(ui, state, levels, actions);
+        caption_track_section(ui, state, actions);
         canvas_section(ui, state, actions);
         return;
     };
@@ -919,6 +928,125 @@ fn track_section(
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(width, 12.0), egui::Sense::hover());
             meter::draw(ui.painter(), rect, levels.track(track_id));
+        });
+    });
+}
+
+/// The selected caption: its text, and where it sits.
+///
+/// The text box is the point of the panel. It is multi-line because a caption
+/// is one or two lines and the line break is the only formatting either file
+/// format carries — so where the line breaks is an editorial decision, and it
+/// has to be made here rather than by whatever wraps the text later.
+fn caption_section(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
+    let Some(sequence) = state.active_sequence() else { return };
+    let Some(track_id) = state.selection.captions else { return };
+    let Some(cue_id) = state.selection.cue else { return };
+    let Some(captions) = sequence.caption_track(track_id) else { return };
+    let Some(cue) = captions.cue(cue_id) else { return };
+
+    section(ui, &format!("CAPTION — {}", captions.name), |ui| {
+        let mut text = cue.text.clone();
+        let response = ui.add(
+            egui::TextEdit::multiline(&mut text)
+                .desired_width(f32::INFINITY)
+                .desired_rows(2)
+                .hint_text("the line as it will be read"),
+        );
+        if response.changed() {
+            actions.push(Action::SetCueText { track: track_id, cue: cue_id, text });
+        }
+        // The gesture ends when the box loses focus, so the next edit to the
+        // same caption is its own undo step rather than being absorbed.
+        if response.lost_focus() {
+            actions.push(Action::EndGesture);
+        }
+
+        ui.horizontal(|ui| {
+            property_label(ui, "Start", false);
+            let mut start = cue.start.as_secs_f64();
+            if ui
+                .add(DragValue::new(&mut start).speed(0.01).suffix(" s").max_decimals(3))
+                .changed()
+            {
+                actions.push(Action::MoveCueTo {
+                    track: track_id,
+                    cue: cue_id,
+                    to: Ticks::from_secs_f64(start),
+                    coalesce: true,
+                });
+            }
+            ui.label(
+                RichText::new(sequence.timecode_at(cue.start).to_string())
+                    .small()
+                    .monospace()
+                    .color(theme::TEXT_FAINT),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            property_label(ui, "End", false);
+            let mut end = cue.end().as_secs_f64();
+            if ui
+                .add(DragValue::new(&mut end).speed(0.01).suffix(" s").max_decimals(3))
+                .changed()
+            {
+                actions.push(Action::TrimCueTo {
+                    track: track_id,
+                    cue: cue_id,
+                    edge: ve_command::TrimEdge::End,
+                    to: Ticks::from_secs_f64(end),
+                    coalesce: true,
+                });
+            }
+            // Reading speed is the number a captioner actually works to, and
+            // the one thing about a cue that cannot be seen by looking at it.
+            let characters = cue.text.chars().filter(|c| !c.is_control()).count();
+            let seconds = cue.duration.as_secs_f64();
+            if seconds > 0.0 && characters > 0 {
+                let rate = characters as f64 / seconds;
+                ui.label(
+                    RichText::new(format!("{rate:.0} cps"))
+                        .small()
+                        .monospace()
+                        .color(if rate > 20.0 { theme::WARNING } else { theme::TEXT_FAINT }),
+                )
+                .on_hover_text(
+                    "characters per second — above about 20 is faster than most \
+                     people read",
+                );
+            }
+        });
+    });
+
+    caption_track_section(ui, state, actions);
+}
+
+/// The selected caption track: what language it is, and what becomes of it.
+fn caption_track_section(ui: &mut Ui, state: &EditorState, actions: &mut Vec<Action>) {
+    let Some(sequence) = state.active_sequence() else { return };
+    let Some(track_id) = state.selection.captions else { return };
+    let Some(captions) = sequence.caption_track(track_id) else { return };
+
+    section(ui, &format!("CAPTION TRACK — {}", captions.name), |ui| {
+        ui.horizontal(|ui| {
+            property_label(ui, "Language", false);
+            let mut language = captions.language.clone();
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut language).desired_width(70.0).hint_text("en"),
+            );
+            if response.changed() {
+                actions.push(Action::SetCaptionLanguage { track: track_id, language });
+            }
+            if response.lost_focus() {
+                actions.push(Action::EndGesture);
+            }
+            ui.label(
+                RichText::new(format!("{} caption(s)", captions.len()))
+                    .small()
+                    .color(theme::TEXT_FAINT),
+            )
+            .on_hover_text("the language tag names the file this track exports to");
         });
     });
 }

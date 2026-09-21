@@ -51,6 +51,16 @@ impl AddCaptionTrack {
         self
     }
 
+    /// Uses an ID the caller has already allocated.
+    ///
+    /// For a compound that has to name the track in a *later* command — an
+    /// import is "make a track" then "put these cues on it" — where the ID has
+    /// to exist before either command runs.
+    pub fn with_id(mut self, id: CaptionTrackId) -> Self {
+        self.track_id = Some(id);
+        self
+    }
+
     pub fn track_id(&self) -> Option<CaptionTrackId> {
         self.track_id
     }
@@ -229,6 +239,13 @@ impl AddCue {
         text: impl Into<String>,
     ) -> Self {
         AddCue { sequence, track, span, text: text.into(), cue_id: None }
+    }
+
+    /// Uses an ID the caller has already allocated, so a compound — or the
+    /// selection that follows the edit — can name the cue before it exists.
+    pub fn with_id(mut self, id: CueId) -> Self {
+        self.cue_id = Some(id);
+        self
     }
 
     pub fn cue_id(&self) -> Option<CueId> {
