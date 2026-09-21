@@ -15,10 +15,14 @@
 
 use std::any::Any;
 
-use ve_core::{Clip, ClipId, CompositionId, CoreError, LayerId, Project, SequenceId, TrackId};
+use ve_core::{
+    CaptionTrackId, Clip, ClipId, CompositionId, CoreError, CueId, LayerId, Project,
+    SequenceId, TrackId,
+};
 use ve_time::Ticks;
 
 mod audio_commands;
+mod caption_commands;
 mod clip_commands;
 mod composition_commands;
 mod edit_commands;
@@ -31,6 +35,10 @@ mod proxy_commands;
 mod structure_commands;
 
 pub use audio_commands::{CrossfadeClips, SetClipFade, SetTrackLevel, TrackLevel};
+pub use caption_commands::{
+    AddCaptionTrack, AddCue, CueGesture, RemoveCaptionTrack, RemoveCue, ReplaceCues, RetimeCue,
+    SetCaptionLanguage, SetCueText,
+};
 pub use clip_commands::{AddClip, MoveClip, RemoveClip, SplitClip, TrimClip, TrimEdge};
 pub use composition_commands::{
     composition_clip, AddComposition, AddLayer, LayerEdge, LayerFlag, MoveLayer,
@@ -112,6 +120,10 @@ pub enum CommandError {
     CompositionNotFound(CompositionId),
     #[error("layer {0} not found")]
     LayerNotFound(LayerId),
+    #[error("caption track {0} not found")]
+    CaptionTrackNotFound(CaptionTrackId),
+    #[error("caption {0} not found")]
+    CueNotFound(CueId),
     #[error("nothing to undo")]
     NothingToUndo,
     #[error("nothing to redo")]
@@ -165,6 +177,8 @@ impl From<CoreError> for CommandError {
             CoreError::SequenceNotFound(id) => CommandError::SequenceNotFound(id),
             CoreError::CompositionNotFound(id) => CommandError::CompositionNotFound(id),
             CoreError::LayerNotFound(id) => CommandError::LayerNotFound(id),
+            CoreError::CaptionTrackNotFound(id) => CommandError::CaptionTrackNotFound(id),
+            CoreError::CueNotFound(id) => CommandError::CueNotFound(id),
             other => CommandError::Core(other),
         }
     }
