@@ -174,6 +174,10 @@ impl ProxySettings {
             audio: None,
             // The whole point.
             keyframes: Keyframes::EveryFrame,
+            // A proxy stands in for one file's picture. Captions belong to the
+            // sequence, and a folder of them beside every proxy would be
+            // meaningless as well as a surprise.
+            captions: None,
         }
     }
 

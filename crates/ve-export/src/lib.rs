@@ -21,6 +21,7 @@
 //! # Structure
 //!
 //! * [`settings`] — what to write, where, and how. Plain data, no codecs.
+//! * [`captions`] — the caption files written beside the delivery.
 //! * [`proxy`] — building the smaller stand-ins the editor cuts against.
 //! * [`compose`] — one instant to a picture on the GPU, shared with the preview.
 //! * [`sources`] — blocking decoders, one per asset.
@@ -29,6 +30,7 @@
 
 use std::path::PathBuf;
 
+pub mod captions;
 pub mod compose;
 pub mod job;
 pub mod proxy;
@@ -36,6 +38,7 @@ pub mod settings;
 pub mod sources;
 pub mod writer;
 
+pub use captions::write_sidecars;
 pub use compose::FrameComposer;
 pub use job::{run, Cancel, ExportEvent, ExportJob, ExportReport, Progress};
 pub use proxy::{

@@ -115,6 +115,9 @@ pub struct ExportReport {
     pub bytes: u64,
     pub video_encoder: String,
     pub audio_encoder: Option<String>,
+    /// Caption files written beside the delivery, one per caption track that
+    /// had anything to say inside the exported range.
+    pub captions: Vec<PathBuf>,
     /// Layers that should have been drawn and were not, because their media
     /// would not decode. Reported rather than swallowed: a delivery missing a
     /// layer is worse than an export that says it went wrong.
@@ -157,6 +160,13 @@ impl ExportReport {
         );
         if self.missing_frames > 0 {
             line.push_str(&format!(" — {} layers could not be decoded", self.missing_frames));
+        }
+        if !self.captions.is_empty() {
+            line.push_str(&format!(
+                " — {} caption file{}",
+                self.captions.len(),
+                if self.captions.len() == 1 { "" } else { "s" }
+            ));
         }
         if self.clipped_samples > 0 {
             line.push_str(&format!(" — {} samples clipped", self.clipped_samples));
@@ -342,6 +352,21 @@ pub fn run(
         return Err(e);
     }
 
+    // After the trailer, never before: a cancelled export deletes its file, and
+    // a folder of caption files beside a delivery that no longer exists would
+    // be worse than none. The picture is finished, so these cannot fail the
+    // export either — what goes wrong here is reported as a problem.
+    let mut problems = sources.problems().to_vec();
+    let captions = match settings.captions {
+        Some(format) => {
+            let (written, trouble) =
+                crate::captions::write_sidecars(sequence, &settings.path, range, format);
+            problems.extend(trouble);
+            written
+        }
+        None => Vec::new(),
+    };
+
     let bytes = std::fs::metadata(&settings.path).map(|m| m.len()).unwrap_or(0);
     Ok(ExportReport {
         path: settings.path.clone(),
@@ -351,10 +376,11 @@ pub fn run(
         bytes,
         video_encoder,
         audio_encoder,
+        captions,
         missing_frames: sources.missing_frames(),
         clipped_samples,
         peak,
-        problems: sources.problems().to_vec(),
+        problems,
     })
 }
 

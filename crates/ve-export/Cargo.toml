@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 ve-core = { workspace = true }
+ve-caption = { workspace = true }
 ve-time = { workspace = true }
 ve-media = { workspace = true }
 ve-render = { workspace = true }

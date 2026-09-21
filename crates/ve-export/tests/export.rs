@@ -534,3 +534,88 @@ fn an_export_renders_the_original_even_when_the_editor_is_cutting_on_proxies() {
         );
     }
 }
+
+/// Puts one caption track on the fixture's sequence and returns its cues' text.
+fn add_captions(f: &mut Fixture, language: &str, cues: &[(i64, i64, &str)]) {
+    let track = f.project.new_caption_track_id();
+    let sequence = f.project.sequence_mut(f.sequence).unwrap();
+    sequence.add_caption_track(track);
+    let captions = sequence.caption_track_mut(track).unwrap();
+    captions.language = language.to_string();
+    for (start_ms, length_ms, text) in cues {
+        let id = ve_core::CueId::from_raw(1_000 + captions.len() as u64);
+        captions
+            .insert_cue(ve_core::Cue::new(
+                id,
+                Ticks::from_millis(*start_ms),
+                Ticks::from_millis(*length_ms),
+                *text,
+            ))
+            .unwrap();
+    }
+}
+
+#[test]
+fn an_export_writes_its_captions_beside_the_file() {
+    let mut f = fixture();
+    f.add_video(Ticks::ZERO, Ticks::from_seconds(2));
+    add_captions(&mut f, "en", &[(0, 1_000, "Hello there."), (1_200, 700, "- Who's there?")]);
+
+    let settings = f.settings("captioned.mp4");
+    let report = f.export(&settings);
+
+    assert_eq!(report.captions.len(), 1);
+    let sidecar = &report.captions[0];
+    assert_eq!(sidecar, &f.path("captioned.en.srt"));
+    let text = std::fs::read_to_string(sidecar).unwrap();
+    assert!(text.contains("00:00:00,000 --> 00:00:01,000"), "{text}");
+    assert!(text.contains("Hello there."), "{text}");
+    assert!(report.summary().contains("1 caption file"), "{}", report.summary());
+}
+
+#[test]
+fn captions_can_be_left_out_of_a_delivery() {
+    let mut f = fixture();
+    f.add_video(Ticks::ZERO, Ticks::from_seconds(1));
+    add_captions(&mut f, "en", &[(0, 500, "not wanted here")]);
+
+    let settings = f.settings("plain.mp4").with_captions(None);
+    let report = f.export(&settings);
+
+    assert!(report.captions.is_empty());
+    assert!(!f.path("plain.en.srt").exists());
+}
+
+#[test]
+fn a_cancelled_export_leaves_no_caption_files_either() {
+    let mut f = fixture();
+    f.add_video(Ticks::ZERO, Ticks::from_seconds(3));
+    add_captions(&mut f, "en", &[(0, 1_000, "orphan")]);
+
+    let settings = f.settings("cancelled-captions.mp4");
+    let cancel = Cancel::new();
+    cancel.cancel();
+    let result =
+        run(&f.project, f.sequence, &settings, gpu(), &Metrics::new(), &cancel, |_| {});
+    assert!(result.expect_err("cancelled").is_cancellation());
+
+    // The sidecars are written after the trailer, so there is no window in
+    // which they outlive the delivery they belong to.
+    assert!(!f.path("cancelled-captions.en.srt").exists());
+}
+
+#[test]
+fn exporting_part_of_a_sequence_re_times_its_captions_to_the_new_start() {
+    let mut f = fixture();
+    f.add_video(Ticks::ZERO, Ticks::from_seconds(4));
+    add_captions(&mut f, "en", &[(0, 900, "before the in point"), (2_000, 1_000, "inside")]);
+
+    let range = TimeRange::from_bounds(Ticks::from_seconds(1), Ticks::from_seconds(3));
+    let settings = f.settings("excerpt.mp4").with_range(ExportRange::Span(range));
+    let report = f.export(&settings);
+
+    let text = std::fs::read_to_string(&report.captions[0]).unwrap();
+    assert!(!text.contains("before the in point"), "{text}");
+    // Two seconds into the sequence is one second into this delivery.
+    assert!(text.contains("00:00:01,000 --> 00:00:02,000"), "{text}");
+}

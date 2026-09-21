@@ -74,6 +74,7 @@ fn make_source(path: &Path) {
         audio: None,
         // What a camera writes, and what a proxy is compared against.
         keyframes: Keyframes::EverySecond,
+        captions: None,
     };
     let mut writer = MediaWriter::create(&settings, SOURCE).expect("creating the source");
     for i in 0..FRAMES {

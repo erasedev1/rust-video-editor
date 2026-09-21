@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
+use ve_caption::CaptionFormat;
 use ve_core::{Sequence, Size};
 use ve_time::{Rate, SampleRate, Ticks, TimeRange};
 
@@ -287,6 +288,14 @@ pub struct ExportSettings {
     /// How often a keyframe is written. A delivery wants one a second; a file
     /// that will be scrubbed wants every frame.
     pub keyframes: Keyframes,
+    /// The format caption tracks are written beside the file in, or `None` to
+    /// write none at all.
+    ///
+    /// On by default, because a sequence only has caption tracks if somebody
+    /// made them, and a delivery that quietly left them behind would be
+    /// discovered by whoever played it. A sequence with no captions writes no
+    /// files either way.
+    pub captions: Option<CaptionFormat>,
 }
 
 impl ExportSettings {
@@ -302,6 +311,7 @@ impl ExportSettings {
             quality: Quality::Standard,
             audio: Some(AudioSettings::for_sequence(sequence)),
             keyframes: Keyframes::EverySecond,
+            captions: Some(CaptionFormat::SubRip),
         }
     }
 
@@ -322,6 +332,11 @@ impl ExportSettings {
 
     pub fn with_keyframes(mut self, keyframes: Keyframes) -> Self {
         self.keyframes = keyframes;
+        self
+    }
+
+    pub fn with_captions(mut self, captions: Option<CaptionFormat>) -> Self {
+        self.captions = captions;
         self
     }
 
