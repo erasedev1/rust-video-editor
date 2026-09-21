@@ -8,7 +8,8 @@ use std::time::Duration;
 use ve_core::registry::kinds;
 use ve_core::{
     builtin_registry, BlendMode, Clip, CompositionLayer, CompositionSettings, Cue, Effect,
-    FadeCurve, Interpolation, MediaInfo, ParamValue, Project, Size, Source, VideoStreamInfo,
+    FadeCurve, GraphicContent, Interpolation, MediaInfo, ParamValue, Project, Rgba, Shape,
+    ShapeKind, Size, Source, Text, TextAlign, Vec2, VideoStreamInfo,
 };
 use ve_project::{autosave, store, Autosave, ProjectError, FORMAT_MAGIC, FORMAT_VERSION};
 use ve_time::{Rate, Ticks};
@@ -1257,4 +1258,104 @@ fn captions_that_overlap_in_a_hand_edited_file_are_repaired_rather_than_refused(
     assert_eq!(captions.len(), 2);
     assert_eq!(captions.cues()[0].end(), Ticks::from_millis(500));
     assert!(captions.invariants_hold());
+}
+
+/// A shape and a title, saved and reopened.
+///
+/// A graphic is the first thing in the project that is neither media nor an
+/// arrangement of it — it is the picture itself — so what has to survive is not
+/// just a reference but every value that draws it, keyframes included.
+#[test]
+fn graphics_survive_a_round_trip_with_their_keyframes() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("m.mp4");
+    fs::write(&media, b"m").unwrap();
+    let path = dir.path().join("graphics.verge");
+
+    let mut project = sample_project(&media);
+    let seq = project.active_sequence.unwrap();
+
+    let star = project.add_graphic(
+        "Star",
+        GraphicContent::Shape(Shape::new(
+            ShapeKind::Star { points: 6 },
+            Vec2::new(400.0, 400.0),
+            Rgba::new(1.0, 0.8, 0.0, 1.0),
+        )),
+    );
+    let title = project.add_graphic(
+        "Lower third",
+        GraphicContent::Text(
+            Text::new("Ada Lovelace", 64.0, Rgba::WHITE).with_align(TextAlign::Center),
+        ),
+    );
+
+    // Animate the star's size, so the keyframes have to survive too.
+    {
+        let shape = project.graphic_mut(star).unwrap().as_shape_mut().unwrap();
+        shape.size.set_keyframe(Ticks::ZERO, Vec2::new(100.0, 100.0), Interpolation::Linear);
+        shape.size.set_keyframe(
+            Ticks::from_seconds(2),
+            Vec2::new(400.0, 400.0),
+            Interpolation::EaseInOut,
+        );
+        shape.corner_radius.value = 8.0;
+    }
+
+    // And put the title on the timeline, so the reference has to resolve.
+    let track = project.sequence(seq).unwrap().tracks[0].id;
+    let clip_id = project.new_clip_id();
+    project
+        .sequence_mut(seq)
+        .unwrap()
+        .track_mut(track)
+        .unwrap()
+        .insert_clip(Clip::new(
+            clip_id,
+            Source::Graphic(title),
+            "Lower third",
+            Ticks::ZERO,
+            Ticks::from_seconds(30),
+            Ticks::from_seconds(5),
+        ))
+        .unwrap();
+
+    store::save(&project, &path).unwrap();
+    let loaded = store::load(&path).unwrap();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+
+    let shape = loaded.project.graphic(star).unwrap().as_shape().unwrap();
+    assert_eq!(shape.kind, ShapeKind::Star { points: 6 });
+    assert_eq!(shape.corner_radius.value, 8.0);
+    assert_eq!(shape.size.keyframes().len(), 2);
+    assert_eq!(shape.size.keyframes()[1].interpolation, Interpolation::EaseInOut);
+    assert_eq!(shape.size.evaluate(Ticks::from_seconds(2)), Vec2::new(400.0, 400.0));
+
+    let text = loaded.project.graphic(title).unwrap().as_text().unwrap();
+    assert_eq!(text.text, "Ada Lovelace");
+    assert_eq!(text.align, TextAlign::Center);
+    assert_eq!(text.size.value, 64.0);
+
+    // The clip still draws the graphic it drew, which is what the ID is for.
+    let clip = loaded.project.sequence(seq).unwrap().find_clip(clip_id).unwrap().1;
+    assert_eq!(clip.source, Source::Graphic(title));
+}
+
+/// A project written before graphics existed has no `graphics` array at all,
+/// and must open as one with none rather than failing to parse.
+#[test]
+fn a_project_without_graphics_opens_with_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("m.mp4");
+    fs::write(&media, b"m").unwrap();
+    let path = dir.path().join("old.verge");
+
+    let project = sample_project(&media);
+    store::save(&project, &path).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("\"graphics\""), "an empty list should not be written at all");
+
+    let loaded = store::load(&path).unwrap();
+    assert!(loaded.project.graphics.is_empty());
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
 }

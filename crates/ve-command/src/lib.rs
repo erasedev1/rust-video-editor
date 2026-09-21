@@ -16,7 +16,7 @@
 use std::any::Any;
 
 use ve_core::{
-    CaptionTrackId, Clip, ClipId, CompositionId, CoreError, CueId, LayerId, Project,
+    CaptionTrackId, Clip, ClipId, CompositionId, CoreError, CueId, GraphicId, LayerId, Project,
     SequenceId, TrackId,
 };
 use ve_time::Ticks;
@@ -27,6 +27,7 @@ mod clip_commands;
 mod composition_commands;
 mod edit_commands;
 mod effect_commands;
+mod graphic_commands;
 mod history;
 mod keyframe_commands;
 mod multicam_commands;
@@ -49,6 +50,11 @@ pub use edit_commands::{Compound, RollEdit, SetClipSpeed, ShiftClips, SlideClip,
 pub use effect_commands::{
     AddEffect, EffectHost, MoveEffect, RemoveEffect, RenameEffect, SetEffectEnabled,
     SetEffectOption,
+};
+pub use graphic_commands::{
+    animatable_graphic_properties, graphic_clip, graphic_property_ref, AddGraphic,
+    DuplicateGraphic, EditGraphicKeyframes, GraphicOption, GraphicProperty, RemoveGraphic,
+    RenameGraphic, SetGraphicOption, SetGraphicProperty, SetGraphicText,
 };
 pub use history::{History, HistoryEntry};
 pub use keyframe_commands::{
@@ -124,6 +130,8 @@ pub enum CommandError {
     CaptionTrackNotFound(CaptionTrackId),
     #[error("caption {0} not found")]
     CueNotFound(CueId),
+    #[error("graphic {0} not found")]
+    GraphicNotFound(GraphicId),
     #[error("nothing to undo")]
     NothingToUndo,
     #[error("nothing to redo")]

@@ -90,7 +90,7 @@ pub enum KeyframeEdit {
 }
 
 impl KeyframeEdit {
-    fn label(&self) -> &'static str {
+    pub(crate) fn label(&self) -> &'static str {
         match self {
             KeyframeEdit::Set { .. } => "Keyframe",
             KeyframeEdit::Remove(_) => "Delete Keyframes",
@@ -107,7 +107,7 @@ impl KeyframeEdit {
     /// A retime or a handle drag restates itself on every pointer move and so
     /// merges; adding and deleting keyframes are discrete acts, and two of them
     /// in a row are two things the user did.
-    fn continues(&self, next: &KeyframeEdit) -> bool {
+    pub(crate) fn continues(&self, next: &KeyframeEdit) -> bool {
         match (self, next) {
             (KeyframeEdit::SetTimes(_), KeyframeEdit::SetTimes(_)) => true,
             (
@@ -247,55 +247,97 @@ fn apply_edit(
 ) -> Result<(), CommandError> {
     let label = target.label().to_string();
     with_property!(clip, target, |p, Variant| {
-        match edit {
-            KeyframeEdit::Set { time, value, interpolation } => {
-                let Variant(v) = *value else {
-                    return Err(CommandError::Rejected(format!(
-                        "{value:?} is the wrong type for {label}"
-                    )));
-                };
-                p.set_keyframe(*time, v, *interpolation);
-            }
-            KeyframeEdit::Remove(times) => {
-                for time in times {
-                    p.remove_keyframe(*time);
-                }
-            }
-            KeyframeEdit::SetTimes(times) => {
-                if !p.set_keyframe_times(times) {
-                    return Err(CommandError::Rejected(format!(
-                        "{label} has {} keyframes, not {}",
-                        p.keyframes().len(),
-                        times.len()
-                    )));
-                }
-            }
-            KeyframeEdit::SetInterpolation { time, interpolation } => {
-                if p.set_interpolation(*time, *interpolation).is_none() {
-                    return Err(CommandError::Rejected(format!(
-                        "{label} has no keyframe there"
-                    )));
-                }
-            }
-            KeyframeEdit::Insert { keyframes, at } => {
-                for kf in keyframes {
-                    let Variant(v) = kf.value else { continue };
-                    p.set_keyframe(*at + kf.time, v, kf.interpolation);
-                }
-            }
-            KeyframeEdit::Freeze { at } => p.freeze_at(*at),
-        }
-        Ok::<(), CommandError>(())
+        edit_property(p, edit, &label, |value| match value {
+            Variant(v) => Some(v),
+            _ => None,
+        })
     })
+}
+
+/// Applies one edit to one property, whatever type it holds.
+///
+/// Written once against `Property<T>` rather than once per owner: a clip, a
+/// composition layer and a graphic all reach their properties differently, and
+/// what happens to the keyframes once they are reached is the same six cases
+/// every time. `unpack` is how a [`PropertyValue`] becomes this property's own
+/// type, which is the only part the caller knows and this does not.
+pub(crate) fn edit_property<T: ve_core::Animatable>(
+    p: &mut Property<T>,
+    edit: &KeyframeEdit,
+    label: &str,
+    unpack: impl Fn(PropertyValue) -> Option<T>,
+) -> Result<(), CommandError> {
+    match edit {
+        KeyframeEdit::Set { time, value, interpolation } => {
+            let Some(v) = unpack(*value) else {
+                return Err(CommandError::Rejected(format!(
+                    "{value:?} is the wrong type for {label}"
+                )));
+            };
+            p.set_keyframe(*time, v, *interpolation);
+        }
+        KeyframeEdit::Remove(times) => {
+            for time in times {
+                p.remove_keyframe(*time);
+            }
+        }
+        KeyframeEdit::SetTimes(times) => {
+            if !p.set_keyframe_times(times) {
+                return Err(CommandError::Rejected(format!(
+                    "{label} has {} keyframes, not {}",
+                    p.keyframes().len(),
+                    times.len()
+                )));
+            }
+        }
+        KeyframeEdit::SetInterpolation { time, interpolation } => {
+            if p.set_interpolation(*time, *interpolation).is_none() {
+                return Err(CommandError::Rejected(format!("{label} has no keyframe there")));
+            }
+        }
+        KeyframeEdit::Insert { keyframes, at } => {
+            for kf in keyframes {
+                let Some(v) = unpack(kf.value) else { continue };
+                p.set_keyframe(*at + kf.time, v, kf.interpolation);
+            }
+        }
+        KeyframeEdit::Freeze { at } => p.freeze_at(*at),
+    }
+    Ok(())
+}
+
+/// Puts a property back exactly as a [`PropertyState`] found it.
+///
+/// The twin of [`edit_property`], and the reason undo is exact: the list is
+/// restored wholesale rather than by replaying an inverse, which a retime that
+/// collapsed two keyframes onto one tick would get wrong.
+pub(crate) fn restore_property<T: ve_core::Animatable>(
+    p: &mut Property<T>,
+    state: &PropertyState,
+    unpack: impl Fn(PropertyValue) -> Option<T>,
+) {
+    if let Some(v) = unpack(state.value) {
+        p.value = v;
+    }
+    let kfs = state
+        .keyframes
+        .iter()
+        .filter_map(|k| {
+            unpack(k.value).map(|v| Keyframe {
+                time: k.time,
+                value: v,
+                interpolation: k.interpolation,
+            })
+        })
+        .collect();
+    p.set_keyframes(kfs);
 }
 
 /// Reads a property whole, for undo.
 fn read_property(clip: &Clip, target: &ClipProperty) -> Result<PropertyState, CommandError> {
-    property_ref(clip, target)
-        .map(|p| PropertyState { value: p.value(), keyframes: p.keyframes() })
-        .ok_or_else(|| {
-            CommandError::Rejected(format!("{} is not animatable here", target.label()))
-        })
+    property_ref(clip, target).map(|p| p.capture()).ok_or_else(|| {
+        CommandError::Rejected(format!("{} is not animatable here", target.label()))
+    })
 }
 
 /// Puts a property back exactly as [`read_property`] found it.
@@ -305,20 +347,10 @@ fn write_property(
     state: &PropertyState,
 ) -> Result<(), CommandError> {
     with_property!(clip, target, |p, Variant| {
-        if let Variant(v) = state.value {
-            p.value = v;
-        }
-        let kfs = state
-            .keyframes
-            .iter()
-            .filter_map(|k| match k.value {
-                Variant(v) => {
-                    Some(Keyframe { time: k.time, value: v, interpolation: k.interpolation })
-                }
-                _ => None,
-            })
-            .collect();
-        p.set_keyframes(kfs);
+        restore_property(p, state, |value| match value {
+            Variant(v) => Some(v),
+            _ => None,
+        });
         Ok::<(), CommandError>(())
     })
 }
@@ -453,6 +485,17 @@ impl PropertyRef<'_> {
             PropertyRef::Point(p) => collect(p.keyframes(), PropertyValue::Point),
             PropertyRef::Color(p) => collect(p.keyframes(), PropertyValue::Color),
         }
+    }
+
+    /// The property whole — its static value and every keyframe — with the
+    /// types erased.
+    ///
+    /// The read-side twin of [`restore_property`], and what makes undo exact:
+    /// a property is put back as it was found rather than by replaying an
+    /// inverse, which a retime that collapsed two keyframes onto one tick could
+    /// not undo at all.
+    pub fn capture(&self) -> PropertyState {
+        PropertyState { value: self.value(), keyframes: self.keyframes() }
     }
 
     /// The times of every keyframe, which is what a retime restates.
