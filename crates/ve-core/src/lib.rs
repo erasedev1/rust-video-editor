@@ -16,6 +16,7 @@
 pub mod animation;
 pub mod asset;
 pub mod blend;
+pub mod caption;
 pub mod clip;
 pub mod composition;
 pub mod effect;
@@ -35,6 +36,7 @@ pub use asset::{
     AudioStreamInfo, MediaAsset, MediaInfo, PictureSource, ProxyMedia, VideoStreamInfo,
 };
 pub use blend::BlendMode;
+pub use caption::{CaptionTrack, Cue, DEFAULT_LANGUAGE};
 pub use clip::{Clip, Speed};
 pub use composition::{Composition, CompositionLayer, CompositionSettings};
 pub use effect::{
@@ -43,8 +45,8 @@ pub use effect::{
 pub use fade::{Fade, FadeCurve, FadeEdge};
 pub use geometry::{ColorSpace, Rgba, Size, Vec2};
 pub use id::{
-    AngleId, AssetId, ClipId, CompositionId, EffectId, Id, IdAllocator, LayerId, MarkerId,
-    MulticamId, SequenceId, TrackId,
+    AngleId, AssetId, CaptionTrackId, ClipId, CompositionId, CueId, EffectId, Id, IdAllocator,
+    LayerId, MarkerId, MulticamId, SequenceId, TrackId,
 };
 pub use motion::MotionBlur;
 pub use multicam::{MulticamAngle, MulticamGroup, SyncMethod};
@@ -85,6 +87,10 @@ pub enum CoreError {
     CompositionInUse { id: CompositionId, places: usize },
     #[error("a composition cannot contain itself, even indirectly")]
     CompositionCycle,
+    #[error("caption track {0} not found")]
+    CaptionTrackNotFound(CaptionTrackId),
+    #[error("cue {0} not found")]
+    CueNotFound(CueId),
     #[error("multicam group {0} not found")]
     MulticamNotFound(MulticamId),
     #[error("angle {0} not found")]
@@ -99,6 +105,10 @@ pub enum CoreError {
     AssetIsAnAngle(AssetId),
     #[error("clips may not overlap on a track")]
     ClipOverlap,
+    #[error("captions may not overlap; two speakers at once are two lines of one caption")]
+    CueOverlap,
+    #[error("a caption must have a positive duration")]
+    EmptyCue,
     #[error("track is locked")]
     TrackLocked,
     #[error("a clip must be at least one frame long")]

@@ -6,8 +6,8 @@ use ve_time::Ticks;
 use crate::asset::{MediaAsset, MediaInfo};
 use crate::composition::{Composition, CompositionSettings};
 use crate::id::{
-    AngleId, AssetId, ClipId, CompositionId, EffectId, IdAllocator, LayerId, MarkerId,
-    MulticamId, SequenceId, TrackId,
+    AngleId, AssetId, CaptionTrackId, ClipId, CompositionId, CueId, EffectId, IdAllocator,
+    LayerId, MarkerId, MulticamId, SequenceId, TrackId,
 };
 use crate::multicam::{MulticamAngle, MulticamGroup};
 use crate::sequence::{Sequence, SequenceSettings};
@@ -383,6 +383,12 @@ impl Project {
     pub fn new_layer_id(&mut self) -> LayerId {
         self.ids.alloc()
     }
+    pub fn new_caption_track_id(&mut self) -> CaptionTrackId {
+        self.ids.alloc()
+    }
+    pub fn new_cue_id(&mut self) -> CueId {
+        self.ids.alloc()
+    }
 
     /// Shortest permitted clip duration, in the given sequence's timebase.
     pub fn min_clip_duration(&self, sequence: SequenceId) -> Ticks {
@@ -495,6 +501,12 @@ impl Project {
                     for e in &c.effects {
                         max_id = max_id.max(e.id.raw());
                     }
+                }
+            }
+            for t in &s.captions {
+                max_id = max_id.max(t.id.raw());
+                for cue in t.cues() {
+                    max_id = max_id.max(cue.id.raw());
                 }
             }
         }

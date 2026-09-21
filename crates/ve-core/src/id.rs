@@ -137,4 +137,6 @@ id_types! {
     EffectTag => EffectId,
     MulticamTag => MulticamId,
     AngleTag => AngleId,
+    CaptionTrackTag => CaptionTrackId,
+    CueTag => CueId,
 }

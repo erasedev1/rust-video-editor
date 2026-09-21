@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ve_core::registry::kinds;
 use ve_core::{
-    builtin_registry, BlendMode, Clip, CompositionLayer, CompositionSettings, Effect,
+    builtin_registry, BlendMode, Clip, CompositionLayer, CompositionSettings, Cue, Effect,
     FadeCurve, Interpolation, MediaInfo, ParamValue, Project, Size, Source, VideoStreamInfo,
 };
 use ve_project::{autosave, store, Autosave, ProjectError, FORMAT_MAGIC, FORMAT_VERSION};
@@ -1150,4 +1150,111 @@ fn a_project_whose_proxies_were_left_behind_opens_at_full_resolution() {
     assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
     assert!(asset.has_proxy(), "it is remembered, so rebuilding or restoring it works");
     assert!(!asset.picture_source(Some(dir.path()), true).is_proxy);
+}
+
+#[test]
+fn caption_tracks_survive_a_round_trip_with_their_language() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("movie.mp4");
+    fs::write(&media, b"media").unwrap();
+
+    let mut project = sample_project(&media);
+    let seq = project.active_sequence.unwrap();
+    let track = project.new_caption_track_id();
+    let cue_a = project.new_cue_id();
+    let cue_b = project.new_cue_id();
+    {
+        let sequence = project.sequence_mut(seq).unwrap();
+        sequence.add_caption_track(track);
+        let captions = sequence.caption_track_mut(track).unwrap();
+        captions.language = "pt-BR".into();
+        captions
+            .insert_cue(Cue::new(
+                cue_a,
+                Ticks::from_millis(500),
+                Ticks::from_millis(1500),
+                "- Quem está aí?\n- Sou eu.",
+            ))
+            .unwrap();
+        captions
+            .insert_cue(Cue::new(
+                cue_b,
+                Ticks::from_seconds(3),
+                Ticks::from_seconds(2),
+                "Entre.",
+            ))
+            .unwrap();
+    }
+
+    let path = dir.path().join("captioned.verge");
+    store::save(&project, &path).unwrap();
+    let loaded = store::load(&path).unwrap();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+
+    let captions = &loaded.project.active().unwrap().captions[0];
+    assert_eq!(captions.language, "pt-BR");
+    assert_eq!(captions.len(), 2);
+    assert_eq!(captions.cues()[0].text, "- Quem está aí?\n- Sou eu.");
+    assert_eq!(captions.cues()[1].start, Ticks::from_seconds(3));
+    // The IDs the cues were given must not be handed out again.
+    assert_eq!(loaded.project.ids.peek(), project.ids.peek());
+}
+
+#[test]
+fn a_project_from_before_captions_existed_opens_with_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("movie.mp4");
+    fs::write(&media, b"media").unwrap();
+    let path = dir.path().join("old.verge");
+    store::save(&sample_project(&media), &path).unwrap();
+
+    // A file written before the field existed simply has no `captions` key —
+    // which is why this is a defaulted field rather than a format version.
+    let doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(doc["project"]["sequences"][0].get("captions").is_none());
+
+    let loaded = store::load(&path).unwrap();
+    assert!(loaded.project.active().unwrap().captions.is_empty());
+    assert_eq!(loaded.migrated_from, None);
+}
+
+#[test]
+fn captions_that_overlap_in_a_hand_edited_file_are_repaired_rather_than_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = dir.path().join("m.mp4");
+    fs::write(&media, b"m").unwrap();
+
+    let mut project = sample_project(&media);
+    let seq = project.active_sequence.unwrap();
+    let track = project.new_caption_track_id();
+    let first = project.new_cue_id();
+    let second = project.new_cue_id();
+    {
+        let sequence = project.sequence_mut(seq).unwrap();
+        sequence.add_caption_track(track);
+        let captions = sequence.caption_track_mut(track).unwrap();
+        captions
+            .insert_cue(Cue::new(first, Ticks::ZERO, Ticks::from_seconds(1), "one"))
+            .unwrap();
+        captions
+            .insert_cue(Cue::new(second, Ticks::from_seconds(2), Ticks::from_seconds(1), "two"))
+            .unwrap();
+    }
+    let path = dir.path().join("overlapping.verge");
+    store::save(&project, &path).unwrap();
+
+    // Drag the second cue back over the first, as another tool's export might.
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    doc["project"]["sequences"][0]["captions"][0]["cues"][1]["start"] =
+        serde_json::Value::from(Ticks::from_millis(500).raw());
+    fs::write(&path, doc.to_string()).unwrap();
+
+    let loaded = store::load(&path).unwrap();
+    let captions = &loaded.project.active().unwrap().captions[0];
+    // Both lines of dialogue are still there; the earlier one was cut short.
+    assert_eq!(captions.len(), 2);
+    assert_eq!(captions.cues()[0].end(), Ticks::from_millis(500));
+    assert!(captions.invariants_hold());
 }

@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use ve_time::{Rate, SampleRate, Ticks, TimeRange, Timecode};
 
+use crate::caption::{CaptionTrack, Cue};
 use crate::clip::Clip;
 use crate::geometry::{ColorSpace, Rgba, Size};
-use crate::id::{ClipId, MarkerId, SequenceId, TrackId};
+use crate::id::{CaptionTrackId, ClipId, CueId, MarkerId, SequenceId, TrackId};
 use crate::track::{Track, TrackKind};
 use crate::CoreError;
 
@@ -90,6 +91,11 @@ pub struct Sequence {
     pub name: String,
     pub settings: SequenceSettings,
     pub tracks: Vec<Track>,
+    /// Caption tracks, one per language. Kept apart from `tracks` because a cue
+    /// is not a clip — see [`crate::caption`] — and because the compositor,
+    /// the mixer and every edit command walk `tracks` expecting clips.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub captions: Vec<CaptionTrack>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
     /// Persisted so reopening a project restores the editing position.
@@ -108,6 +114,7 @@ impl Sequence {
             name: name.into(),
             settings,
             tracks: Vec::new(),
+            captions: Vec::new(),
             markers: Vec::new(),
             playhead: Ticks::ZERO,
             work_area: None,
@@ -139,6 +146,35 @@ impl Sequence {
         self.tracks.iter().filter(|t| t.kind == TrackKind::Audio)
     }
 
+    pub fn caption_track(&self, id: CaptionTrackId) -> Option<&CaptionTrack> {
+        self.captions.iter().find(|t| t.id == id)
+    }
+
+    pub fn caption_track_mut(&mut self, id: CaptionTrackId) -> Option<&mut CaptionTrack> {
+        self.captions.iter_mut().find(|t| t.id == id)
+    }
+
+    pub fn caption_track_index(&self, id: CaptionTrackId) -> Option<usize> {
+        self.captions.iter().position(|t| t.id == id)
+    }
+
+    /// Adds a caption track, naming it `C1`, `C2` and so on by position.
+    pub fn add_caption_track(&mut self, id: CaptionTrackId) -> CaptionTrackId {
+        let name = format!("C{}", self.captions.len() + 1);
+        self.captions.push(CaptionTrack::new(id, name));
+        id
+    }
+
+    pub fn remove_caption_track(&mut self, id: CaptionTrackId) -> Option<CaptionTrack> {
+        let idx = self.caption_track_index(id)?;
+        Some(self.captions.remove(idx))
+    }
+
+    /// Finds a cue anywhere in the sequence.
+    pub fn find_cue(&self, id: CueId) -> Option<(CaptionTrackId, &Cue)> {
+        self.captions.iter().find_map(|t| t.cue(id).map(|c| (t.id, c)))
+    }
+
     /// Finds a clip anywhere in the sequence.
     pub fn find_clip(&self, id: ClipId) -> Option<(TrackId, &Clip)> {
         self.tracks.iter().find_map(|t| t.clip(id).map(|c| (t.id, c)))
@@ -152,6 +188,11 @@ impl Sequence {
     }
 
     /// End of the last clip on any track.
+    ///
+    /// Captions are deliberately not counted. A cue past the last frame has
+    /// nothing to caption, and letting one extend the sequence would mean a
+    /// stray caption left behind after a trim silently lengthened every export
+    /// of "the whole sequence".
     pub fn duration(&self) -> Ticks {
         self.tracks.iter().map(|t| t.content_end()).max().unwrap_or(Ticks::ZERO)
     }
@@ -247,6 +288,9 @@ impl Sequence {
         let mut overlaps = Vec::new();
         for track in &mut self.tracks {
             overlaps.extend(track.normalise());
+        }
+        for captions in &mut self.captions {
+            captions.normalise();
         }
         self.markers.sort_by_key(|m| m.time);
         self.playhead = self.playhead.clamp_non_negative();
