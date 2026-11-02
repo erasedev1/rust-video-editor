@@ -28,6 +28,7 @@ fn text(s: &str) -> TextState {
         line_height: 1.2,
         align: TextAlign::Left,
         wrap_width: None,
+        animators: Vec::new(),
     }
 }
 
@@ -155,4 +156,95 @@ fn a_missing_family_draws_in_something_else_rather_than_nothing() {
     state.font = FontSpec::new("Definitely Not Installed");
     let image = drawn(&state, &fonts);
     assert!(!ink_columns(&image).is_empty(), "substituted, not skipped");
+}
+
+// ---- animators -----------------------------------------------------------
+
+use ve_core::{TextAnimatorState, Vec2};
+
+fn animator() -> TextAnimatorState {
+    TextAnimatorState {
+        start: 0.0,
+        end: 1.0,
+        offset: 0.0,
+        position: Vec2::new(0.0, 0.0),
+        scale: 1.0,
+        rotation: 0.0,
+        opacity: 1.0,
+    }
+}
+
+#[test]
+fn an_animator_that_changes_nothing_draws_the_same_picture() {
+    let fonts = library();
+    let plain = drawn(&text("Verge"), &fonts);
+    let mut state = text("Verge");
+    state.animators.push(animator());
+    let animated = drawn(&state, &fonts);
+    assert_eq!(animated.size(), plain.size());
+    assert_eq!(animated.data(), plain.data());
+}
+
+#[test]
+fn hiding_the_second_half_leaves_ink_only_in_the_first() {
+    let fonts = library();
+    let plain = drawn(&text("Verge"), &fonts);
+    let mut state = text("Verge");
+    state.animators.push(TextAnimatorState { start: 0.5, opacity: 0.0, ..animator() });
+    let image = drawn(&state, &fonts);
+
+    let (all, kept) = (ink_columns(&plain), ink_columns(&image));
+    assert!(!kept.is_empty(), "the first half is still there");
+    assert!(
+        kept.last().unwrap() < &(all.last().unwrap() - plain.width() / 5),
+        "the last letters are gone: {kept:?} against {all:?}"
+    );
+}
+
+#[test]
+fn a_range_covering_part_of_a_letter_applies_part_of_the_change() {
+    // One character, half covered: half-way from opaque to transparent.
+    let fonts = library();
+    let mut state = text("I");
+    state.animators.push(TextAnimatorState { end: 0.5, opacity: 0.0, ..animator() });
+    let image = drawn(&state, &fonts);
+    let peak = (0..image.width())
+        .flat_map(|x| (0..image.height()).map(move |y| (x, y)))
+        .map(|(x, y)| image.pixel(x, y).unwrap()[3])
+        .max()
+        .unwrap();
+    assert!((120..=135).contains(&peak), "about half opaque, got {peak}");
+}
+
+#[test]
+fn letters_flung_outside_the_box_are_not_clipped_and_the_centre_holds() {
+    let fonts = library();
+    let plain = drawn(&text("Verge"), &fonts);
+    let mut state = text("Verge");
+    state.animators.push(TextAnimatorState { position: Vec2::new(0.0, -200.0), ..animator() });
+    let image = drawn(&state, &fonts);
+
+    assert!(image.height() > plain.height() + 300, "room was made for the move");
+    // The padding goes equally above and below, so the picture's centre stays on
+    // the layout box's centre and the title does not drift as its letters fly.
+    assert_eq!((image.height() - plain.height()) % 2, 0);
+    assert_eq!((image.width() - plain.width()) % 2, 0);
+    assert!(!ink_rows(&image).is_empty(), "and the ink is in there");
+}
+
+#[test]
+fn animators_are_part_of_the_cache_key() {
+    use std::hash::{Hash, Hasher};
+    let key = |s: &TextState| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        GraphicState::Text(s.clone()).hash(&mut h);
+        h.finish()
+    };
+    let plain = text("Verge");
+    let mut with = text("Verge");
+    with.animators.push(animator());
+    let mut moved = with.clone();
+    moved.animators[0].start = 0.25;
+    assert_ne!(key(&plain), key(&with));
+    assert_ne!(key(&with), key(&moved));
 }

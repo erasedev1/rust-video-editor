@@ -205,6 +205,10 @@ fn line_origin(align: TextAlign, box_width: f32, line_width: f32) -> f32 {
 }
 
 /// Draws a run of text into a picture of its own bounding box.
+///
+/// With no text animators this is one path filled once. With any, each glyph is
+/// its own path with its own transform and opacity, and the picture grows by
+/// however far the glyphs travel outside the layout box.
 pub(crate) fn draw_text(state: &TextState, fonts: &FontLibrary) -> Option<RasterImage> {
     if !state.has_fill() && !state.has_stroke() {
         return None;
@@ -214,8 +218,87 @@ pub(crate) fn draw_text(state: &TextState, fonts: &FontLibrary) -> Option<Raster
 
     let stroke_width = if state.has_stroke() { state.stroke_width as f32 } else { 0.0 };
     let margin = stroke_width / 2.0 + ANTIALIAS_MARGIN;
-    let width = (metrics.width + margin * 2.0).ceil() as u64;
-    let height = (metrics.height + margin * 2.0).ceil() as u64;
+
+    // Outlines in layout coordinates: the layout box's top-left is the origin.
+    let glyphs = fonts.with_face_data(resolved.id, |data, index| {
+        let face = ttf_parser::Face::parse(data, index).ok()?;
+        let scale = state.size as f32 / face.units_per_em() as f32;
+        let animated = !state.animators.is_empty();
+        let mut builder = GlyphPath { path: PathBuilder::new(), x: 0.0, y: 0.0, scale };
+        let mut out: Vec<(usize, tiny_skia::Path)> = Vec::new();
+
+        let mut index = 0usize;
+        for (row, line) in lines.iter().enumerate() {
+            let left = line_origin(state.align, metrics.width, line.width);
+            let baseline = metrics.ascent + metrics.line_height * row as f32;
+            for glyph in &line.glyphs {
+                builder.x = left + glyph.x;
+                builder.y = baseline + glyph.y;
+                // A glyph with no outline — a space, and anything the font has
+                // no drawing for — advances the pen and draws nothing, which is
+                // exactly what the missing return value means here.
+                face.outline_glyph(ttf_parser::GlyphId(glyph.id), &mut builder);
+                if animated {
+                    let path = std::mem::replace(&mut builder.path, PathBuilder::new());
+                    if let Some(path) = path.finish() {
+                        out.push((index, path));
+                    }
+                }
+                index += 1;
+            }
+        }
+        if !animated {
+            if let Some(path) = builder.path.finish() {
+                out.push((0, path));
+            }
+        }
+        Some((out, index))
+    })??;
+    let (outlines, glyph_count) = glyphs;
+    if outlines.is_empty() {
+        return None;
+    }
+
+    // Move each glyph by what the animators ask, and find how far past the
+    // layout box that takes any of them.
+    let animated = !state.animators.is_empty();
+    let mut drawn: Vec<(tiny_skia::Path, f32)> = Vec::with_capacity(outlines.len());
+    let (mut min_x, mut min_y) = (0.0f32, 0.0f32);
+    let (mut max_x, mut max_y) = (metrics.width, metrics.height);
+    for (index, path) in outlines {
+        let (path, opacity) = if animated {
+            let e = state.glyph_effect(index, glyph_count);
+            let b = path.bounds();
+            let (cx, cy) = (b.left() + b.width() / 2.0, b.top() + b.height() / 2.0);
+            let ts = Transform::from_translate(-cx, -cy)
+                .post_scale(e.scale as f32, e.scale as f32)
+                .post_rotate(e.rotation as f32)
+                .post_translate(cx + e.position.x as f32, cy + e.position.y as f32);
+            let Some(moved) = path.transform(ts) else { continue };
+            (moved, e.opacity as f32)
+        } else {
+            (path, 1.0)
+        };
+        let b = path.bounds();
+        min_x = min_x.min(b.left());
+        min_y = min_y.min(b.top());
+        max_x = max_x.max(b.right());
+        max_y = max_y.max(b.bottom());
+        drawn.push((path, opacity));
+    }
+
+    // Padded the same on all four sides by the largest overshoot, so the centre
+    // of the picture stays on the centre of the layout box and an animated
+    // title does not drift about the screen as its letters fly out.
+    let pad = (-min_x)
+        .max(-min_y)
+        .max(max_x - metrics.width)
+        .max(max_y - metrics.height)
+        .max(0.0)
+        .ceil();
+    let inset = margin + pad;
+    let width = (metrics.width + inset * 2.0).ceil() as u64;
+    let height = (metrics.height + inset * 2.0).ceil() as u64;
     if width == 0 || height == 0 {
         return None;
     }
@@ -224,43 +307,29 @@ pub(crate) fn draw_text(state: &TextState, fonts: &FontLibrary) -> Option<Raster
         return None;
     }
 
-    let path = fonts.with_face_data(resolved.id, |data, index| {
-        let face = ttf_parser::Face::parse(data, index).ok()?;
-        let scale = state.size as f32 / face.units_per_em() as f32;
-        let mut builder = GlyphPath { path: PathBuilder::new(), x: 0.0, y: 0.0, scale };
-
-        for (row, line) in lines.iter().enumerate() {
-            let left = margin + line_origin(state.align, metrics.width, line.width);
-            let baseline = margin + metrics.ascent + metrics.line_height * row as f32;
-            for glyph in &line.glyphs {
-                builder.x = left + glyph.x;
-                builder.y = baseline + glyph.y;
-                // A glyph with no outline — a space, and anything the font has
-                // no drawing for — advances the pen and draws nothing, which is
-                // exactly what the missing return value means here.
-                face.outline_glyph(ttf_parser::GlyphId(glyph.id), &mut builder);
-            }
-        }
-        builder.path.finish()
-    })??;
-
     let mut pixmap = Pixmap::new(width as u32, height as u32)?;
-    if state.has_fill() {
-        let paint = fill_paint(
-            state.fill,
-            state.gradient,
-            (margin, margin, metrics.width, metrics.height),
-        );
-        // Non-zero winding, which is how a glyph says which of its contours are
-        // counters: an even-odd fill would punch the bowl out of a 'b' and then
-        // fill the hole in an 'o' that a stroke overlaps.
-        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
-    }
-    if state.has_stroke() {
-        let mut paint = Paint { anti_alias: true, ..Paint::default() };
-        paint.set_color(colour(state.stroke));
-        let stroke = Stroke { width: stroke_width, ..Stroke::default() };
-        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    let place = Transform::from_translate(inset, inset);
+    let fill =
+        fill_paint(state.fill, state.gradient, (inset, inset, metrics.width, metrics.height));
+    for (path, opacity) in &drawn {
+        if state.has_fill() {
+            let mut paint = fill.clone();
+            if *opacity < 1.0 {
+                paint.shader.apply_opacity(*opacity);
+            }
+            // Non-zero winding, which is how a glyph says which of its contours
+            // are counters: an even-odd fill would punch the bowl out of a 'b'
+            // and then fill the hole in an 'o' that a stroke overlaps.
+            pixmap.fill_path(path, &paint, FillRule::Winding, place, None);
+        }
+        if state.has_stroke() {
+            let mut paint = Paint { anti_alias: true, ..Paint::default() };
+            let mut c = colour(state.stroke);
+            c.apply_opacity(*opacity);
+            paint.set_color(c);
+            let stroke = Stroke { width: stroke_width, ..Stroke::default() };
+            pixmap.stroke_path(path, &paint, &stroke, place, None);
+        }
     }
 
     let image = image_from_pixmap(pixmap);
@@ -335,6 +404,7 @@ mod tests {
             line_height: 1.2,
             align: TextAlign::Left,
             wrap_width: None,
+            animators: Vec::new(),
         }
     }
 

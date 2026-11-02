@@ -389,3 +389,48 @@ fn picking_a_graphic_lets_go_of_the_clip_selection() {
     assert!(editor.state.selection.clips.is_empty());
     assert_eq!(editor.state.selection.graphic, Some(id));
 }
+
+#[test]
+fn a_text_animator_is_added_from_the_inspector_and_survives_save_and_reopen() {
+    let mut editor = Editor::new();
+    editor.act(Action::AddTitle);
+    let id = editor.only_graphic();
+    let track = editor.video_track();
+    editor.act(Action::AddGraphicToTimeline { graphic: id, track, at: Ticks::ZERO });
+
+    let mut animators = vec![ve_core::TextAnimator::default()];
+    editor.act(Action::SetGraphicOption {
+        graphic: id,
+        option: GraphicOption::Animators(animators.clone()),
+    });
+    editor.set(
+        id,
+        GraphicProperty::Animator(0, ve_command::AnimatorProperty::Opacity),
+        PropertyValue::Scalar(0.0),
+    );
+    animators[0].opacity = ve_core::Property::constant(0.0);
+    assert_eq!(
+        editor.state.project.graphic(id).unwrap().as_text().unwrap().animators,
+        animators
+    );
+
+    let path = editor._scratch.path().join("animated.verge");
+    editor.act(Action::SaveProjectAs(path.clone()));
+    editor.act(Action::NewProject);
+    editor.act(Action::OpenProject(path));
+    assert_eq!(
+        editor.state.project.graphic(id).unwrap().as_text().unwrap().animators,
+        animators,
+        "{}",
+        editor.status()
+    );
+
+    // Removing it is an undoable step like any other.
+    editor.act(Action::SetGraphicOption {
+        graphic: id,
+        option: GraphicOption::Animators(vec![]),
+    });
+    assert!(editor.state.project.graphic(id).unwrap().as_text().unwrap().animators.is_empty());
+    editor.act(Action::Undo);
+    assert_eq!(editor.state.project.graphic(id).unwrap().as_text().unwrap().animators.len(), 1);
+}

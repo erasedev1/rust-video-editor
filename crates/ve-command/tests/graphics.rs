@@ -797,3 +797,69 @@ fn a_gradient_is_added_edited_and_undone_through_the_history() {
     f.history.undo(&mut f.project).unwrap();
     assert_eq!(f.project, before);
 }
+
+#[test]
+fn a_text_animator_is_added_keyframed_and_undone() {
+    let mut f = fixture();
+    let id = f.add_text();
+    let before = f.project.clone();
+
+    // No animator yet, so there is nothing to set.
+    let refused = f.history.execute(
+        &mut f.project,
+        Box::new(SetGraphicProperty::new(
+            id,
+            GraphicProperty::Animator(0, AnimatorProperty::Opacity),
+            PropertyValue::Scalar(0.0),
+        )),
+    );
+    assert!(refused.is_err());
+    assert_eq!(f.project, before);
+
+    f.history
+        .execute(
+            &mut f.project,
+            Box::new(SetGraphicOption::new(
+                id,
+                GraphicOption::Animators(vec![ve_core::TextAnimator::default()]),
+            )),
+        )
+        .unwrap();
+    f.history
+        .execute(
+            &mut f.project,
+            Box::new(SetGraphicProperty::new(
+                id,
+                GraphicProperty::Animator(0, AnimatorProperty::Opacity),
+                PropertyValue::Scalar(0.0),
+            )),
+        )
+        .unwrap();
+
+    let text = f.project.graphic(id).unwrap().as_text().unwrap();
+    let state = text.evaluate(Ticks::ZERO);
+    assert_eq!(state.animators.len(), 1);
+    assert_eq!(state.animators[0].opacity, 0.0);
+    assert!(animatable_graphic_properties(f.project.graphic(id).unwrap())
+        .contains(&GraphicProperty::Animator(0, AnimatorProperty::Start)));
+
+    // It keyframes through the same machinery as everything else.
+    let target = GraphicProperty::Animator(0, AnimatorProperty::Start);
+    let p = graphic_property_ref(f.project.graphic(id).unwrap(), target).unwrap();
+    assert!(!p.is_animated());
+
+    f.history.undo(&mut f.project).unwrap();
+    f.history.undo(&mut f.project).unwrap();
+    assert_eq!(f.project, before);
+}
+
+#[test]
+fn a_shape_has_no_text_animators() {
+    let mut f = fixture();
+    let id = f.add_shape();
+    let refused = f.history.execute(
+        &mut f.project,
+        Box::new(SetGraphicOption::new(id, GraphicOption::Animators(Vec::new()))),
+    );
+    assert!(refused.is_err());
+}

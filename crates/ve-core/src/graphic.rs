@@ -447,6 +447,170 @@ impl TextAlign {
     }
 }
 
+/// Changes applied to a chosen range of a run's characters.
+///
+/// The model is After Effects': an animator does not animate "the text", it
+/// names a *range* of characters and a set of changes, and the characters in
+/// the range receive them. Animating the **range** is what makes one character
+/// at a time happen: a title whose animator turns opacity to zero over
+/// `[start, 1]` reveals itself as `start` is keyframed from 0 to 1.
+///
+/// Range values are fractions of the run's characters, 0 at the left of the
+/// first and 1 at the right of the last, counted across lines in reading order.
+/// A character half inside the range receives half the change, so a range
+/// that moves smoothly produces motion that is smooth rather than one that
+/// steps a whole letter at a time.
+///
+/// The changes are **deltas towards a target**, not absolute values: `scale`
+/// of 1, `opacity` of 1 and zero `position` and `rotation` are no change, so a
+/// freshly added animator does nothing until one of them is moved. A character
+/// with coverage `w` receives `w` of the way from no change to the target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextAnimator {
+    /// Where the range begins, as a fraction of the run.
+    #[serde(default)]
+    pub start: Property<f64>,
+    /// Where the range ends.
+    #[serde(default = "one")]
+    pub end: Property<f64>,
+    /// Slides the whole range along the run without changing its length, so
+    /// a window of fixed size can sweep across the text.
+    #[serde(default)]
+    pub offset: Property<f64>,
+    /// How far each character moves, in pixels.
+    #[serde(default)]
+    pub position: Property<Vec2>,
+    /// Size multiplier about the character's own centre.
+    #[serde(default = "one")]
+    pub scale: Property<f64>,
+    /// Turn in degrees clockwise about the character's own centre.
+    #[serde(default)]
+    pub rotation: Property<f64>,
+    /// Opacity multiplier, 0 to 1.
+    #[serde(default = "one")]
+    pub opacity: Property<f64>,
+}
+
+fn one() -> Property<f64> {
+    Property::constant(1.0)
+}
+
+impl Default for TextAnimator {
+    /// Covers the whole run and changes nothing.
+    fn default() -> Self {
+        TextAnimator {
+            start: Property::constant(0.0),
+            end: one(),
+            offset: Property::constant(0.0),
+            position: Property::constant(Vec2::new(0.0, 0.0)),
+            scale: one(),
+            rotation: Property::constant(0.0),
+            opacity: one(),
+        }
+    }
+}
+
+impl TextAnimator {
+    pub fn evaluate(&self, t: Ticks) -> TextAnimatorState {
+        TextAnimatorState {
+            start: self.start.evaluate(t),
+            end: self.end.evaluate(t),
+            offset: self.offset.evaluate(t),
+            position: self.position.evaluate(t),
+            scale: self.scale.evaluate(t),
+            rotation: self.rotation.evaluate(t),
+            opacity: self.opacity.evaluate(t),
+        }
+    }
+
+    pub fn is_animated(&self) -> bool {
+        self.start.is_animated()
+            || self.end.is_animated()
+            || self.offset.is_animated()
+            || self.position.is_animated()
+            || self.scale.is_animated()
+            || self.rotation.is_animated()
+            || self.opacity.is_animated()
+    }
+}
+
+/// A [`TextAnimator`] resolved at one instant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextAnimatorState {
+    pub start: f64,
+    pub end: f64,
+    pub offset: f64,
+    pub position: Vec2,
+    pub scale: f64,
+    pub rotation: f64,
+    pub opacity: f64,
+}
+
+/// What an animator does to one character.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlyphEffect {
+    pub position: Vec2,
+    pub scale: f64,
+    pub rotation: f64,
+    pub opacity: f64,
+}
+
+impl GlyphEffect {
+    pub const NONE: GlyphEffect = GlyphEffect {
+        position: Vec2 { x: 0.0, y: 0.0 },
+        scale: 1.0,
+        rotation: 0.0,
+        opacity: 1.0,
+    };
+
+    /// Whether this leaves a character exactly where and as it was.
+    pub fn is_none(&self) -> bool {
+        *self == GlyphEffect::NONE
+    }
+}
+
+impl TextAnimatorState {
+    /// How much of character `index` of `count` the range covers, 0 to 1.
+    ///
+    /// The overlap of the character's own span `[index/count, (index+1)/count]`
+    /// with the range, as a fraction of the span. A range given backwards is the
+    /// same range.
+    pub fn coverage(&self, index: usize, count: usize) -> f64 {
+        if count == 0 {
+            return 0.0;
+        }
+        let (a, b) = (self.start + self.offset, self.end + self.offset);
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let n = count as f64;
+        let (from, to) = (index as f64 / n, (index + 1) as f64 / n);
+        ((hi.min(to) - lo.max(from)) * n).clamp(0.0, 1.0)
+    }
+
+    /// The change to character `index` of `count`.
+    pub fn effect(&self, index: usize, count: usize) -> GlyphEffect {
+        let w = self.coverage(index, count);
+        let lerp = |none: f64, target: f64| none + (target - none) * w;
+        GlyphEffect {
+            position: Vec2::new(self.position.x * w, self.position.y * w),
+            scale: lerp(1.0, self.scale),
+            rotation: self.rotation * w,
+            opacity: lerp(1.0, self.opacity.clamp(0.0, 1.0)),
+        }
+    }
+}
+
+impl std::hash::Hash for TextAnimatorState {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        hash_f64(self.start, state);
+        hash_f64(self.end, state);
+        hash_f64(self.offset, state);
+        hash_vec2(self.position, state);
+        hash_f64(self.scale, state);
+        hash_f64(self.rotation, state);
+        hash_f64(self.opacity, state);
+    }
+}
+
 /// A run of text, laid out and drawn as an outline like any other shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Text {
@@ -484,6 +648,10 @@ pub struct Text {
     /// own extent, which is why the two are one option rather than two.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap_width: Option<f64>,
+    /// Per-character changes, applied in order. Empty draws the run as one
+    /// block, as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub animators: Vec<TextAnimator>,
 }
 
 fn default_line_height() -> Property<f64> {
@@ -508,6 +676,7 @@ impl Text {
             line_height: default_line_height(),
             align: TextAlign::default(),
             wrap_width: None,
+            animators: Vec::new(),
         }
     }
 
@@ -534,6 +703,7 @@ impl Text {
             line_height: self.line_height.evaluate(t),
             align: self.align,
             wrap_width: self.wrap_width,
+            animators: self.animators.iter().map(|a| a.evaluate(t)).collect(),
         }
     }
 
@@ -545,6 +715,7 @@ impl Text {
             || self.stroke_width.is_animated()
             || self.tracking.is_animated()
             || self.line_height.is_animated()
+            || self.animators.iter().any(TextAnimator::is_animated)
     }
 }
 
@@ -670,9 +841,27 @@ pub struct TextState {
     pub line_height: f64,
     pub align: TextAlign,
     pub wrap_width: Option<f64>,
+    pub animators: Vec<TextAnimatorState>,
 }
 
 impl TextState {
+    /// What every animator together does to character `index` of `count`:
+    /// moves and turns add, scales and opacities multiply.
+    pub fn glyph_effect(&self, index: usize, count: usize) -> GlyphEffect {
+        self.animators.iter().fold(GlyphEffect::NONE, |acc, a| {
+            let e = a.effect(index, count);
+            GlyphEffect {
+                position: Vec2::new(
+                    acc.position.x + e.position.x,
+                    acc.position.y + e.position.y,
+                ),
+                scale: acc.scale * e.scale,
+                rotation: acc.rotation + e.rotation,
+                opacity: acc.opacity * e.opacity,
+            }
+        })
+    }
+
     pub fn has_stroke(&self) -> bool {
         self.stroke_width > 0.0 && self.stroke.a > 0.0
     }
@@ -700,6 +889,10 @@ impl std::hash::Hash for TextState {
                 hash_f64(w, state);
             }
             None => false.hash(state),
+        }
+        self.animators.len().hash(state);
+        for a in &self.animators {
+            a.hash(state);
         }
     }
 }
@@ -870,5 +1063,77 @@ mod tests {
         let plain = serde_json::to_string(&Text::new("Hi", 40.0, Rgba::WHITE)).unwrap();
         assert!(!plain.contains("gradient"), "a solid fill writes nothing new");
         assert!(serde_json::from_str::<Text>(&plain).unwrap().gradient.is_none());
+    }
+}
+
+#[cfg(test)]
+mod animator_tests {
+    use super::*;
+
+    fn state() -> TextAnimatorState {
+        TextAnimatorState {
+            start: 0.0,
+            end: 1.0,
+            offset: 0.0,
+            position: Vec2::new(10.0, 0.0),
+            scale: 0.0,
+            rotation: 90.0,
+            opacity: 0.0,
+        }
+    }
+
+    #[test]
+    fn coverage_is_the_overlap_of_the_range_with_each_character() {
+        let a = TextAnimatorState { start: 0.25, end: 0.75, ..state() };
+        // Four characters: the middle two are covered, the outer two not at all.
+        let covered: Vec<f64> = (0..4).map(|i| a.coverage(i, 4)).collect();
+        assert_eq!(covered, vec![0.0, 1.0, 1.0, 0.0]);
+        // Half a character in is half the change.
+        let b = TextAnimatorState { start: 0.0, end: 0.125, ..state() };
+        assert!((b.coverage(0, 4) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_backwards_range_is_the_same_range_and_offset_slides_it() {
+        let forwards = TextAnimatorState { start: 0.25, end: 0.75, ..state() };
+        let backwards = TextAnimatorState { start: 0.75, end: 0.25, ..state() };
+        assert_eq!(forwards.coverage(1, 4), backwards.coverage(1, 4));
+        let slid = TextAnimatorState { offset: 0.25, ..forwards };
+        assert_eq!(slid.coverage(1, 4), 0.0);
+        assert_eq!(slid.coverage(3, 4), 1.0);
+    }
+
+    #[test]
+    fn a_character_goes_that_far_towards_the_target() {
+        let half = TextAnimatorState { end: 0.5, ..state() }.effect(0, 1);
+        assert_eq!(half.opacity, 0.5);
+        assert_eq!(half.scale, 0.5);
+        assert_eq!(half.rotation, 45.0);
+        assert_eq!(half.position, Vec2::new(5.0, 0.0));
+        assert!(TextAnimatorState { end: 0.0, ..state() }.effect(0, 1).is_none());
+    }
+
+    #[test]
+    fn animators_compose_by_adding_moves_and_multiplying_scales() {
+        let mut text = Text::new("ab", 10.0, Rgba::WHITE);
+        text.animators = vec![TextAnimator::default(), TextAnimator::default()];
+        for a in &mut text.animators {
+            a.opacity = Property::constant(0.5);
+            a.rotation = Property::constant(10.0);
+        }
+        let e = text.evaluate(Ticks::ZERO).glyph_effect(0, 2);
+        assert_eq!(e.opacity, 0.25);
+        assert_eq!(e.rotation, 20.0);
+    }
+
+    #[test]
+    fn animators_round_trip_and_an_old_run_has_none() {
+        let mut text = Text::new("Hi", 40.0, Rgba::WHITE);
+        let plain = serde_json::to_string(&text).unwrap();
+        assert!(!plain.contains("animators"));
+        text.animators.push(TextAnimator::default());
+        let json = serde_json::to_string(&text).unwrap();
+        assert_eq!(serde_json::from_str::<Text>(&json).unwrap(), text);
+        assert!(serde_json::from_str::<Text>(&plain).unwrap().animators.is_empty());
     }
 }

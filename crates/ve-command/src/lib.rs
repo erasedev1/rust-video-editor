@@ -53,8 +53,8 @@ pub use effect_commands::{
 };
 pub use graphic_commands::{
     animatable_graphic_properties, graphic_clip, graphic_property_ref, AddGraphic,
-    DuplicateGraphic, EditGraphicKeyframes, GraphicOption, GraphicProperty, RemoveGraphic,
-    RenameGraphic, SetGraphicOption, SetGraphicProperty, SetGraphicText,
+    AnimatorProperty, DuplicateGraphic, EditGraphicKeyframes, GraphicOption, GraphicProperty,
+    RemoveGraphic, RenameGraphic, SetGraphicOption, SetGraphicProperty, SetGraphicText,
 };
 pub use history::{History, HistoryEntry};
 pub use keyframe_commands::{

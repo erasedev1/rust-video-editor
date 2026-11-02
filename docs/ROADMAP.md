@@ -568,9 +568,10 @@ captions costs, and what finding the one on screen costs per frame.
 - Text ✅ — a font, a size, alignment and wrapping, shaped and drawn
 - Nested compositions ✅ — delivered in Phase 3
 - Gradient fill ✅ — a two-stop linear ramp on shapes and text
-- Text animation, motion paths, expressions
+- Text animation ✅ — animators over a range of characters
+- Motion paths, expressions
 
-**Shapes, text and gradient fills are done; the rest of the phase is not.**
+**Shapes, text, gradient fills and text animation are done; the rest of the phase is not.**
 
 A **graphic** is the first thing in the project that is neither media nor an
 arrangement of it: it is the picture itself. So it sits beside compositions as
@@ -612,9 +613,26 @@ frame and pays the draw each time. That is why animating a graphic's
 animating its *content* is not, and why the two are different controls rather
 than one list.
 
-What is **not** here. There is no **text animation** in the sense the phase
-means it: a title's characters cannot yet be animated individually, which needs
-a per-glyph transform the layout does not currently hand back. There are no
+**Text animation** follows After Effects' model, because it is the one people already
+know: an animator names a *range* of characters (`start`, `end`, `offset`, as
+fractions of the run) and a set of changes — move, scale, rotate, opacity — and
+the characters in the range receive them. Animating the range is what makes
+text arrive one letter at a time: an animator that fades to nothing over
+`[start, 1]` reveals the title as `start` is keyframed from 0 to 1. A character
+half inside the range gets half the change, so a smoothly moving range gives
+smooth motion rather than whole-letter steps. All of it is `Property`, so it
+keyframes and graphs like any other value, and the edit that adds or removes an
+animator is an undoable `SetGraphicOption`.
+
+The cost is said out loud: without animators a run is **one** path filled once,
+and with any it is one path **per glyph**, so glyphs that overlap double-blend
+at partial opacity. The picture also grows by however far letters travel outside
+the layout box, padded equally on all four sides so the title's centre — and
+so its place on the canvas — does not drift as the letters fly. An animated run
+misses the graphic cache for the same reason animated content always does.
+
+What is **not** here. No per-character *colour*, and no random or "wiggly"
+selector: the range is a window, not a noise source. There are no
 **motion paths** — a position that follows a curve rather than interpolating
 between keyframes — which needs a path as a property kind, a change to the
 registry's shape rather than one more entry in it. There are no

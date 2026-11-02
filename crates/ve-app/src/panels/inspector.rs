@@ -2,8 +2,8 @@
 
 use egui::{DragValue, RichText, Ui};
 use ve_command::{
-    graphic_property_ref, ClipProperty, GraphicOption, GraphicProperty, PropertyValue,
-    TrackLevel,
+    graphic_property_ref, AnimatorProperty, ClipProperty, GraphicOption, GraphicProperty,
+    PropertyValue, TrackLevel,
 };
 use ve_core::registry::{EffectCategory, EffectRegistry, ParamKind};
 use ve_core::{
@@ -1184,6 +1184,10 @@ fn graphic_controls(ui: &mut Ui, graphic: &Graphic, at: Ticks, actions: &mut Vec
         }
     }
 
+    if let GraphicContent::Text(text) = &graphic.content {
+        animator_sections(ui, graphic, text, at, actions);
+    }
+
     // Fill and stroke mean the same thing on both, and are drawn by the same
     // code, so they get one section whichever kind this is.
     section(ui, "Paint", |ui| {
@@ -1202,6 +1206,68 @@ fn graphic_controls(ui: &mut Ui, graphic: &Graphic, at: Ticks, actions: &mut Vec
             actions,
         );
     });
+}
+
+/// One section per text animator, and the button that adds another.
+///
+/// Every row is a plain graphic property, so the keyframe and graph editors
+/// reach an animator's range and changes exactly as they reach a font size.
+fn animator_sections(
+    ui: &mut Ui,
+    graphic: &Graphic,
+    text: &ve_core::Text,
+    at: Ticks,
+    actions: &mut Vec<Action>,
+) {
+    let id = graphic.id;
+    for index in 0..text.animators.len() {
+        section(ui, &format!("Animator {}", index + 1), |ui| {
+            for (prop, label, range, speed, suffix) in [
+                (AnimatorProperty::Start, "Start", 0.0..=1.0, 0.005, ""),
+                (AnimatorProperty::End, "End", 0.0..=1.0, 0.005, ""),
+                (AnimatorProperty::Offset, "Offset", -1.0..=1.0, 0.005, ""),
+                (AnimatorProperty::Scale, "Scale", 0.0..=10.0, 0.01, "×"),
+                (AnimatorProperty::Rotation, "Rotate", -720.0..=720.0, 1.0, "°"),
+                (AnimatorProperty::Opacity, "Opacity", 0.0..=1.0, 0.01, ""),
+            ] {
+                graphic_scalar_row(
+                    ui,
+                    graphic,
+                    GraphicProperty::Animator(index, prop),
+                    label,
+                    range,
+                    speed,
+                    suffix,
+                    at,
+                    actions,
+                );
+            }
+            graphic_point_row(
+                ui,
+                graphic,
+                GraphicProperty::Animator(index, AnimatorProperty::Position),
+                "Move",
+                at,
+                actions,
+            );
+            if ui.button("Remove animator").clicked() {
+                let mut list = text.animators.clone();
+                list.remove(index);
+                actions.push(Action::SetGraphicOption {
+                    graphic: id,
+                    option: GraphicOption::Animators(list),
+                });
+            }
+        });
+    }
+    if ui.button("Add text animator").clicked() {
+        let mut list = text.animators.clone();
+        list.push(ve_core::TextAnimator::default());
+        actions.push(Action::SetGraphicOption {
+            graphic: id,
+            option: GraphicOption::Animators(list),
+        });
+    }
 }
 
 /// The switch that turns the fill into a ramp, and — while there is one — the

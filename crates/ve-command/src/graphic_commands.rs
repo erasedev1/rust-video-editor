@@ -26,7 +26,7 @@ use std::any::Any;
 
 use ve_core::{
     FontSpec, Gradient, Graphic, GraphicContent, GraphicId, Project, Shape, ShapeKind, Text,
-    TextAlign,
+    TextAlign, TextAnimator,
 };
 use ve_time::Ticks;
 
@@ -37,6 +37,42 @@ use crate::{Command, CommandError, PropertyValue};
 /// rather than a panic.
 fn graphic_mut(project: &mut Project, id: GraphicId) -> Result<&mut Graphic, CommandError> {
     project.graphic_mut(id).ok_or(CommandError::GraphicNotFound(id))
+}
+
+/// Which value of a text animator a command targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimatorProperty {
+    Start,
+    End,
+    Offset,
+    Position,
+    Scale,
+    Rotation,
+    Opacity,
+}
+
+impl AnimatorProperty {
+    pub const ALL: [AnimatorProperty; 7] = [
+        AnimatorProperty::Start,
+        AnimatorProperty::End,
+        AnimatorProperty::Offset,
+        AnimatorProperty::Position,
+        AnimatorProperty::Scale,
+        AnimatorProperty::Rotation,
+        AnimatorProperty::Opacity,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AnimatorProperty::Start => "Start",
+            AnimatorProperty::End => "End",
+            AnimatorProperty::Offset => "Offset",
+            AnimatorProperty::Position => "Position",
+            AnimatorProperty::Scale => "Scale",
+            AnimatorProperty::Rotation => "Rotation",
+            AnimatorProperty::Opacity => "Opacity",
+        }
+    }
 }
 
 /// Which animatable value on a graphic a command targets.
@@ -64,6 +100,8 @@ pub enum GraphicProperty {
     GradientAngle,
     Stroke,
     StrokeWidth,
+    /// One value of the text animator at this position in the run's list.
+    Animator(usize, AnimatorProperty),
 }
 
 impl GraphicProperty {
@@ -80,6 +118,7 @@ impl GraphicProperty {
             GraphicProperty::GradientAngle => "Gradient Angle",
             GraphicProperty::Stroke => "Stroke",
             GraphicProperty::StrokeWidth => "Stroke Width",
+            GraphicProperty::Animator(_, p) => p.label(),
         }
     }
 }
@@ -205,6 +244,97 @@ macro_rules! with_graphic_property {
                 use PropertyValue::Scalar as $kind;
                 $body
             }
+            (
+                GraphicContent::Text(text),
+                GraphicProperty::Animator(i, AnimatorProperty::Start),
+            ) => {
+                let $p = &mut text
+                    .animators
+                    .get_mut(i)
+                    .ok_or_else(|| CommandError::Rejected("there is no such animator".into()))?
+                    .start;
+                #[allow(unused)]
+                use PropertyValue::Scalar as $kind;
+                $body
+            }
+            (
+                GraphicContent::Text(text),
+                GraphicProperty::Animator(i, AnimatorProperty::End),
+            ) => {
+                let $p = &mut text
+                    .animators
+                    .get_mut(i)
+                    .ok_or_else(|| CommandError::Rejected("there is no such animator".into()))?
+                    .end;
+                #[allow(unused)]
+                use PropertyValue::Scalar as $kind;
+                $body
+            }
+            (
+                GraphicContent::Text(text),
+                GraphicProperty::Animator(i, AnimatorProperty::Offset),
+            ) => {
+                let $p = &mut text
+                    .animators
+                    .get_mut(i)
+                    .ok_or_else(|| CommandError::Rejected("there is no such animator".into()))?
+                    .offset;
+                #[allow(unused)]
+                use PropertyValue::Scalar as $kind;
+                $body
+            }
+            (
+                GraphicContent::Text(text),
+                GraphicProperty::Animator(i, AnimatorProperty::Position),
+            ) => {
+                let $p = &mut text
+                    .animators
+                    .get_mut(i)
+                    .ok_or_else(|| CommandError::Rejected("there is no such animator".into()))?
+                    .position;
+                #[allow(unused)]
+                use PropertyValue::Point as $kind;
+                $body
+            }
+            (
+                GraphicContent::Text(text),
+                GraphicProperty::Animator(i, AnimatorProperty::Scale),
+            ) => {
+                let $p = &mut text
+                    .animators
+                    .get_mut(i)
+                    .ok_or_else(|| CommandError::Rejected("there is no such animator".into()))?
+                    .scale;
+                #[allow(unused)]
+                use PropertyValue::Scalar as $kind;
+                $body
+            }
+            (
+                GraphicContent::Text(text),
+                GraphicProperty::Animator(i, AnimatorProperty::Rotation),
+            ) => {
+                let $p = &mut text
+                    .animators
+                    .get_mut(i)
+                    .ok_or_else(|| CommandError::Rejected("there is no such animator".into()))?
+                    .rotation;
+                #[allow(unused)]
+                use PropertyValue::Scalar as $kind;
+                $body
+            }
+            (
+                GraphicContent::Text(text),
+                GraphicProperty::Animator(i, AnimatorProperty::Opacity),
+            ) => {
+                let $p = &mut text
+                    .animators
+                    .get_mut(i)
+                    .ok_or_else(|| CommandError::Rejected("there is no such animator".into()))?
+                    .opacity;
+                #[allow(unused)]
+                use PropertyValue::Scalar as $kind;
+                $body
+            }
             (content, target) => {
                 return Err(CommandError::Rejected(format!(
                     "a {} has no {}",
@@ -266,6 +396,27 @@ pub fn graphic_property_ref<'a>(
         (GraphicContent::Text(t), GraphicProperty::GradientAngle) => {
             PropertyRef::Scalar(&t.gradient.as_ref()?.angle)
         }
+        (GraphicContent::Text(t), GraphicProperty::Animator(i, AnimatorProperty::Start)) => {
+            PropertyRef::Scalar(&t.animators.get(i)?.start)
+        }
+        (GraphicContent::Text(t), GraphicProperty::Animator(i, AnimatorProperty::End)) => {
+            PropertyRef::Scalar(&t.animators.get(i)?.end)
+        }
+        (GraphicContent::Text(t), GraphicProperty::Animator(i, AnimatorProperty::Offset)) => {
+            PropertyRef::Scalar(&t.animators.get(i)?.offset)
+        }
+        (GraphicContent::Text(t), GraphicProperty::Animator(i, AnimatorProperty::Position)) => {
+            PropertyRef::Point(&t.animators.get(i)?.position)
+        }
+        (GraphicContent::Text(t), GraphicProperty::Animator(i, AnimatorProperty::Scale)) => {
+            PropertyRef::Scalar(&t.animators.get(i)?.scale)
+        }
+        (GraphicContent::Text(t), GraphicProperty::Animator(i, AnimatorProperty::Rotation)) => {
+            PropertyRef::Scalar(&t.animators.get(i)?.rotation)
+        }
+        (GraphicContent::Text(t), GraphicProperty::Animator(i, AnimatorProperty::Opacity)) => {
+            PropertyRef::Scalar(&t.animators.get(i)?.opacity)
+        }
         _ => return None,
     })
 }
@@ -293,6 +444,11 @@ pub fn animatable_graphic_properties(graphic: &Graphic) -> Vec<GraphicProperty> 
             t.gradient.is_some(),
         ),
     };
+    if let GraphicContent::Text(t) = &graphic.content {
+        for i in 0..t.animators.len() {
+            list.extend(AnimatorProperty::ALL.map(|p| GraphicProperty::Animator(i, p)));
+        }
+    }
     if has_gradient {
         list.push(GraphicProperty::GradientTo);
         list.push(GraphicProperty::GradientAngle);
@@ -664,6 +820,9 @@ pub enum GraphicOption {
     /// colour and angle inside it are properties, but whether there is a
     /// gradient at all has no halfway point.
     Gradient(Option<Gradient>),
+    /// The text animators, whole. Adding, removing and reordering them has no
+    /// halfway point, so the list is replaced rather than edited in place.
+    Animators(Vec<TextAnimator>),
 }
 
 impl GraphicOption {
@@ -674,6 +833,7 @@ impl GraphicOption {
             GraphicOption::Align(_) => "Set Alignment",
             GraphicOption::WrapWidth(_) => "Set Wrapping",
             GraphicOption::Gradient(_) => "Set Gradient",
+            GraphicOption::Animators(_) => "Edit Text Animators",
         }
     }
 
@@ -698,6 +858,9 @@ impl GraphicOption {
             (GraphicOption::Gradient(_), GraphicContent::Text(t)) => {
                 Ok(GraphicOption::Gradient(t.gradient.clone()))
             }
+            (GraphicOption::Animators(_), GraphicContent::Text(t)) => {
+                Ok(GraphicOption::Animators(t.animators.clone()))
+            }
             _ => Err(CommandError::Rejected(format!(
                 "{} does not apply to this graphic",
                 self.label()
@@ -718,6 +881,7 @@ impl GraphicOption {
             }
             (GraphicOption::Gradient(g), GraphicContent::Shape(s)) => s.gradient = g.clone(),
             (GraphicOption::Gradient(g), GraphicContent::Text(t)) => t.gradient = g.clone(),
+            (GraphicOption::Animators(a), GraphicContent::Text(t)) => t.animators = a.clone(),
             _ => {
                 return Err(CommandError::Rejected(format!(
                     "{} does not apply to this graphic",
