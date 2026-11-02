@@ -7,6 +7,7 @@ members = [
     "crates/ve-command",
     "crates/ve-caption",
     "crates/ve-interchange",
+    "crates/ve-plugin",
     "crates/ve-graphics",
     "crates/ve-media",
     "crates/ve-render",
@@ -31,6 +32,7 @@ ve-project = { path = "crates/ve-project" }
 ve-command = { path = "crates/ve-command" }
 ve-caption = { path = "crates/ve-caption" }
 ve-interchange = { path = "crates/ve-interchange" }
+ve-plugin = { path = "crates/ve-plugin" }
 ve-graphics = { path = "crates/ve-graphics" }
 ve-media = { path = "crates/ve-media" }
 ve-render = { path = "crates/ve-render" }

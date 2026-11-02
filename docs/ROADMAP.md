@@ -1150,7 +1150,7 @@ and what the cache is worth against it.
 ## Phase 9 — Ecosystem
 
 - Project interchange — **EDL ✅** (CMX3600), **OTIO ✅**, AAF
-- Plugin API
+- Plugin API — **manifests ✅** (declared effects), render programs and scripting host to come
 - Scripting, including property **expressions**, carried over from Phase 8
 - Documentation for people extending the editor rather than building it
 
@@ -1180,6 +1180,16 @@ In the editor, **File → Import/Export EDL…** and **Import/Export OTIO…**. 
 existing work: clips are packed first-fit onto new tracks, added as one undo
 step, and events with no matching media are counted in the status rather than
 guessed at.
+
+**Plugins** start with the declaration half. `ve-plugin` reads a `plugin.json`
+(`api_version` 1) that declares effects in the registry's own terms — kind,
+category, parameters with ranges and defaults — and registers them, so a
+plugin effect gets menu entry, inspector controls and keyframes with nothing
+downstream changed. Kinds must be namespaced by the plugin id, may not collide
+with a built-in or another plugin, and a plugin that breaks a rule is rejected
+whole. `load_dir` loads a directory of plugins, skipping and reporting broken
+ones. No plugin code runs yet: a declared effect has no render program, so it
+is skipped at render time exactly as an effect from an uninstalled plugin is.
 
 ## Standing commitments
 
