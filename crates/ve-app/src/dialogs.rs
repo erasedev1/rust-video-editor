@@ -118,3 +118,22 @@ pub fn pick_edl_to_save(suggested: &str) -> Option<PathBuf> {
         None => path.with_extension("edl"),
     })
 }
+
+pub fn pick_otio_to_open() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("OpenTimelineIO", &["otio"])
+        .set_title("Import OTIO")
+        .pick_file()
+}
+
+pub fn pick_otio_to_save(suggested: &str) -> Option<PathBuf> {
+    let path = rfd::FileDialog::new()
+        .add_filter("OpenTimelineIO", &["otio"])
+        .set_file_name(format!("{suggested}.otio"))
+        .set_title("Export OTIO")
+        .save_file()?;
+    Some(match path.extension() {
+        Some(_) => path,
+        None => path.with_extension("otio"),
+    })
+}

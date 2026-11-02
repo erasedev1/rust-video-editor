@@ -20,5 +20,7 @@
 //! spelling, and nothing is invented for it.
 
 pub mod edl;
+pub mod otio;
 
 pub use edl::{Edl, EdlError, EdlEvent, PlacedClip, Placement, Resolved};
+pub use otio::{OtioClip, OtioError};

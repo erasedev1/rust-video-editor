@@ -102,3 +102,35 @@ fn export_writes_a_list_that_imports_back() {
     assert_eq!(imported.source_in, rate.frame_to_ticks(30));
     assert_eq!(imported.duration, rate.frame_to_ticks(90));
 }
+
+#[test]
+fn otio_export_imports_back_with_its_gap() {
+    let mut editor = Editor::new();
+    let asset = editor.state.project.assets[0].id;
+    let id = editor.state.project.new_clip_id();
+    let rate = editor.state.active_sequence().unwrap().rate();
+    let clip = Clip::new(
+        id,
+        asset,
+        "beach",
+        rate.frame_to_ticks(30),
+        rate.frame_to_ticks(60),
+        rate.frame_to_ticks(90),
+    );
+    editor.state.project.active_mut().unwrap().tracks[0].insert_clip(clip).unwrap();
+
+    let path = editor.scratch.path().join("out.otio");
+    editor.act(Action::ExportOtio(path.clone()));
+    editor.act(Action::ImportOtio(path));
+    assert!(editor.status().contains("imported 1 clip"), "{}", editor.status());
+    let seq = editor.state.active_sequence().unwrap();
+    let imported = seq.tracks.last().unwrap().clips()[0].clone();
+    assert_eq!(imported.timeline_start, rate.frame_to_ticks(60));
+    assert_eq!(imported.source_in, rate.frame_to_ticks(30));
+
+    editor.act(Action::Undo);
+    assert_eq!(
+        editor.state.active_sequence().unwrap().tracks.iter().map(|t| t.len()).sum::<usize>(),
+        1
+    );
+}

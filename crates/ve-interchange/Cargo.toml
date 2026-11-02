@@ -11,3 +11,4 @@ repository.workspace = true
 ve-core = { workspace = true }
 ve-time = { workspace = true }
 thiserror = { workspace = true }
+serde_json = { workspace = true }

@@ -260,6 +260,10 @@ pub enum Action {
     ToggleCaptionOverlay,
     /// Reads a CMX3600 list, laying its events on new tracks.
     ImportEdl(PathBuf),
+    /// Reads an OpenTimelineIO file, laying its clips on new tracks.
+    ImportOtio(PathBuf),
+    /// Writes the active sequence as an OpenTimelineIO file.
+    ExportOtio(PathBuf),
     /// Writes the active sequence as a CMX3600 list.
     ExportEdl(PathBuf),
 
@@ -1920,6 +1924,54 @@ pub fn dispatch(
 
         Action::ImportEdl(path) => import_edl(state, sequence_id, &path),
 
+        Action::ImportOtio(path) => match std::fs::read_to_string(&path) {
+            Err(e) => {
+                state.set_status(Status::error(format!("reading {}: {e}", path.display())))
+            }
+            Ok(text) => {
+                match ve_interchange::otio::read(
+                    &text,
+                    ve_interchange::otio::resolve_in(&state.project),
+                ) {
+                    Ok(placement) if placement.clips.is_empty() => {
+                        state.set_status(Status::warning(
+                            "none of the clips matched media in the project — import the footage first",
+                        ));
+                    }
+                    Ok(placement) => lay_out_placement(
+                        state,
+                        sequence_id,
+                        "Import OTIO",
+                        "timeline",
+                        placement,
+                        Vec::new(),
+                    ),
+                    Err(e) => state.set_status(Status::error(e.to_string())),
+                }
+            }
+        },
+
+        Action::ExportOtio(path) => {
+            let Some(sequence) = state.project.sequence(sequence_id) else { return };
+            let (text, warnings) = ve_interchange::otio::write(&state.project, sequence);
+            match std::fs::write(&path, text) {
+                Ok(()) => {
+                    let mut line = format!("wrote {}", path.display());
+                    if let Some(first) = warnings.first() {
+                        line.push_str(&format!(" — {first}"));
+                    }
+                    state.set_status(if warnings.is_empty() {
+                        Status::info(line)
+                    } else {
+                        Status::warning(line)
+                    });
+                }
+                Err(e) => {
+                    state.set_status(Status::error(format!("writing {}: {e}", path.display())))
+                }
+            }
+        }
+
         Action::ExportEdl(path) => {
             let Some(sequence) = state.project.sequence(sequence_id) else { return };
             let edl = ve_interchange::Edl::from_sequence(&state.project, sequence);
@@ -3202,9 +3254,23 @@ fn import_edl(state: &mut EditorState, sequence: SequenceId, path: &std::path::P
         return;
     }
 
-    // First-fit packing into lanes, one set per track kind.
+    lay_out_placement(state, sequence, "Import EDL", "list", placement, edl.warnings.clone());
+}
+
+/// Puts described clips on new tracks as one undoable step.
+///
+/// First-fit packing into lanes, one set per track kind. Shared by every
+/// interchange import, since they all arrive as a [`ve_interchange::Placement`].
+fn lay_out_placement(
+    state: &mut EditorState,
+    sequence: SequenceId,
+    name: &str,
+    what: &str,
+    placement: ve_interchange::Placement,
+    file_warnings: Vec<String>,
+) {
     let mut lanes: Vec<(TrackKind, TrackId, Vec<ve_time::TimeRange>)> = Vec::new();
-    let mut command = Compound::new("Import EDL");
+    let mut command = Compound::new(name);
     let mut clip_count = 0;
     for placed in &placement.clips {
         let range = TimeRange::new(placed.timeline_start, placed.duration);
@@ -3239,7 +3305,7 @@ fn import_edl(state: &mut EditorState, sequence: SequenceId, path: &std::path::P
         Ok(()) => {
             state.mark_edited();
             let mut notes: Vec<String> =
-                edl.warnings.iter().chain(&placement.warnings).cloned().collect();
+                file_warnings.iter().chain(&placement.warnings).cloned().collect();
             if !placement.unresolved.is_empty() {
                 notes.insert(
                     0,
@@ -3247,7 +3313,7 @@ fn import_edl(state: &mut EditorState, sequence: SequenceId, path: &std::path::P
                 );
             }
             let mut line =
-                format!("imported {clip_count} clip{} from the list", plural(clip_count));
+                format!("imported {clip_count} clip{} from the {what}", plural(clip_count));
             if let Some(first) = notes.first() {
                 line.push_str(&format!(" — {first}"));
                 if notes.len() > 1 {

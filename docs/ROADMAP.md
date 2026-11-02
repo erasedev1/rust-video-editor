@@ -1149,7 +1149,7 @@ and what the cache is worth against it.
 
 ## Phase 9 — Ecosystem
 
-- Project interchange — **EDL ✅** (CMX3600), AAF, OTIO
+- Project interchange — **EDL ✅** (CMX3600), **OTIO ✅**, AAF
 - Plugin API
 - Scripting, including property **expressions**, carried over from Phase 8
 - Documentation for people extending the editor rather than building it
@@ -1170,7 +1170,13 @@ names are eight characters and made unique, with the full file name kept in
 `FROM CLIP NAME` / `SOURCE FILE` comments, which is what the importer matches
 first.
 
-In the editor, **File → Import EDL… / Export EDL…**. An import never lands on
+**OTIO** is JSON and carries its own rates, so it keeps gaps and names media by
+URL; clips, gaps and constant speed (`LinearTimeWarp`) round-trip, and
+transitions, nested stacks and other effects are warned about and skipped.
+Both formats share one placement path, so every import lands on new tracks as
+a single undo step.
+
+In the editor, **File → Import/Export EDL…** and **Import/Export OTIO…**. An import never lands on
 existing work: clips are packed first-fit onto new tracks, added as one undo
 step, and events with no matching media are counted in the status rather than
 guessed at.
