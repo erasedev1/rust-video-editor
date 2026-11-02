@@ -3906,6 +3906,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ve-interchange"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+ "ve-core",
+ "ve-time",
+]
+
+[[package]]
 name = "ve-media"
 version = "0.1.0"
 dependencies = [

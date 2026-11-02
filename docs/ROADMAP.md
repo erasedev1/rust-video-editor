@@ -1149,9 +1149,26 @@ and what the cache is worth against it.
 
 ## Phase 9 — Ecosystem
 
-A plugin API, scripting (including property **expressions**, carried over from
-Phase 8), project interchange (AAF, EDL, OTIO), and documentation
-for people extending it rather than building it.
+- Project interchange — **EDL ✅** (CMX3600), AAF, OTIO
+- Plugin API
+- Scripting, including property **expressions**, carried over from Phase 8
+- Documentation for people extending the editor rather than building it
+
+**Started.** Interchange goes first because it is self-contained and needs
+nothing decided about a plugin boundary.
+
+`ve-interchange` reads and writes CMX3600 lists, and follows `ve-caption`'s
+shape: it never allocates IDs or touches a project. Reading produces events;
+`Edl::place` turns them into described clips (`PlacedClip`) for the caller to
+number and insert through undoable commands. Events hold frame indices at the
+list's rate, so a read followed by a write reproduces the file's numbers.
+
+What an EDL cannot carry is said plainly: cuts and constant speed changes
+(`M2`) only. A dissolve or wipe is read, warned about and placed as a cut, as
+the model has no transitions; reverse motion is refused with a warning. Reel
+names are eight characters and made unique, with the full file name kept in
+`FROM CLIP NAME` / `SOURCE FILE` comments, which is what the importer matches
+first. **Not wired into the app yet** — import and export menu entries are next.
 
 ## Standing commitments
 

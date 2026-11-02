@@ -1,0 +1,13 @@
+[package]
+name = "ve-interchange"
+description = "Project interchange (CMX3600 EDL, and later AAF and OTIO) for the Verge video editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ve-core = { workspace = true }
+ve-time = { workspace = true }
+thiserror = { workspace = true }
