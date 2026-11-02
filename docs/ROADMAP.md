@@ -1168,7 +1168,12 @@ What an EDL cannot carry is said plainly: cuts and constant speed changes
 the model has no transitions; reverse motion is refused with a warning. Reel
 names are eight characters and made unique, with the full file name kept in
 `FROM CLIP NAME` / `SOURCE FILE` comments, which is what the importer matches
-first. **Not wired into the app yet** — import and export menu entries are next.
+first.
+
+In the editor, **File → Import EDL… / Export EDL…**. An import never lands on
+existing work: clips are packed first-fit onto new tracks, added as one undo
+step, and events with no matching media are counted in the status rather than
+guessed at.
 
 ## Standing commitments
 

@@ -99,3 +99,22 @@ pub fn pick_caption_file_to_save(suggested: &str) -> Option<PathBuf> {
         None => path.with_extension("srt"),
     })
 }
+
+pub fn pick_edl_to_open() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Edit decision list", &["edl"])
+        .set_title("Import EDL")
+        .pick_file()
+}
+
+pub fn pick_edl_to_save(suggested: &str) -> Option<PathBuf> {
+    let path = rfd::FileDialog::new()
+        .add_filter("Edit decision list", &["edl"])
+        .set_file_name(format!("{suggested}.edl"))
+        .set_title("Export EDL")
+        .save_file()?;
+    Some(match path.extension() {
+        Some(_) => path,
+        None => path.with_extension("edl"),
+    })
+}

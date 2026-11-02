@@ -21,6 +21,7 @@ ve-time = { workspace = true }
 ve-project = { workspace = true }
 ve-command = { workspace = true }
 ve-caption = { workspace = true }
+ve-interchange = { workspace = true }
 ve-media = { workspace = true }
 ve-render = { workspace = true }
 ve-engine = { workspace = true }

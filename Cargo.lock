@@ -3814,6 +3814,7 @@ dependencies = [
  "ve-engine",
  "ve-export",
  "ve-graphics",
+ "ve-interchange",
  "ve-media",
  "ve-metrics",
  "ve-project",

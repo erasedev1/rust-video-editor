@@ -258,6 +258,10 @@ pub enum Action {
     },
     /// Whether captions are drawn over the preview.
     ToggleCaptionOverlay,
+    /// Reads a CMX3600 list, laying its events on new tracks.
+    ImportEdl(PathBuf),
+    /// Writes the active sequence as a CMX3600 list.
+    ExportEdl(PathBuf),
 
     // Whether one clip is smeared across the shutter when it moves.
     SetClipMotionBlur {
@@ -1914,6 +1918,34 @@ pub fn dispatch(
 
         Action::ImportCaptions(path) => import_captions(state, sequence_id, &path),
 
+        Action::ImportEdl(path) => import_edl(state, sequence_id, &path),
+
+        Action::ExportEdl(path) => {
+            let Some(sequence) = state.project.sequence(sequence_id) else { return };
+            let edl = ve_interchange::Edl::from_sequence(&state.project, sequence);
+            let count = edl.events.len();
+            match std::fs::write(&path, edl.to_text()) {
+                Ok(()) => {
+                    let mut line =
+                        format!("wrote {count} event{} to {}", plural(count), path.display());
+                    if let Some(first) = edl.warnings.first() {
+                        line.push_str(&format!(" — {first}"));
+                        if edl.warnings.len() > 1 {
+                            line.push_str(&format!(" (and {} more)", edl.warnings.len() - 1));
+                        }
+                    }
+                    state.set_status(if edl.warnings.is_empty() {
+                        Status::info(line)
+                    } else {
+                        Status::warning(line)
+                    });
+                }
+                Err(e) => {
+                    state.set_status(Status::error(format!("writing {}: {e}", path.display())))
+                }
+            }
+        }
+
         Action::ExportCaptions { track, path } => {
             let Some(captions) =
                 state.project.sequence(sequence_id).and_then(|s| s.caption_track(track))
@@ -3124,6 +3156,110 @@ fn import_captions(state: &mut EditorState, sequence: SequenceId, path: &std::pa
                 Status::warning(line)
             });
             state.warnings.extend(warnings);
+        }
+        Err(e) => state.set_status(Status::error(e.to_string())),
+    }
+}
+
+/// Reads a CMX3600 list onto tracks of its own.
+///
+/// New tracks every time, as with captions: an import should never land on top
+/// of work already on the timeline. Clips are packed first-fit into as many
+/// new lanes of each kind as the list's overlaps need, then added in one
+/// undoable step. Events whose footage is not in the project are counted and
+/// named in the status rather than guessed at.
+fn import_edl(state: &mut EditorState, sequence: SequenceId, path: &std::path::Path) {
+    let Some(seq) = state.project.sequence(sequence) else { return };
+    let rate = seq.rate();
+    let origin = rate.ticks_to_frame_round(seq.settings.start_timecode);
+
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            state.set_status(Status::error(format!("reading {}: {e}", path.display())));
+            return;
+        }
+    };
+    // Lists predate UTF-8; fall back to Latin-1 rather than refusing the file.
+    let text = match String::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(e) => e.into_bytes().into_iter().map(|b| b as char).collect(),
+    };
+    let edl = match ve_interchange::Edl::parse(&text, rate) {
+        Ok(edl) => edl,
+        Err(e) => {
+            state.set_status(Status::error(e.to_string()));
+            return;
+        }
+    };
+
+    let placement = edl.place(origin, ve_interchange::edl::resolve_in(&state.project, rate));
+    if placement.clips.is_empty() {
+        state.set_status(Status::warning(format!(
+            "none of the {} event(s) matched media in the project — import the footage first",
+            edl.events.len()
+        )));
+        return;
+    }
+
+    // First-fit packing into lanes, one set per track kind.
+    let mut lanes: Vec<(TrackKind, TrackId, Vec<ve_time::TimeRange>)> = Vec::new();
+    let mut command = Compound::new("Import EDL");
+    let mut clip_count = 0;
+    for placed in &placement.clips {
+        let range = TimeRange::new(placed.timeline_start, placed.duration);
+        let lane = lanes.iter().position(|(kind, _, taken)| {
+            *kind == placed.track_kind && taken.iter().all(|t| t.intersection(range).is_none())
+        });
+        let lane = match lane {
+            Some(i) => i,
+            None => {
+                let id = state.project.new_track_id();
+                command.push(Box::new(AddTrack::new(sequence, placed.track_kind).with_id(id)));
+                lanes.push((placed.track_kind, id, Vec::new()));
+                lanes.len() - 1
+            }
+        };
+        lanes[lane].2.push(range);
+
+        let mut clip = Clip::new(
+            state.project.new_clip_id(),
+            placed.asset,
+            placed.name.clone(),
+            placed.source_in,
+            placed.timeline_start,
+            placed.duration,
+        );
+        clip.speed = placed.speed;
+        command.push(Box::new(AddClip::new(sequence, lanes[lane].1, clip)));
+        clip_count += 1;
+    }
+
+    match state.history.execute(&mut state.project, Box::new(command)) {
+        Ok(()) => {
+            state.mark_edited();
+            let mut notes: Vec<String> =
+                edl.warnings.iter().chain(&placement.warnings).cloned().collect();
+            if !placement.unresolved.is_empty() {
+                notes.insert(
+                    0,
+                    format!("{} event(s) had no matching media", placement.unresolved.len()),
+                );
+            }
+            let mut line =
+                format!("imported {clip_count} clip{} from the list", plural(clip_count));
+            if let Some(first) = notes.first() {
+                line.push_str(&format!(" — {first}"));
+                if notes.len() > 1 {
+                    line.push_str(&format!(" (and {} more)", notes.len() - 1));
+                }
+            }
+            state.set_status(if notes.is_empty() {
+                Status::info(line)
+            } else {
+                Status::warning(line)
+            });
+            state.warnings.extend(notes);
         }
         Err(e) => state.set_status(Status::error(e.to_string())),
     }

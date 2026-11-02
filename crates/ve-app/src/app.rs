@@ -289,6 +289,29 @@ impl VergeApp {
                         actions_out.push(Action::OpenExportDialog);
                         ui.close();
                     }
+                    if ui.button("Import EDL…").clicked() {
+                        if let Some(path) = crate::dialogs::pick_edl_to_open() {
+                            actions_out.push(Action::ImportEdl(path));
+                        }
+                        ui.close();
+                    }
+                    if ui
+                        .button("Export EDL…")
+                        .on_hover_text(
+                            "cuts and speed changes only; transitions are not carried",
+                        )
+                        .clicked()
+                    {
+                        let name = self
+                            .state
+                            .active_sequence()
+                            .map(|s| s.name.clone())
+                            .unwrap_or_else(|| "sequence".into());
+                        if let Some(path) = crate::dialogs::pick_edl_to_save(&name) {
+                            actions_out.push(Action::ExportEdl(path));
+                        }
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);

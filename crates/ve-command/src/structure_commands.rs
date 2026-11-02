@@ -23,6 +23,14 @@ impl AddTrack {
         AddTrack { sequence, kind, track_id: None }
     }
 
+    /// Uses an ID the caller has already allocated, for a compound that has to
+    /// name the track in a later command (an EDL import adds tracks, then
+    /// clips onto them).
+    pub fn with_id(mut self, id: TrackId) -> Self {
+        self.track_id = Some(id);
+        self
+    }
+
     pub fn track_id(&self) -> Option<TrackId> {
         self.track_id
     }
