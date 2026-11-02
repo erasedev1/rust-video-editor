@@ -34,7 +34,7 @@ use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 use ve_core::{Size, TextAlign, TextState};
 
 use crate::fonts::FontLibrary;
-use crate::{colour, image_from_pixmap, RasterImage, MAX_DIMENSION};
+use crate::{colour, fill_paint, image_from_pixmap, RasterImage, MAX_DIMENSION};
 
 /// The margin an anti-aliased edge writes past the outline, in pixels.
 const ANTIALIAS_MARGIN: f32 = 1.0;
@@ -246,8 +246,11 @@ pub(crate) fn draw_text(state: &TextState, fonts: &FontLibrary) -> Option<Raster
 
     let mut pixmap = Pixmap::new(width as u32, height as u32)?;
     if state.has_fill() {
-        let mut paint = Paint { anti_alias: true, ..Paint::default() };
-        paint.set_color(colour(state.fill));
+        let paint = fill_paint(
+            state.fill,
+            state.gradient,
+            (margin, margin, metrics.width, metrics.height),
+        );
         // Non-zero winding, which is how a glyph says which of its contours are
         // counters: an even-odd fill would punch the bowl out of a 'b' and then
         // fill the hole in an 'o' that a stroke overlaps.
@@ -325,6 +328,7 @@ mod tests {
             font: FontSpec::default(),
             size: 48.0,
             fill: Rgba::WHITE,
+            gradient: None,
             stroke: Rgba::TRANSPARENT,
             stroke_width: 0.0,
             tracking: 0.0,

@@ -208,6 +208,47 @@ fn image_from_pixmap(pixmap: tiny_skia::Pixmap) -> RasterImage {
 
 /// Converts a model colour to `tiny-skia`'s, clamping what a hand-edited file
 /// might hold.
+/// A paint for a fill: the solid colour, or the ramp from it when the graphic
+/// has a gradient.
+///
+/// `left`, `top`, `width`, `height` are the box the ramp is stretched across —
+/// the shape's bounding box or the text's extent, not the picture, which is
+/// larger by the stroke and the anti-alias margin. The ramp runs through the
+/// centre of that box and is long enough that the two farthest corners land
+/// exactly on the two end colours, whatever the angle.
+pub(crate) fn fill_paint(
+    fill: ve_core::Rgba,
+    gradient: Option<ve_core::GradientState>,
+    (left, top, width, height): (f32, f32, f32, f32),
+) -> tiny_skia::Paint<'static> {
+    let mut paint = tiny_skia::Paint { anti_alias: true, ..tiny_skia::Paint::default() };
+    paint.set_color(colour(fill));
+    let Some(g) = gradient else { return paint };
+
+    let theta = (g.angle as f32).to_radians();
+    if !theta.is_finite() {
+        return paint;
+    }
+    let (dx, dy) = (theta.cos(), theta.sin());
+    let half = (width * dx.abs() + height * dy.abs()) / 2.0;
+    let (cx, cy) = (left + width / 2.0, top + height / 2.0);
+    let shader = tiny_skia::LinearGradient::new(
+        tiny_skia::Point::from_xy(cx - dx * half, cy - dy * half),
+        tiny_skia::Point::from_xy(cx + dx * half, cy + dy * half),
+        vec![
+            tiny_skia::GradientStop::new(0.0, colour(fill)),
+            tiny_skia::GradientStop::new(1.0, colour(g.to)),
+        ],
+        tiny_skia::SpreadMode::Pad,
+        tiny_skia::Transform::identity(),
+    );
+    // A degenerate ramp (an empty box) has no shader; the solid fill stands.
+    if let Some(shader) = shader {
+        paint.shader = shader;
+    }
+    paint
+}
+
 fn colour(c: ve_core::Rgba) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba(
         c.r.clamp(0.0, 1.0) as f32,

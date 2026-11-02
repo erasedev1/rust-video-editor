@@ -232,6 +232,66 @@ impl ShapeKind {
     }
 }
 
+/// A linear ramp from a graphic's fill colour to [`Gradient::to`].
+///
+/// A gradient is not a replacement for `fill` but an addition to it: the fill
+/// is the colour the ramp *starts* from, so a graphic with no gradient is
+/// exactly what it always was, every place that reads `fill` keeps reading it,
+/// and removing the gradient leaves a solid colour behind rather than nothing.
+///
+/// Two stops, deliberately. Both of the stops are [`Property`]s, so the ramp
+/// can fade, shift and rotate; a list of stops would need a keyframe model for
+/// a list, which no other property in the editor has.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Gradient {
+    /// The colour at the far end of the ramp.
+    pub to: Property<Rgba>,
+    /// Direction of the ramp in degrees clockwise from left-to-right: 0 runs
+    /// left to right, 90 runs top to bottom.
+    #[serde(default)]
+    pub angle: Property<f64>,
+}
+
+impl Gradient {
+    pub fn new(to: Rgba, angle: f64) -> Self {
+        Gradient { to: Property::constant(to), angle: Property::constant(angle) }
+    }
+
+    pub fn evaluate(&self, t: Ticks) -> GradientState {
+        GradientState { to: self.to.evaluate(t), angle: self.angle.evaluate(t) }
+    }
+
+    pub fn is_animated(&self) -> bool {
+        self.to.is_animated() || self.angle.is_animated()
+    }
+}
+
+/// A [`Gradient`] resolved at one instant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientState {
+    pub to: Rgba,
+    pub angle: f64,
+}
+
+impl std::hash::Hash for GradientState {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        hash_rgba(self.to, state);
+        hash_f64(self.angle, state);
+    }
+}
+
+/// Hashes an optional gradient, tagged so "none" and "a gradient" cannot collide.
+fn hash_gradient<H: std::hash::Hasher>(g: Option<GradientState>, state: &mut H) {
+    use std::hash::Hash;
+    match g {
+        Some(g) => {
+            true.hash(state);
+            g.hash(state);
+        }
+        None => false.hash(state),
+    }
+}
+
 /// A filled and stroked outline.
 ///
 /// Sizes are in the pixels of the canvas the graphic is drawn on, so a shape
@@ -258,6 +318,9 @@ pub struct Shape {
     pub inner_radius: Property<f64>,
     /// The interior colour. Transparent is no fill.
     pub fill: Property<Rgba>,
+    /// A ramp from `fill` to another colour, or `None` for a solid fill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<Gradient>,
     /// The outline colour. Drawn only where `stroke_width` is positive.
     #[serde(default)]
     pub stroke: Property<Rgba>,
@@ -283,6 +346,7 @@ impl Shape {
             corner_radius: Property::constant(0.0),
             inner_radius: default_inner_radius(),
             fill: Property::constant(fill),
+            gradient: None,
             stroke: Property::constant(Rgba::TRANSPARENT),
             stroke_width: Property::constant(0.0),
         }
@@ -295,6 +359,7 @@ impl Shape {
             corner_radius: self.corner_radius.evaluate(t),
             inner_radius: self.inner_radius.evaluate(t),
             fill: self.fill.evaluate(t),
+            gradient: self.gradient.as_ref().map(|g| g.evaluate(t)),
             stroke: self.stroke.evaluate(t),
             stroke_width: self.stroke_width.evaluate(t),
         }
@@ -305,6 +370,7 @@ impl Shape {
             || self.corner_radius.is_animated()
             || self.inner_radius.is_animated()
             || self.fill.is_animated()
+            || self.gradient.as_ref().is_some_and(Gradient::is_animated)
             || self.stroke.is_animated()
             || self.stroke_width.is_animated()
     }
@@ -394,6 +460,9 @@ pub struct Text {
     /// Em size in pixels.
     pub size: Property<f64>,
     pub fill: Property<Rgba>,
+    /// A ramp from `fill` to another colour, or `None` for a solid fill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<Gradient>,
     #[serde(default)]
     pub stroke: Property<Rgba>,
     #[serde(default)]
@@ -432,6 +501,7 @@ impl Text {
             font: FontSpec::default(),
             size: Property::constant(size),
             fill: Property::constant(fill),
+            gradient: None,
             stroke: Property::constant(Rgba::TRANSPARENT),
             stroke_width: Property::constant(0.0),
             tracking: Property::constant(0.0),
@@ -457,6 +527,7 @@ impl Text {
             font: self.font.clone(),
             size: self.size.evaluate(t),
             fill: self.fill.evaluate(t),
+            gradient: self.gradient.as_ref().map(|g| g.evaluate(t)),
             stroke: self.stroke.evaluate(t),
             stroke_width: self.stroke_width.evaluate(t),
             tracking: self.tracking.evaluate(t),
@@ -469,6 +540,7 @@ impl Text {
     pub fn is_animated(&self) -> bool {
         self.size.is_animated()
             || self.fill.is_animated()
+            || self.gradient.as_ref().is_some_and(Gradient::is_animated)
             || self.stroke.is_animated()
             || self.stroke_width.is_animated()
             || self.tracking.is_animated()
@@ -554,6 +626,7 @@ pub struct ShapeState {
     pub corner_radius: f64,
     pub inner_radius: f64,
     pub fill: Rgba,
+    pub gradient: Option<GradientState>,
     pub stroke: Rgba,
     pub stroke_width: f64,
 }
@@ -566,7 +639,7 @@ impl ShapeState {
     }
 
     pub fn has_fill(&self) -> bool {
-        self.fill.a > 0.0
+        self.fill.a > 0.0 || self.gradient.is_some_and(|g| g.to.a > 0.0)
     }
 }
 
@@ -577,6 +650,7 @@ impl std::hash::Hash for ShapeState {
         hash_f64(self.corner_radius, state);
         hash_f64(self.inner_radius, state);
         hash_rgba(self.fill, state);
+        hash_gradient(self.gradient, state);
         hash_rgba(self.stroke, state);
         hash_f64(self.stroke_width, state);
     }
@@ -589,6 +663,7 @@ pub struct TextState {
     pub font: FontSpec,
     pub size: f64,
     pub fill: Rgba,
+    pub gradient: Option<GradientState>,
     pub stroke: Rgba,
     pub stroke_width: f64,
     pub tracking: f64,
@@ -603,7 +678,7 @@ impl TextState {
     }
 
     pub fn has_fill(&self) -> bool {
-        self.fill.a > 0.0
+        self.fill.a > 0.0 || self.gradient.is_some_and(|g| g.to.a > 0.0)
     }
 }
 
@@ -613,6 +688,7 @@ impl std::hash::Hash for TextState {
         self.font.hash(state);
         hash_f64(self.size, state);
         hash_rgba(self.fill, state);
+        hash_gradient(self.gradient, state);
         hash_rgba(self.stroke, state);
         hash_f64(self.stroke_width, state);
         hash_f64(self.tracking, state);
@@ -782,5 +858,17 @@ mod tests {
         let shape = g.as_shape().expect("a shape");
         assert_eq!(shape.stroke_width.value, 0.0);
         assert_eq!(shape.inner_radius.value, Shape::DEFAULT_INNER_RADIUS);
+    }
+
+    #[test]
+    fn a_gradient_round_trips_and_old_projects_without_one_still_load() {
+        let mut text = Text::new("Hi", 40.0, Rgba::WHITE);
+        text.gradient = Some(Gradient::new(Rgba::BLACK, 30.0));
+        let json = serde_json::to_string(&text).unwrap();
+        assert_eq!(serde_json::from_str::<Text>(&json).unwrap(), text);
+
+        let plain = serde_json::to_string(&Text::new("Hi", 40.0, Rgba::WHITE)).unwrap();
+        assert!(!plain.contains("gradient"), "a solid fill writes nothing new");
+        assert!(serde_json::from_str::<Text>(&plain).unwrap().gradient.is_none());
     }
 }

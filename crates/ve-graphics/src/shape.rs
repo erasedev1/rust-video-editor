@@ -8,7 +8,7 @@
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 use ve_core::{ShapeKind, ShapeState};
 
-use crate::{colour, image_from_pixmap, RasterImage, MAX_DIMENSION};
+use crate::{colour, fill_paint, image_from_pixmap, RasterImage, MAX_DIMENSION};
 
 /// How far outside the shape the picture extends beyond its stroke, in pixels.
 ///
@@ -151,8 +151,7 @@ pub(crate) fn draw_shape(state: &ShapeState) -> Option<RasterImage> {
     let mut pixmap = Pixmap::new(width as u32, height as u32)?;
 
     if state.has_fill() {
-        let mut paint = Paint { anti_alias: true, ..Paint::default() };
-        paint.set_color(colour(state.fill));
+        let paint = fill_paint(state.fill, state.gradient, (margin, margin, w, h));
         // Winding rather than even-odd: a star's outline does not cross itself,
         // and a hand-edited one that does should fill solid rather than punch a
         // hole through its own middle.
@@ -181,6 +180,7 @@ mod tests {
             corner_radius: 0.0,
             inner_radius: 0.382,
             fill: Rgba::WHITE,
+            gradient: None,
             stroke: Rgba::TRANSPARENT,
             stroke_width: 0.0,
         }

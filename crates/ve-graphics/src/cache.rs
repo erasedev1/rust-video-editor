@@ -191,6 +191,7 @@ mod tests {
             corner_radius: 0.0,
             inner_radius: 0.382,
             fill: Rgba::WHITE,
+            gradient: None,
             stroke: Rgba::TRANSPARENT,
             stroke_width: 0.0,
         })

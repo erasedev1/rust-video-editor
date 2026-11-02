@@ -13,6 +13,7 @@ fn shape(kind: ShapeKind, w: f64, h: f64, fill: Rgba) -> ShapeState {
         corner_radius: 0.0,
         inner_radius: 0.382,
         fill,
+        gradient: None,
         stroke: Rgba::TRANSPARENT,
         stroke_width: 0.0,
     }
@@ -139,4 +140,56 @@ fn a_polygon_fills_more_of_its_box_the_more_sides_it_has() {
     assert!(triangle < octagon, "triangle {triangle}, octagon {octagon}");
     // An octagon in a 100px box covers about 82% of it; a triangle about 32%.
     assert!(octagon < 100 * 100, "and neither fills the box");
+}
+
+// ---- gradients -----------------------------------------------------------
+
+fn ramp(angle: f64) -> ShapeState {
+    let mut state = shape(ShapeKind::Rectangle, 100.0, 100.0, Rgba::new(1.0, 0.0, 0.0, 1.0));
+    state.gradient = Some(ve_core::GradientState { to: Rgba::new(0.0, 0.0, 1.0, 1.0), angle });
+    state
+}
+
+#[test]
+fn a_gradient_runs_from_the_fill_to_its_end_colour() {
+    // Left to right: red at the left edge, blue at the right.
+    let image = drawn(ramp(0.0));
+    let left = image.pixel(2, 50).unwrap();
+    let right = image.pixel(100, 50).unwrap();
+    assert!(left[0] > 240 && left[2] < 15, "left is red: {left:?}");
+    assert!(right[2] > 240 && right[0] < 15, "right is blue: {right:?}");
+}
+
+#[test]
+fn the_angle_turns_the_ramp() {
+    // 90°: top to bottom, so the left and right edges now match.
+    let image = drawn(ramp(90.0));
+    let top = image.pixel(50, 2).unwrap();
+    let bottom = image.pixel(50, 100).unwrap();
+    assert!(top[0] > 240 && bottom[2] > 240, "{top:?} {bottom:?}");
+    let (l, r) = (image.pixel(2, 50).unwrap(), image.pixel(100, 50).unwrap());
+    assert!((l[0] as i32 - r[0] as i32).abs() <= 2, "{l:?} {r:?}");
+}
+
+#[test]
+fn a_gradient_with_a_transparent_fill_still_draws() {
+    let mut state = ramp(0.0);
+    state.fill = Rgba::TRANSPARENT;
+    assert!(state.has_fill(), "the ramp's far end is visible");
+    let image = drawn(state);
+    assert!(image.pixel(100, 50).unwrap()[3] > 240);
+}
+
+#[test]
+fn a_gradient_is_part_of_the_cache_key() {
+    use std::hash::{Hash, Hasher};
+    let key = |s: ShapeState| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        GraphicState::Shape(s).hash(&mut h);
+        h.finish()
+    };
+    let mut plain = ramp(0.0);
+    plain.gradient = None;
+    assert_ne!(key(plain), key(ramp(0.0)));
+    assert_ne!(key(ramp(0.0)), key(ramp(45.0)));
 }

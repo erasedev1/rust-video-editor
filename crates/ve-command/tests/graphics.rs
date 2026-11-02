@@ -746,3 +746,54 @@ fn placing_a_graphic_that_is_not_there_is_refused() {
     let result = graphic_clip(&mut f.project, GraphicId::from_raw(4242), Ticks::ZERO);
     assert!(matches!(result, Err(CommandError::GraphicNotFound(_))), "{result:?}");
 }
+
+#[test]
+fn a_gradient_is_added_edited_and_undone_through_the_history() {
+    let mut f = fixture();
+    let id = f.add_shape();
+    let before = f.project.clone();
+
+    // Nothing to edit until there is a gradient.
+    let refused = f.history.execute(
+        &mut f.project,
+        Box::new(SetGraphicProperty::new(
+            id,
+            GraphicProperty::GradientAngle,
+            PropertyValue::Scalar(45.0),
+        )),
+    );
+    assert!(refused.is_err());
+    assert_eq!(f.project, before, "a refused command touches nothing");
+
+    let blue = Rgba::new(0.0, 0.0, 1.0, 1.0);
+    f.history
+        .execute(
+            &mut f.project,
+            Box::new(SetGraphicOption::new(
+                id,
+                GraphicOption::Gradient(Some(ve_core::Gradient::new(blue, 0.0))),
+            )),
+        )
+        .unwrap();
+    f.history
+        .execute(
+            &mut f.project,
+            Box::new(SetGraphicProperty::new(
+                id,
+                GraphicProperty::GradientAngle,
+                PropertyValue::Scalar(90.0),
+            )),
+        )
+        .unwrap();
+
+    let shape = f.project.graphic(id).unwrap().as_shape().unwrap();
+    let state = shape.evaluate(Ticks::ZERO);
+    assert_eq!(state.gradient.unwrap().angle, 90.0);
+    assert_eq!(state.gradient.unwrap().to, blue);
+    assert!(animatable_graphic_properties(f.project.graphic(id).unwrap())
+        .contains(&GraphicProperty::GradientTo));
+
+    f.history.undo(&mut f.project).unwrap();
+    f.history.undo(&mut f.project).unwrap();
+    assert_eq!(f.project, before);
+}

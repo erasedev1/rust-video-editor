@@ -1188,6 +1188,7 @@ fn graphic_controls(ui: &mut Ui, graphic: &Graphic, at: Ticks, actions: &mut Vec
     // code, so they get one section whichever kind this is.
     section(ui, "Paint", |ui| {
         graphic_color_row(ui, graphic, GraphicProperty::Fill, "Fill", at, actions);
+        gradient_rows(ui, graphic, at, actions);
         graphic_color_row(ui, graphic, GraphicProperty::Stroke, "Stroke", at, actions);
         graphic_scalar_row(
             ui,
@@ -1201,6 +1202,46 @@ fn graphic_controls(ui: &mut Ui, graphic: &Graphic, at: Ticks, actions: &mut Vec
             actions,
         );
     });
+}
+
+/// The switch that turns the fill into a ramp, and — while there is one — the
+/// colour it ends on and the direction it runs.
+///
+/// Switching on starts the ramp from the fill to white, at 0°, which is a
+/// visible change a user can then drag from; switching off drops the ramp and
+/// leaves the fill, which is why it is a toggle and not a delete.
+fn gradient_rows(ui: &mut Ui, graphic: &Graphic, at: Ticks, actions: &mut Vec<Action>) {
+    let current = match &graphic.content {
+        GraphicContent::Shape(s) => s.gradient.is_some(),
+        GraphicContent::Text(t) => t.gradient.is_some(),
+    };
+    let mut on = current;
+    ui.horizontal(|ui| {
+        property_label(ui, "Gradient", false);
+        ui.checkbox(&mut on, "");
+    });
+    if on != current {
+        actions.push(Action::SetGraphicOption {
+            graphic: graphic.id,
+            option: GraphicOption::Gradient(
+                on.then(|| ve_core::Gradient::new(ve_core::Rgba::WHITE, 0.0)),
+            ),
+        });
+    }
+    if current {
+        graphic_color_row(ui, graphic, GraphicProperty::GradientTo, "To", at, actions);
+        graphic_scalar_row(
+            ui,
+            graphic,
+            GraphicProperty::GradientAngle,
+            "Angle",
+            -360.0..=360.0,
+            1.0,
+            "°",
+            at,
+            actions,
+        );
+    }
 }
 
 /// Reads a graphic property as it stands at `at`, or `None` when this graphic

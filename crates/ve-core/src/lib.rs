@@ -46,8 +46,8 @@ pub use effect::{
 pub use fade::{Fade, FadeCurve, FadeEdge};
 pub use geometry::{ColorSpace, Rgba, Size, Vec2};
 pub use graphic::{
-    FontSpec, Graphic, GraphicContent, GraphicState, Shape, ShapeKind, ShapeState, Text,
-    TextAlign, TextState,
+    FontSpec, Gradient, GradientState, Graphic, GraphicContent, GraphicState, Shape, ShapeKind,
+    ShapeState, Text, TextAlign, TextState,
 };
 pub use id::{
     AngleId, AssetId, CaptionTrackId, ClipId, CompositionId, CueId, EffectId, GraphicId, Id,

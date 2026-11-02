@@ -21,6 +21,7 @@ fn text(s: &str) -> TextState {
         font: FontSpec::default(),
         size: 48.0,
         fill: Rgba::WHITE,
+        gradient: None,
         stroke: Rgba::TRANSPARENT,
         stroke_width: 0.0,
         tracking: 0.0,

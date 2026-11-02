@@ -41,7 +41,8 @@ The first vertical slice is complete and tested end to end:
   viewer shows every camera at once
 - Shapes and titles made in the editor — rectangles, ellipses, polygons and
   stars, and text with a font, a size, alignment and wrapping — each one an
-  object the project owns, so editing it changes every clip that draws it
+  object the project owns, so editing it changes every clip that draws it —
+  with a solid fill or a two-colour gradient at any angle
 - Keyframe any transform, audio or effect property, with hold, linear and eased
   interpolation, from an animation editor that shares the timeline's own time
   axis

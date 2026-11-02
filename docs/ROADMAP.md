@@ -567,9 +567,10 @@ captions costs, and what finding the one on screen costs per frame.
 - Shapes ✅ — rectangles, ellipses, polygons and stars, with fill and stroke
 - Text ✅ — a font, a size, alignment and wrapping, shaped and drawn
 - Nested compositions ✅ — delivered in Phase 3
+- Gradient fill ✅ — a two-stop linear ramp on shapes and text
 - Text animation, motion paths, expressions
 
-**Shapes and text are done; the rest of the phase is not.**
+**Shapes, text and gradient fills are done; the rest of the phase is not.**
 
 A **graphic** is the first thing in the project that is neither media nor an
 arrangement of it: it is the picture itself. So it sits beside compositions as
@@ -618,9 +619,19 @@ a per-glyph transform the layout does not currently hand back. There are no
 between keyframes — which needs a path as a property kind, a change to the
 registry's shape rather than one more entry in it. There are no
 **expressions**, which need a language and a sandbox and belong with the
-ecosystem work rather than being smuggled in here. And there is no **gradient
-fill**: fill is a colour, and making it a colour *or* a ramp is a change to
-every place fill is read.
+ecosystem work rather than being smuggled in here.
+
+**Gradient fill** was on this list as "a change to every place fill is read",
+and the way it avoided that was to not replace fill. A gradient is an optional
+ramp *from* the fill colour *to* a second one, at an angle; with none, nothing
+reads or writes differently, and switching it off leaves the solid colour
+behind. It is two stops, because a list of stops would need a keyframe model for
+a list that nothing else in the editor has — the end colour and the angle are
+ordinary `Property`s, so they keyframe like any other value. The ramp is a
+tiny-skia shader stretched across the shape's box (the text's extent, for
+text), long enough that the two far corners land on the two colours at any
+angle, and the gradient is part of the cache key, so a changed ramp is a new
+picture.
 
 See [BENCHMARKS.md](BENCHMARKS.md#shapes-and-text) for what drawing one costs
 and what the cache is worth against it.

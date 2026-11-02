@@ -25,7 +25,8 @@
 use std::any::Any;
 
 use ve_core::{
-    FontSpec, Graphic, GraphicContent, GraphicId, Project, Shape, ShapeKind, Text, TextAlign,
+    FontSpec, Gradient, Graphic, GraphicContent, GraphicId, Project, Shape, ShapeKind, Text,
+    TextAlign,
 };
 use ve_time::Ticks;
 
@@ -57,6 +58,10 @@ pub enum GraphicProperty {
     Tracking,
     LineHeight,
     Fill,
+    /// The far colour of a gradient. Only a graphic that has one.
+    GradientTo,
+    /// The direction of a gradient, in degrees.
+    GradientAngle,
     Stroke,
     StrokeWidth,
 }
@@ -71,6 +76,8 @@ impl GraphicProperty {
             GraphicProperty::Tracking => "Tracking",
             GraphicProperty::LineHeight => "Line Height",
             GraphicProperty::Fill => "Fill",
+            GraphicProperty::GradientTo => "Gradient Colour",
+            GraphicProperty::GradientAngle => "Gradient Angle",
             GraphicProperty::Stroke => "Stroke",
             GraphicProperty::StrokeWidth => "Stroke Width",
         }
@@ -158,6 +165,46 @@ macro_rules! with_graphic_property {
                 use PropertyValue::Scalar as $kind;
                 $body
             }
+            (GraphicContent::Shape(shape), GraphicProperty::GradientTo) => {
+                let $p = &mut shape
+                    .gradient
+                    .as_mut()
+                    .ok_or_else(|| CommandError::Rejected("there is no gradient".into()))?
+                    .to;
+                #[allow(unused)]
+                use PropertyValue::Color as $kind;
+                $body
+            }
+            (GraphicContent::Shape(shape), GraphicProperty::GradientAngle) => {
+                let $p = &mut shape
+                    .gradient
+                    .as_mut()
+                    .ok_or_else(|| CommandError::Rejected("there is no gradient".into()))?
+                    .angle;
+                #[allow(unused)]
+                use PropertyValue::Scalar as $kind;
+                $body
+            }
+            (GraphicContent::Text(text), GraphicProperty::GradientTo) => {
+                let $p = &mut text
+                    .gradient
+                    .as_mut()
+                    .ok_or_else(|| CommandError::Rejected("there is no gradient".into()))?
+                    .to;
+                #[allow(unused)]
+                use PropertyValue::Color as $kind;
+                $body
+            }
+            (GraphicContent::Text(text), GraphicProperty::GradientAngle) => {
+                let $p = &mut text
+                    .gradient
+                    .as_mut()
+                    .ok_or_else(|| CommandError::Rejected("there is no gradient".into()))?
+                    .angle;
+                #[allow(unused)]
+                use PropertyValue::Scalar as $kind;
+                $body
+            }
             (content, target) => {
                 return Err(CommandError::Rejected(format!(
                     "a {} has no {}",
@@ -207,6 +254,18 @@ pub fn graphic_property_ref<'a>(
         (GraphicContent::Text(t), GraphicProperty::StrokeWidth) => {
             PropertyRef::Scalar(&t.stroke_width)
         }
+        (GraphicContent::Shape(s), GraphicProperty::GradientTo) => {
+            PropertyRef::Color(&s.gradient.as_ref()?.to)
+        }
+        (GraphicContent::Shape(s), GraphicProperty::GradientAngle) => {
+            PropertyRef::Scalar(&s.gradient.as_ref()?.angle)
+        }
+        (GraphicContent::Text(t), GraphicProperty::GradientTo) => {
+            PropertyRef::Color(&t.gradient.as_ref()?.to)
+        }
+        (GraphicContent::Text(t), GraphicProperty::GradientAngle) => {
+            PropertyRef::Scalar(&t.gradient.as_ref()?.angle)
+        }
         _ => return None,
     })
 }
@@ -214,24 +273,33 @@ pub fn graphic_property_ref<'a>(
 /// Every property of a graphic that can be keyframed, in the order the
 /// inspector lists them.
 pub fn animatable_graphic_properties(graphic: &Graphic) -> Vec<GraphicProperty> {
-    match &graphic.content {
-        GraphicContent::Shape(_) => vec![
-            GraphicProperty::Size,
-            GraphicProperty::CornerRadius,
-            GraphicProperty::InnerRadius,
-            GraphicProperty::Fill,
-            GraphicProperty::Stroke,
-            GraphicProperty::StrokeWidth,
-        ],
-        GraphicContent::Text(_) => vec![
-            GraphicProperty::FontSize,
-            GraphicProperty::Tracking,
-            GraphicProperty::LineHeight,
-            GraphicProperty::Fill,
-            GraphicProperty::Stroke,
-            GraphicProperty::StrokeWidth,
-        ],
+    let (mut list, has_gradient) = match &graphic.content {
+        GraphicContent::Shape(s) => (
+            vec![
+                GraphicProperty::Size,
+                GraphicProperty::CornerRadius,
+                GraphicProperty::InnerRadius,
+                GraphicProperty::Fill,
+            ],
+            s.gradient.is_some(),
+        ),
+        GraphicContent::Text(t) => (
+            vec![
+                GraphicProperty::FontSize,
+                GraphicProperty::Tracking,
+                GraphicProperty::LineHeight,
+                GraphicProperty::Fill,
+            ],
+            t.gradient.is_some(),
+        ),
+    };
+    if has_gradient {
+        list.push(GraphicProperty::GradientTo);
+        list.push(GraphicProperty::GradientAngle);
     }
+    list.push(GraphicProperty::Stroke);
+    list.push(GraphicProperty::StrokeWidth);
+    list
 }
 
 // ---- creating and removing ----------------------------------------------
@@ -591,6 +659,11 @@ pub enum GraphicOption {
     Align(TextAlign),
     /// The width lines wrap at, or `None` to break only where the text says to.
     WrapWidth(Option<f64>),
+    /// A ramp from the fill to another colour, or `None` for a solid fill.
+    /// Both shapes and text have one, and it is added or removed whole: the
+    /// colour and angle inside it are properties, but whether there is a
+    /// gradient at all has no halfway point.
+    Gradient(Option<Gradient>),
 }
 
 impl GraphicOption {
@@ -600,6 +673,7 @@ impl GraphicOption {
             GraphicOption::Font(_) => "Set Font",
             GraphicOption::Align(_) => "Set Alignment",
             GraphicOption::WrapWidth(_) => "Set Wrapping",
+            GraphicOption::Gradient(_) => "Set Gradient",
         }
     }
 
@@ -617,6 +691,12 @@ impl GraphicOption {
             }
             (GraphicOption::WrapWidth(_), GraphicContent::Text(t)) => {
                 Ok(GraphicOption::WrapWidth(t.wrap_width))
+            }
+            (GraphicOption::Gradient(_), GraphicContent::Shape(s)) => {
+                Ok(GraphicOption::Gradient(s.gradient.clone()))
+            }
+            (GraphicOption::Gradient(_), GraphicContent::Text(t)) => {
+                Ok(GraphicOption::Gradient(t.gradient.clone()))
             }
             _ => Err(CommandError::Rejected(format!(
                 "{} does not apply to this graphic",
@@ -636,6 +716,8 @@ impl GraphicOption {
                 // should stop rather than raise an error.
                 t.wrap_width = width.map(|w| w.max(1.0));
             }
+            (GraphicOption::Gradient(g), GraphicContent::Shape(s)) => s.gradient = g.clone(),
+            (GraphicOption::Gradient(g), GraphicContent::Text(t)) => t.gradient = g.clone(),
             _ => {
                 return Err(CommandError::Rejected(format!(
                     "{} does not apply to this graphic",
