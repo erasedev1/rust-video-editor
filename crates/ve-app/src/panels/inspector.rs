@@ -181,6 +181,10 @@ pub fn show(
             });
         });
 
+        section(ui, "Motion Path", |ui| {
+            motion_path_rows(ui, clip, local, actions);
+        });
+
         section(ui, "Audio", |ui| {
             fade_row(ui, "Fade In", FadeEdge::In, clip.audio.fade_in, clip.duration, |fade| {
                 actions.push(Action::SetClipFade {
@@ -1205,6 +1209,88 @@ fn graphic_controls(ui: &mut Ui, graphic: &Graphic, at: Ticks, actions: &mut Vec
             at,
             actions,
         );
+    });
+}
+
+/// The clip's motion path: whether it has one, how far along it the clip is,
+/// and its points as numbers. Dragging them in the preview is the quicker way;
+/// the numbers are for the exact one.
+fn motion_path_rows(
+    ui: &mut Ui,
+    clip: &ve_core::Clip,
+    local: Ticks,
+    actions: &mut Vec<Action>,
+) {
+    let clip_id = clip.id;
+    let path = clip.transform.path.as_ref();
+    let mut on = path.is_some();
+    ui.horizontal(|ui| {
+        property_label(ui, "Path", false);
+        ui.checkbox(&mut on, "");
+    });
+    if on != path.is_some() {
+        // Starts as a line across the middle of the frame: visible, and short
+        // of anything a user would have to undo by hand.
+        let new = on.then(|| {
+            ve_core::MotionPath::line(
+                ve_core::Vec2::new(-300.0, 0.0),
+                ve_core::Vec2::new(300.0, 0.0),
+            )
+        });
+        actions.push(Action::SetMotionPath { clip: clip_id, path: new, coalesce: false });
+    }
+    let Some(path) = path else { return };
+
+    let t = &clip.transform;
+    scalar_row(
+        ui,
+        "Progress",
+        t.path_progress.evaluate(local),
+        t.path_progress.is_animated(),
+        0.0..=1.0,
+        0.005,
+        "",
+        |v| {
+            actions.push(Action::SetClipProperty {
+                clip: clip_id,
+                property: ClipProperty::PathProgress,
+                value: PropertyValue::Scalar(v),
+            });
+        },
+    );
+    for (i, point) in path.points.iter().enumerate() {
+        point_row(ui, &format!("Point {}", i + 1), point.position, false, |v| {
+            let mut edited = path.clone();
+            edited.points[i].position = v;
+            actions.push(Action::SetMotionPath {
+                clip: clip_id,
+                path: Some(edited),
+                coalesce: true,
+            });
+        });
+    }
+    ui.horizontal(|ui| {
+        if ui.button("Add point").clicked() {
+            let mut edited = path.clone();
+            let last = edited.points.last().map_or(ve_core::Vec2::ZERO, |p| p.position);
+            edited.push_corner(last.x + 100.0, last.y);
+            actions.push(Action::SetMotionPath {
+                clip: clip_id,
+                path: Some(edited),
+                coalesce: false,
+            });
+        }
+        // Two points make a path; fewer is a dot, which is what unticking the
+        // box is for.
+        if path.points.len() > 2 && ui.button("Remove last").clicked() {
+            let mut edited = path.clone();
+            edited.points.pop();
+            actions.push(Action::SetMotionPath {
+                clip: clip_id,
+                path: Some(edited),
+                coalesce: false,
+            });
+        }
     });
 }
 

@@ -569,9 +569,502 @@ captions costs, and what finding the one on screen costs per frame.
 - Nested compositions ✅ — delivered in Phase 3
 - Gradient fill ✅ — a two-stop linear ramp on shapes and text
 - Text animation ✅ — animators over a range of characters
-- Motion paths, expressions
+- Motion paths ✅ — a bezier curve a clip travels along, progress by distance
+- Expressions — **deferred to Phase 9**
 
-**Shapes, text, gradient fills and text animation are done; the rest of the phase is not.**
+**Shapes, text, gradient fills, text animation and motion paths are done. Expressions are deliberately deferred to Phase 9.**
+
+A **graphic** is the first thing in the project that is neither media nor an
+arrangement of it: it is the picture itself. So it sits beside compositions as
+a project-level object, a clip draws it through `Source::Graphic`, and editing
+it changes every clip drawing it — which is what makes it one object rather
+than a copy per clip.
+
+Everything the model already had, it kept. A graphic's values are
+`Property<T>`, the same type every animated value in the editor uses, so
+keyframing a shape's size needs no graphic-specific machinery: it is the same
+command, the same graph editor and the same evaluation as opacity. What that
+cost was making the keyframe commands generic — they were written against a
+clip — and the payment was one function taking a `Property<T>` and a way to
+unpack a value into it, shared now by clips, composition layers and graphics
+alike.
+
+**Three kinds of change, three commands**, because they merge differently. An
+animatable value merges, so a slider drag is one undo step. Text merges, so
+typing a sentence is one step rather than forty. And the choices that are not
+numbers — which shape, which font, how lines align — do not merge and are not
+animatable, because none of them has a halfway point and putting them through
+the property commands would mean inventing an interpolation for "rectangle to
+ellipse".
+
+Graphics are rasterised on the **CPU**, which is the one place this phase
+steps off the GPU path, and deliberately: outlining a glyph and filling a path
+are work that belongs where the fonts and the path library live. What makes
+that affordable is not the draw but the **cache** — a title is on screen for a
+hundred and fifty frames and drawn on one of them, and the other hundred and
+forty-nine cost 108 ns apiece instead of 440 µs. The key is a hash of the state
+that produced the picture, the same content-addressed idea the composite cache
+uses, so invalidation is a consequence of the key rather than a list that can
+go stale.
+
+The consequence is said out loud rather than hidden: an **animated** graphic
+misses that cache. A title whose size is keyframed is a different picture every
+frame and pays the draw each time. That is why animating a graphic's
+*transform* — which the GPU applies to a picture already drawn — is cheap while
+animating its *content* is not, and why the two are different controls rather
+than one list.
+
+**Text animation** follows After Effects' model, because it is the one people already
+know: an animator names a *range* of characters (`start`, `end`, `offset`, as
+fractions of the run) and a set of changes — move, scale, rotate, opacity — and
+the characters in the range receive them. Animating the range is what makes
+text arrive one letter at a time: an animator that fades to nothing over
+`[start, 1]` reveals the title as `start` is keyframed from 0 to 1. A character
+half inside the range gets half the change, so a smoothly moving range gives
+smooth motion rather than whole-letter steps. All of it is `Property`, so it
+keyframes and graphs like any other value, and the edit that adds or removes an
+animator is an undoable `SetGraphicOption`.
+
+The cost is said out loud: without animators a run is **one** path filled once,
+and with any it is one path **per glyph**, so glyphs that overlap double-blend
+at partial opacity. The picture also grows by however far letters travel outside
+the layout box, padded equally on all four sides so the title's centre — and
+so its place on the canvas — does not drift as the letters fly. An animated run
+misses the graphic cache for the same reason animated content always does.
+
+What is **not** here. No per-character *colour*, and no random or "wiggly"
+selector: the range is a window, not a noise source.
+
+**Motion paths** were described here as needing "a path as a property kind, a
+change to the registry's shape". They did not, because the property was never the
+right thing to make a path. A path is a *shape*, and a shape does not interpolate;
+what animates is *how far along it you are*. So a clip gets an optional
+`MotionPath` — bezier points with handles — and a single animated number,
+`path_progress`, and `Transform::evaluate` folds the two into the position it was
+already returning. Everything downstream of that call — the compositor, motion
+blur's sub-frame samples, the render cache's key — sees a position and needed no
+change.
+
+Two decisions are worth stating. **Progress is by distance, not by segment**:
+half way is half the *length* of the path, so moving a handle does not change how
+fast the clip travels and a long segment is not raced across at the same rate as
+a short one. And **the path adds to `position` rather than replacing it**, so a
+clip can still be nudged, and a path that was drawn for one clip can be reused
+for another elsewhere on the frame. Easing a move is easing `path_progress`,
+with every interpolation the editor already had, which is also why the shape and
+the timing never disturb each other. The path is drawn over the preview with
+draggable points and handles; double-clicking a point makes it smooth or a corner.
+
+What is **not** here: paths are open (no closed loops), the clip does not turn to
+face its direction of travel, and composition layers carry the model but have no
+inspector or preview editing yet.
+
+**Expressions** need a language and a sandbox, and everything the other pieces
+did was to avoid needing one. They belong with the scripting work in Phase 9
+rather than being smuggled into this phase, and that is where they now sit.
+
+See [BENCHMARKS.md](BENCHMARKS.md#animation) for what evaluating a property and
+averaging a shutter cost.
+
+## Phase 6 — Effects
+
+- Effect registry and dynamic dispatch through the existing `Effect` model ✅
+- Blur, colour adjustment, sharpen, transform effects ✅
+- Masks and mattes ✅ — shape masks and a luma key
+- Effect ordering and per-clip chains ✅
+
+**Complete.** An effect is a string naming a kind and a list of key/value
+parameters; the **registry** says what that kind is called and what its
+parameters mean, and the **renderer** says which shader it runs. Those three
+live apart on purpose. A registry that is a runtime table rather than a match on
+an enum is what will let a plugin add an effect in Phase 9 without the core
+crate knowing about it — and what already lets a project carrying an effect this
+build has never heard of open, render everything else, and save that effect back
+untouched rather than dropping it.
+
+Parameters are `Property<T>`, the type every animated value in the editor uses,
+so keyframing a blur's radius needs no effect-specific machinery: it is the same
+command, the same graph editor and the same evaluation as opacity. That is the
+whole reason the animation phase came first.
+
+**Order is the chain.** Blurring and then brightening is not the same picture as
+brightening and then blurring, so moving an effect is a real edit with its own
+undo step, and the list in the inspector is the pipeline rather than a
+presentation of it.
+
+A chain runs **in layer space** — the clip's own picture at its own resolution,
+before the clip's transform places it on the canvas — which is what every
+compositor does and what keeps a chain stable while the clip moves: a mask
+applied after the transform would slide off what it was cut around. Each pass is
+cached on its own inputs, so changing one parameter of a five-effect chain
+re-runs that pass onwards and leaves the ones before it as hits.
+
+What is **not** here: a track matte, which uses another layer as the matte
+rather than a shape or the clip's own brightness. That needs a second input
+texture bound to the pass and a rule in the plan for which layer is consumed by
+which — a change to the plan's shape rather than one more effect — so it belongs
+with the professional work rather than being bolted on. Effect presets and
+copying a chain between clips are likewise absent; they are interface work on
+top of a model that already supports them.
+
+See [BENCHMARKS.md](BENCHMARKS.md#effects) for what a pass costs, and why a
+blur's cost stops growing with its radius.
+
+## Phase 7 — Professional editing
+
+- Export: render a sequence to a file ✅ — H.264, H.265 and ProRes, with sound
+- Proxies ✅ — built in the background, switchable, never used for a delivery
+- Colour grading ✅ — three-way, white balance, an HSL secondary, and scopes
+- Multicam ✅ — grouped cameras, synced on sound or timecode, cut with the
+  number keys
+- Captions ✅ — written on the timeline, imported and exported as SubRip and
+  WebVTT, and written beside a delivery
+- Advanced audio
+- Hardware encoders
+
+**Export, proxies, grading, multicam and captions are done; advanced audio and
+hardware encoders are not.** An editor that cannot produce a file is a
+demonstration rather than a tool, so export came first.
+
+What an export is, is the editor run with nobody watching. The same `evaluate`
+the preview calls resolves each instant; the same compositor draws it — one
+piece of code, shared, because an export that composited by a second route would
+eventually disagree with what the editor showed, and the disagreement would be
+discovered in the delivered file. The same mixer produces the sound. Only the
+rules about *time* differ, and only in the two ways that matter:
+
+| | Preview | Export |
+|---|---|---|
+| A frame that is not decoded yet | is dropped | is waited for |
+| The clock | drives the picture | is the frame index |
+
+Playback is a real-time system with a deadline it must not miss. An export is a
+batch job with an answer it must not get wrong.
+
+Three decisions are worth stating. **Sound is counted in samples, not in
+frames**: how much audio belongs to one video frame is not a constant at 29.97,
+so each block is the difference between two absolute sample indices — over an
+hour that is the difference between sync and a frame and a half of drift.
+**Compositing happens at the sequence's own resolution** and the picture is
+scaled on the way into the encoder, so a half-size review copy is the picture
+the editor showed rather than a different composite with smaller masks and
+softer blurs. And **a cancelled export deletes what it had written**, because a
+part-written MP4 has no index and would sit there looking like a deliverable.
+
+The exporter runs on its own thread and reports progress; the editor keeps
+running — keeps playing, keeps being edited — while it works, from a snapshot of
+the project taken when the button was pressed.
+
+Colour is now said out loud rather than assumed. swscale's default matrix is
+BT.601 whatever the picture's size, which is wrong for anything HD by more than
+twenty 8-bit levels on saturated colour. The exporter converts with the matrix
+it tags the file with — 709 from 720 lines up, 601 below — and the *decoder*
+reads a file with the matrix that file declares, falling back on its size the way
+a player does. So importing Verge's own export gets back what it put in, which a
+test asserts frame by frame.
+
+What is **not** here. There is no alpha export: every codec above subsamples
+chroma and drops the alpha channel, and keeping it needs ProRes 4444 and a
+compositing path that does not assume an opaque background. There are no
+hardware encoders — NVENC, Quick Sync, VideoToolbox are each a different device
+to feed and none of them can be tested in the container this was developed in,
+so claiming them would be claiming something unverified. And there is no
+image-sequence or audio-only output, both of which are a container away rather
+than a feature.
+
+See [BENCHMARKS.md](BENCHMARKS.md#export) for what a written frame costs.
+
+### Proxies
+
+A proxy is a smaller stand-in for one file's **picture**. It carries no sound —
+the mixer and the waveforms read the original whether or not one exists — so
+building one never re-encodes audio and there are never two sound tracks that
+could drift apart. There is no code keeping them in step because there is
+nothing to keep in step.
+
+What a proxy buys is not disk space; it adds to that. It buys latency, and in
+two parts that are easy to run together. A quarter on each axis is a sixteenth
+of the pixels. But a proxy is also written **all-intra**, so a jump into the
+middle of the file costs that frame rather than every frame back to the last
+keyframe — and on this container that second part is worth about two and a half
+times again on top of the resolution. Playing forward gets 28× cheaper;
+scrubbing gets 72×. The gap between those two numbers *is* the intra-frame
+decision, which is why editing formats have always been intra-frame and why a
+proxy that was merely a downscaled re-encode would leave most of the benefit
+unclaimed. See [BENCHMARKS.md](BENCHMARKS.md#proxies).
+
+Four rules are worth stating.
+
+**An export always renders the originals.** A proxy exists so the editor can
+keep up with a hand on a mouse; a delivery has nowhere to be and every reason to
+be right. A delivery rendered from the stand-in would be a soft file nobody
+asked for, and whoever was handed it would be the one to discover that. So the
+exporter reads the original path directly and does not consult the setting at
+all — asserted by a test that fails if it is ever changed to.
+
+**Using them is a switch, not a consequence of one existing.** The whole point
+of building a proxy is to be able to turn it off and look at the real picture —
+checking focus, checking a key — without throwing it away. The switch lives on
+the project, so reopening a cut resumes at the resolution it was being cut at.
+
+**A missing proxy is not a missing asset.** A proxy is a convenience the editor
+built for itself, so one that has been deleted — a cleared folder, a project
+moved without it — falls back to the original and carries on at full
+resolution. Going offline over it would lose the user's footage because the
+editor lost its own scratch file. The reference is kept rather than dropped, so
+restoring or rebuilding the file simply works again.
+
+**Source timestamps are preserved rather than recounted.** A proxy that showed
+a different frame from its original at the same instant would have the cut made
+against one picture and delivered from another. For constant-rate footage the
+frame index and the timestamp are the same number; for variable-rate footage
+they are not, and recounting would silently re-time the file. A test walks all
+ninety frames of the fixture through both files and asserts they agree, at 30
+and at 29.97.
+
+Building runs on its own thread, one file at a time, and the editor keeps
+playing and keeps being edited while it works. One unreadable clip does not stop
+the batch. A build refuses to start until the project has been saved, because
+proxies live beside the project file and writing them anywhere else would leave
+a folder of files nothing ever points at again.
+
+What is **not** here. There is no automatic proxy on import: transcoding a card
+the moment it is dragged in is a decision to spend an hour of someone's machine,
+and it should be asked for. There is no per-clip override of the switch, for the
+reason given above — a sequence shown half at one resolution and half at another
+is lying about what it looks like. And nothing rebuilds a proxy when the footage
+behind it changes on disk: "Rebuild All Proxies" is the answer, and a file
+watcher that noticed by itself is a different piece of machinery.
+
+### Colour grading
+
+Three effects and four instruments, and the effects are the smaller half of
+that sentence.
+
+**The three effects needed no new machinery.** A three-way corrector, a white
+balance and an HSL secondary are registry entries and shader entry points; the
+inspector built their controls, the animation system keyframed their
+parameters, the render cache keyed their passes and the project format saved
+them, all without changing. Phase 6 claimed that the registry would let an
+effect arrive with working controls and keyframes for nothing. This is the
+first effect added *since* that claim, and it is the evidence for it.
+
+A three-way corrector is lift, gamma and gain per channel: `out = (in · slope +
+lift) ^ exponent`, where an input of 0 comes out at `lift` and an input of 1 at
+`gain`. The six controls the user sees resolve into those three vectors on the
+CPU, so the shader is a multiply, an add and a `pow`, and a full grade costs
+what a touched one does. The neutral of a wheel is the *middle* of its range,
+because a wheel is an offset rather than a colour to push towards; every
+control at neutral gives exactly the identity, which a test asserts rather than
+assumes.
+
+A white balance is drawn by the **colour adjust** program. A temperature and a
+tint are a per-channel multiply, which that shader already does, so what the
+kind adds is the arithmetic between two intuitive controls and three gains —
+divided by their own Rec. 709 luma, so a cooling is not also a darkening. Two
+kinds, one program: the list the edit model names and the list the GPU runs are
+deliberately not the same list, which is what will let a plugin reuse a
+built-in program later.
+
+The secondary selects a band of hue above a saturation floor and grades only
+that. Hue is carried in turns so the wrap is `fract` — red sits at both ends of
+the circle and a band centred on it has to reach across the seam — and the
+floor is what keeps greys, whose hue is whatever the arithmetic happened to
+produce, out of the key. `Show Matte` draws the selection in black and white,
+because dialling a qualifier by looking at the graded picture means guessing at
+the edges of the key from the other side of a grade.
+
+**The scopes are the half that needed building.** A waveform in luma, RGB
+overlay or parade; a vectorscope; a histogram. They read the composited
+frame — after the grade, after every effect, after the blend — because what is
+being judged is the picture that will be delivered rather than an estimate
+assembled from the parameters that made it.
+
+They read it small: scaled into a target 256 across and read back from there. A
+scope is a statistic, and thirty thousand samples locate a black level far
+better than the width of a line on screen; reading an HD target back instead
+costs eight megabytes over the bus and a stall to wait for it, every frame. So
+the cost of a scope is bounded by the scope rather than by the resolution of
+the sequence — a 4K timeline counts the same 36,864 pixels. The consequence is
+said out loud rather than hidden: a scope here will not show a single stray hot
+pixel. It is an instrument for judging a grade, not for auditing a delivery.
+
+Nothing is read back while the panel is closed, which is the default, and a
+picture already sampled is not sampled again — which is the common case,
+because a grade is dialled in on a held frame and the same composite is
+presented on every repaint.
+
+What is **not** here. There is no **curve** — the tone curve is the other half
+of a grading toolkit, and it needs a parameter kind that is not a number, a
+point or a colour, and a control that is not a slider. That is a change to the
+registry's shape rather than one more entry in it, which is why it waits rather
+than being bolted on. There is no **LUT**, which needs a 3D texture and a file
+reference in the edit model, and brings the question of what happens when the
+file moves — the same question proxies answer and that a LUT would have to
+answer differently. There are no **tracked** secondaries, and no shot matching:
+both are analysis over time rather than a shader, and belong with the
+professional work the rest of this phase is. And the scopes have no **graticule
+of primary targets**, for the reason given in
+[ARCHITECTURE.md](ARCHITECTURE.md#scopes): those boxes are 75% bars under one
+standard, and drawing them over a Rec. 709 plot would invite a reading they do
+not support.
+
+See [BENCHMARKS.md](BENCHMARKS.md#grading) for what a grading pass costs
+against a plain composite, and [the scopes table](BENCHMARKS.md#scopes) for
+what reading the picture back and counting it costs — including the `f64::round`
+that turned out to be most of the second one.
+
+### Multicam
+
+A group is a set of angles on one shared timeline, each carrying the offset from
+that timeline into its own media. A clip draws `Source::Multicam{group, angle}`,
+so **cutting between cameras changes one field and nothing else** — the clip
+keeps its position, its length, its window into the group, its effects and its
+animation, because none of those is about which camera is being watched. That is
+what makes a cut instant, and what makes it undoable as one tiny command rather
+than as a rewrite of the clip.
+
+The alternative — swapping the clip's asset and rewriting `source_in` by the
+difference of two offsets — would make every angle change a different edit
+depending on which angle it came from, and a group synced wrongly would leave a
+trail of clips already rewritten with the wrong numbers.
+
+An angle is a **camera**: an `AssetId`, not a `Source`. A composition cannot be
+an angle and neither can another group, which keeps the nesting graph exactly as
+it was so the cycle check that stops a render never finishing does not have to
+learn about groups. An angle that needs work done to it is a clip with effects
+on it, or a multicam clip inside a composition — the direction nesting already
+runs.
+
+A clip is trimmed against the **group**, not against the angle it happens to be
+showing, or the same clip would have different limits depending on what was on
+screen when its edge was grabbed. The group covers the **union** of its cameras
+rather than the intersection: cameras start and stop at different moments, and
+bounding to the stretch every camera covers would refuse edits over footage that
+plainly exists. An angle with nothing at a given instant draws nothing, and the
+viewer says which those are.
+
+**Syncing correlates the envelope, not the samples.** Two cameras twenty feet
+apart record the same event through different microphones, at different levels,
+with different room colouration; their waveforms do not match at all, and
+correlating 48,000 samples a second to discover that is expensive as well as
+wrong. What matches is *when the loud parts happen* — so this correlates the RMS
+series the waveform analysis already produces, at 200 buckets a second. Scores
+are Pearson over the overlap, so a camera set 14 dB quieter matches exactly.
+
+Five milliseconds is not frame-accurate at 24 fps and the code does not pretend
+otherwise: every match carries a **confidence**, the interface reports the
+weakest pair in the group, and the offsets can be nudged by hand afterwards —
+which marks the group Manual, because once a number has been typed over, saying
+it was measured is no longer true. Timecode syncing reads the start timecode the
+container records, drop frame included, and refuses rather than guessing when a
+camera does not carry one.
+
+The viewer is a grid of every camera at one instant, with the one on screen
+outlined. Numbers cut, shift switches, and a tile is numbered over *every* angle
+rather than only the enabled ones — disabling a camera must not renumber the
+keys under the user's fingers part way through a shot. A camera that was not
+rolling keeps its tile and says so, for the same reason.
+
+Tiles are uploaded as ordinary egui textures rather than going through the
+compositor: a tile is a thumbnail of one decoded frame with no transform, no
+effects and no blending, so it needs no render target and no pipeline. The
+frames come from the cache and the scheduler the preview already uses.
+
+See [BENCHMARKS.md](BENCHMARKS.md#multicam-syncing) for what syncing costs and
+what the coarse-to-fine search is worth against the exhaustive one.
+
+**A bug this found.** Building a 16 kHz fixture for the sync tests exposed a
+silent fault in the audio decoder: `ffmpeg-next` allocates the resampler's
+output frame for the input's sample count, so upsampling never caught up. A
+44.1 kHz file played 8.8% fast and drew its waveform 8.8% short, believed by
+everything downstream. Every committed fixture was 48 kHz, where the bug cannot
+show. Fixed, with regression tests in both directions.
+
+### Captions
+
+A cue is text with a span, and that is all it is. Written as a clip it would
+arrive carrying a source window, a speed, a transform, a blend mode, an effect
+chain and a pair of audio properties, every one of which would need a rule
+saying it means nothing here — so captions are their own small type on the
+sequence, and the code that walks clips is not made to understand a clip that is
+not one.
+
+What is kept from the clip model is the **invariant**: cues are sorted and never
+overlap, so what is on screen at an instant is a binary search with exactly one
+answer. Two speakers at once is one cue of two lines, which is what every
+captioning standard asks for and what a reader can actually follow. A second
+caption *track* is for a second language, and carries a BCP 47 tag because that
+tag names the file the track exports to.
+
+**Captions are the one part of an edit people routinely author elsewhere** — a
+transcription service, a captioner working to a broadcaster's style guide, a
+colleague with a text editor — so SubRip and WebVTT are not a convenience beside
+the feature. They are how captions get into an edit and how they leave it. One
+reader accepts both formats and the writer emits exactly one: the two differ in
+a header line, a separator and three block keywords, and files in the wild
+ignore even those differences. Liberal in, exact out, so a round trip through
+another tool does not degrade a file a little more each time. A file that is not
+valid UTF-8 is read as Latin-1 rather than refused, and a malformed cue costs
+its own block rather than the file.
+
+Both formats count milliseconds, which divide the tick base exactly, so reading
+is lossless and writing rounds by at most half a millisecond — a sixtieth of a
+frame at 29.97. Cues are deliberately **not** snapped to the frame grid: a
+caption is text rather than a picture, and snapping would shift every imported
+cue and make the round trip lossy.
+
+Four decisions are worth stating.
+
+**The preview draws an overlay, not a burn-in.** The interface draws the current
+cue over the picture with its own text; the compositor never sees it. Burning
+captions into the frame needs a glyph rasteriser in the render graph, which is
+the next phase's work, and claiming it here would mean a preview showing
+something the delivery would not have.
+
+**Whether captions are drawn is a view setting, never project data.** A track
+that could be hidden from the preview *and* from an export would be a trap: hide
+it to check a shot, deliver without it, hear about it from the client. So the
+editor has a switch and an export writes every track it is asked for.
+
+**An export writes them beside the file**, timed from the start of the exported
+range — a ten-minute delivery from the middle of a cut is its own file starting
+at zero — and after the trailer, so a cancelled export cannot leave caption
+files behind for a delivery that no longer exists. A cue straddling the in point
+is clipped rather than dropped, because half that line is spoken inside the
+range.
+
+**An import lands on a track of its own** rather than replacing the selected
+one. An import is usually a language arriving, and quietly overwriting an hour
+of someone's corrections because the wrong lane was selected is not a mistake
+worth making possible.
+
+What is **not** here. There is no burn-in and no subtitle stream muxed into the
+container, for the reasons above — and note that the *reason* for the first has
+changed since this was written: Phase 8 brought the text rendering a burn-in
+would need, so what is left is the decision rather than the machinery. A
+sidecar is what a delivery is normally asked for, and a burn-in cannot be
+undone once it is written. Captions carry no position, alignment or
+styling: a cue is text and a span, and a file that has those says so on import
+rather than being half-honoured. There is no speech recognition — that is a
+model, not an editor feature, and the file it would produce is one this already
+imports. And a ripple does not carry cues with it, because a ripple here is
+per-track and a caption lane is not the track being rippled.
+
+See [BENCHMARKS.md](BENCHMARKS.md#captions) for what reading a film's worth of
+captions costs, and what finding the one on screen costs per frame.
+
+## Phase 8 — Motion graphics
+
+- Shapes ✅ — rectangles, ellipses, polygons and stars, with fill and stroke
+- Text ✅ — a font, a size, alignment and wrapping, shaped and drawn
+- Nested compositions ✅ — delivered in Phase 3
+- Gradient fill ✅ — a two-stop linear ramp on shapes and text
+- Text animation ✅ — animators over a range of characters
+- Motion paths ✅ — a bezier curve a clip travels along, progress by distance
+- Expressions — **deferred to Phase 9**
+
+**Shapes, text, gradient fills, text animation and motion paths are done. Expressions are deliberately deferred to Phase 9.**
 
 A **graphic** is the first thing in the project that is neither media nor an
 arrangement of it: it is the picture itself. So it sits beside compositions as
@@ -656,7 +1149,8 @@ and what the cache is worth against it.
 
 ## Phase 9 — Ecosystem
 
-A plugin API, scripting, project interchange (AAF, EDL, OTIO), and documentation
+A plugin API, scripting (including property **expressions**, carried over from
+Phase 8), project interchange (AAF, EDL, OTIO), and documentation
 for people extending it rather than building it.
 
 ## Standing commitments

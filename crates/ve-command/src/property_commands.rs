@@ -29,6 +29,8 @@ pub enum ClipProperty {
     Rotation,
     Anchor,
     Opacity,
+    /// How far along the clip's motion path it is, 0 to 1 by distance.
+    PathProgress,
     Volume,
     Pan,
     /// A parameter on one of the clip's effects.
@@ -46,6 +48,7 @@ impl ClipProperty {
             ClipProperty::Rotation => "Rotation",
             ClipProperty::Anchor => "Anchor",
             ClipProperty::Opacity => "Opacity",
+            ClipProperty::PathProgress => "Path Progress",
             ClipProperty::Volume => "Volume",
             ClipProperty::Pan => "Pan",
             ClipProperty::EffectParam { key, .. } => key,
@@ -155,6 +158,12 @@ macro_rules! with_property {
             }
             ClipProperty::Opacity => {
                 let $p = &mut clip.transform.opacity;
+                #[allow(unused)]
+                use PropertyValue::Scalar as $kind;
+                $body
+            }
+            ClipProperty::PathProgress => {
+                let $p = &mut clip.transform.path_progress;
                 #[allow(unused)]
                 use PropertyValue::Scalar as $kind;
                 $body
@@ -531,6 +540,67 @@ impl Command for RemoveClipKeyframe {
             }
         });
         Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Sets, replaces or removes the curve a clip travels along.
+///
+/// The curve's *shape* only: where along it the clip is at any moment is
+/// `path_progress`, an ordinary property set by [`SetClipProperty`] and
+/// keyframed by the keyframe commands. Merges with later sets on the same clip,
+/// so dragging a point or a handle is one undo step however many pointer moves
+/// it took.
+#[derive(Debug)]
+pub struct SetMotionPath {
+    sequence: SequenceId,
+    clip: ClipId,
+    path: Option<ve_core::MotionPath>,
+    previous: Option<Option<ve_core::MotionPath>>,
+}
+
+impl SetMotionPath {
+    pub fn new(sequence: SequenceId, clip: ClipId, path: Option<ve_core::MotionPath>) -> Self {
+        SetMotionPath { sequence, clip, path, previous: None }
+    }
+}
+
+impl Command for SetMotionPath {
+    fn name(&self) -> &str {
+        if self.path.is_some() {
+            "Edit Motion Path"
+        } else {
+            "Remove Motion Path"
+        }
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let clip = clip_mut(project, self.sequence, self.clip)?;
+        let previous = std::mem::replace(&mut clip.transform.path, self.path.clone());
+        self.previous.get_or_insert(previous);
+        Ok(())
+    }
+
+    fn undo(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        let previous = self
+            .previous
+            .clone()
+            .ok_or_else(|| CommandError::Rejected("path was never set".into()))?;
+        clip_mut(project, self.sequence, self.clip)?.transform.path = previous;
+        Ok(())
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        match next.as_any().downcast_ref::<SetMotionPath>() {
+            Some(other) if other.clip == self.clip => {
+                self.path = other.path.clone();
+                true
+            }
+            _ => false,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {

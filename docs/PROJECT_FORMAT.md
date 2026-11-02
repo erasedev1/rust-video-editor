@@ -161,6 +161,28 @@ hand-shaped curve is `{"mode": "bezier", "x1": …, "y1": …, "x2": …, "y2": 
 and the loader re-establishes the sort and uniqueness invariants on the way in,
 so a hand-edited file cannot leave a property with two keyframes at one instant.
 
+## Phase 8 additions
+
+Motion graphics added three optional pieces, all additive and all still at
+version 2. Each is **omitted when unused**, so a project that never touches them
+is byte-for-byte the file it was before.
+
+| Field            | Where                       | Missing means              |
+|------------------|-----------------------------|----------------------------|
+| `gradient`       | shape, text                 | a solid fill               |
+| `animators`      | text                        | the run is drawn as a block |
+| `path`           | a clip's or layer's `transform` | no motion path          |
+| `path_progress`  | `transform`                 | 0 (written only when set)  |
+
+A **gradient** is `{"to": <colour property>, "angle": <degrees property>}`; the
+fill colour is where the ramp starts. A text **animator** is a range
+(`start`, `end`, `offset`, as fractions of the run) and the changes its
+characters receive (`position`, `scale`, `rotation`, `opacity`), every one a
+`Property`; a missing key means "no change" for the changes and "the whole run"
+for the range. A **motion path** is `{"points": [{"position", "handle_in",
+"handle_out"}, …]}` with the handles relative to their point, and the position
+it produces is *added* to the transform's own `position`.
+
 ## Robustness
 
 The loader treats the file as untrusted. It repairs what it can and reports the

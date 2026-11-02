@@ -810,3 +810,38 @@ fn a_nested_target_is_not_premultiplied_a_second_time() {
         "half red over white, not a quarter",
     );
 }
+
+#[test]
+fn a_layer_on_a_motion_path_is_drawn_where_the_path_puts_it() {
+    use ve_core::{Interpolation, MotionPath, Transform};
+
+    let size = Size::new(64, 64);
+    let mut h = Harness::new(size);
+    let texture = h.upload(&solid_frame(Size::new(16, 16), RED));
+
+    // A path from the left of the frame to the right; progress keyframed 0 → 1
+    // over a second. Nothing else about the transform is touched.
+    let mut transform = Transform {
+        path: Some(MotionPath::line(Vec2::new(-20.0, 0.0), Vec2::new(20.0, 0.0))),
+        ..Transform::default()
+    };
+    transform.path_progress.set_keyframe(Ticks::ZERO, 0.0, Interpolation::Linear);
+    transform.path_progress.set_keyframe(Ticks::from_seconds(1), 1.0, Interpolation::Linear);
+
+    let blue = Rgba::new(0.0, 0.0, 1.0, 1.0);
+    let at = |h: &mut Harness, t: Ticks| {
+        let state = transform.evaluate(t);
+        h.render(blue, &[Layer::new(&texture).with_transform(state)])
+    };
+
+    let start = at(&mut h, Ticks::ZERO);
+    assert_colour(h.pixel(&start, 12, 32), RED, "at the start of the path, left of centre");
+    assert_colour(h.pixel(&start, 52, 32), BLUE, "and nothing at the far end yet");
+
+    let end = at(&mut h, Ticks::from_seconds(1));
+    assert_colour(h.pixel(&end, 52, 32), RED, "at the end of the path, right of centre");
+    assert_colour(h.pixel(&end, 12, 32), BLUE, "and gone from where it started");
+
+    let middle = at(&mut h, Ticks::from_millis(500));
+    assert_colour(h.pixel(&middle, 32, 32), RED, "half way, back in the centre");
+}

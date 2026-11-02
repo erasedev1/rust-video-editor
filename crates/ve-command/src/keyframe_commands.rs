@@ -417,6 +417,7 @@ pub fn property_ref<'a>(
         ClipProperty::Anchor => PropertyRef::Point(&transform.anchor),
         ClipProperty::Rotation => PropertyRef::Scalar(&transform.rotation),
         ClipProperty::Opacity => PropertyRef::Scalar(&transform.opacity),
+        ClipProperty::PathProgress => PropertyRef::Scalar(&transform.path_progress),
         ClipProperty::Volume => PropertyRef::Scalar(&item.audio().volume),
         ClipProperty::Pan => PropertyRef::Scalar(&item.audio().pan),
         ClipProperty::EffectParam { effect, key } => {
@@ -528,6 +529,10 @@ pub fn animatable_properties(item: &impl Animated) -> Vec<ClipProperty> {
         ClipProperty::Volume,
         ClipProperty::Pan,
     ];
+    // Progress along a path means nothing without one.
+    if item.transform().path.is_some() {
+        properties.insert(5, ClipProperty::PathProgress);
+    }
     for effect in item.effects() {
         for (key, param) in &effect.params {
             if matches!(

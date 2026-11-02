@@ -327,6 +327,7 @@ impl Clip {
         shift!(self.transform.rotation);
         shift!(self.transform.anchor);
         shift!(self.transform.opacity);
+        shift!(self.transform.path_progress);
         shift!(self.audio.volume);
         shift!(self.audio.pan);
 

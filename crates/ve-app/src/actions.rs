@@ -19,9 +19,9 @@ use ve_command::{
     SetCaptionLanguage, SetClipAngle, SetClipBlendMode, SetClipEnabled, SetClipFade,
     SetClipMotionBlur, SetClipProperty, SetClipSpeed, SetCompositionSettings, SetCueText,
     SetEffectEnabled, SetEffectOption, SetGraphicOption, SetGraphicProperty, SetGraphicText,
-    SetSequenceColorSpace, SetSequenceFormat, SetSequenceMotionBlur, SetTrackFlag,
-    SetTrackLevel, SetUseProxies, ShiftClips, SlideClip, SlipClip, SplitClip, TrackFlag,
-    TrackLevel, TrimClip, TrimEdge,
+    SetMotionPath, SetSequenceColorSpace, SetSequenceFormat, SetSequenceMotionBlur,
+    SetTrackFlag, SetTrackLevel, SetUseProxies, ShiftClips, SlideClip, SlipClip, SplitClip,
+    TrackFlag, TrackLevel, TrimClip, TrimEdge,
 };
 use ve_core::{
     AngleId, AssetId, BlendMode, CaptionTrackId, Clip, ClipId, ColorSpace, CueId, EffectId,
@@ -110,6 +110,13 @@ pub enum Action {
     },
     // Keeps the clip's frames and changes how long it takes to play them, so
     // the clip's length on the timeline changes with it.
+    /// Sets, edits or removes the curve a clip travels along. `coalesce` is for
+    /// drags: every pointer move is one of these, and they are one undo step.
+    SetMotionPath {
+        clip: ClipId,
+        path: Option<ve_core::MotionPath>,
+        coalesce: bool,
+    },
     SetClipSpeed {
         clip: ClipId,
         speed: Speed,
@@ -896,6 +903,19 @@ pub fn dispatch(
                         Err(e) => state.set_status(Status::warning(e.to_string())),
                     }
                 }
+            }
+        }
+
+        Action::SetMotionPath { clip, path, coalesce } => {
+            let command = Box::new(SetMotionPath::new(sequence_id, clip, path));
+            let result = if coalesce {
+                state.history.execute_coalesced(&mut state.project, command)
+            } else {
+                state.history.execute(&mut state.project, command)
+            };
+            match result {
+                Ok(()) => state.mark_edited(),
+                Err(e) => state.set_status(Status::warning(e.to_string())),
             }
         }
 

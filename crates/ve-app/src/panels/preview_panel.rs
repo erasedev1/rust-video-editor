@@ -1,7 +1,7 @@
 //! The program monitor: the composited picture, plus transport controls.
 
 use egui::{Align, Color32, FontId, Layout, Rect, RichText, Sense, Ui, Vec2};
-use ve_core::Size;
+use ve_core::{MotionPath, Size};
 use ve_time::Ticks;
 
 use crate::actions::Action;
@@ -43,6 +43,7 @@ pub fn show(ui: &mut Ui, state: &EditorState, info: &PreviewInfo, actions: &mut 
 
     draw_picture(ui, picture_rect, info);
     draw_captions(ui, picture_rect, state, info);
+    draw_motion_path(ui, picture_rect, state, info, actions);
     ui.add_space(4.0);
     transport(ui, state, info, actions);
 }
@@ -237,5 +238,123 @@ pub fn scrub_bar(ui: &mut Ui, state: &EditorState, position: Ticks, actions: &mu
         let f = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
         actions
             .push(Action::ScrubTo(Ticks::from_secs_f64((duration.as_secs_f32() * f) as f64)));
+    }
+}
+
+/// Draws the selected clip's motion path over the picture, and lets its points
+/// and handles be dragged.
+///
+/// The path is in composition pixels, offset from the clip's own position, so it
+/// is drawn from the picture's centre plus the position at the playhead. Points
+/// are filled circles, handles are small squares joined to their point by a
+/// line, and a handle the same length as nothing is not drawn — a corner point
+/// has none, and a square sitting on top of its circle would be a second thing
+/// to miss when grabbing the first. **Double-clicking a point** toggles it
+/// between a corner and a smooth point, which is how a handle is made to exist.
+fn draw_motion_path(
+    ui: &Ui,
+    area: Rect,
+    state: &EditorState,
+    info: &PreviewInfo,
+    actions: &mut Vec<Action>,
+) {
+    let [clip_id] = state.selection.clips[..] else { return };
+    let Some(sequence) = state.active_sequence() else { return };
+    let Some((_, clip)) = sequence.find_clip(clip_id) else { return };
+    let Some(path) = clip.transform.path.as_ref() else { return };
+    if path.points.is_empty() || info.size.width == 0 {
+        return;
+    }
+
+    let picture = picture_rect(area, info.size);
+    let k = picture.width() / info.size.width as f32;
+    let local = clip.local_time_at(info.position);
+    let base = clip.transform.position.evaluate(local);
+    let to_screen = |x: f64, y: f64| {
+        egui::pos2(
+            picture.center().x + (base.x + x) as f32 * k,
+            picture.center().y + (base.y + y) as f32 * k,
+        )
+    };
+    let painter = ui.painter_at(picture);
+    let accent = theme::ACCENT;
+
+    // The curve itself, drawn by sampling the same function the renderer
+    // evaluates rather than by a second opinion about bezier curves.
+    let samples: Vec<egui::Pos2> = (0..=96)
+        .map(|i| {
+            let p = path.sample(i as f64 / 96.0);
+            to_screen(p.x, p.y)
+        })
+        .collect();
+    painter.add(egui::Shape::line(samples, egui::Stroke::new(1.5, accent)));
+
+    // Where the clip is on it now.
+    let now = path.sample(clip.transform.path_progress.evaluate(local));
+    painter.circle_stroke(to_screen(now.x, now.y), 7.0, egui::Stroke::new(1.5, Color32::WHITE));
+
+    let mut edit: Option<MotionPath> = None;
+    let mut released = false;
+    for (i, point) in path.points.iter().enumerate() {
+        let centre = to_screen(point.position.x, point.position.y);
+        let handles = [(point.handle_in, 0u8), (point.handle_out, 1u8)];
+        for (handle, which) in handles {
+            if handle.x == 0.0 && handle.y == 0.0 {
+                continue;
+            }
+            let at = to_screen(point.position.x + handle.x, point.position.y + handle.y);
+            painter
+                .line_segment([centre, at], egui::Stroke::new(1.0, accent.gamma_multiply(0.6)));
+            let hit = Rect::from_center_size(at, Vec2::splat(12.0));
+            let response = ui.interact(
+                hit,
+                egui::Id::new(("path-handle", i, which)),
+                Sense::click_and_drag(),
+            );
+            painter.rect_filled(Rect::from_center_size(at, Vec2::splat(6.0)), 1.0, accent);
+            if response.dragged() {
+                let d = response.drag_delta();
+                let mut p = path.clone();
+                let target = if which == 0 {
+                    &mut p.points[i].handle_in
+                } else {
+                    &mut p.points[i].handle_out
+                };
+                target.x += (d.x / k) as f64;
+                target.y += (d.y / k) as f64;
+                edit = Some(p);
+            }
+            released |= response.drag_stopped();
+        }
+
+        let hit = Rect::from_center_size(centre, Vec2::splat(14.0));
+        let response =
+            ui.interact(hit, egui::Id::new(("path-point", i)), Sense::click_and_drag());
+        painter.circle_filled(centre, 5.0, Color32::WHITE);
+        painter.circle_stroke(centre, 5.0, egui::Stroke::new(1.5, accent));
+        if response.dragged() {
+            let d = response.drag_delta();
+            let mut p = path.clone();
+            p.points[i].position.x += (d.x / k) as f64;
+            p.points[i].position.y += (d.y / k) as f64;
+            edit = Some(p);
+        }
+        if response.double_clicked() {
+            let mut p = path.clone();
+            p.toggle_smooth(i);
+            actions.push(Action::SetMotionPath {
+                clip: clip_id,
+                path: Some(p),
+                coalesce: false,
+            });
+        }
+        released |= response.drag_stopped();
+    }
+
+    if let Some(p) = edit {
+        actions.push(Action::SetMotionPath { clip: clip_id, path: Some(p), coalesce: true });
+    }
+    if released {
+        actions.push(Action::EndGesture);
     }
 }

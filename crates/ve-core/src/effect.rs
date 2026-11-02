@@ -5,6 +5,7 @@ use crate::animation::Property;
 use crate::fade::{Fade, FadeEdge};
 use crate::geometry::{Rgba, Vec2};
 use crate::id::EffectId;
+use crate::motion_path::MotionPath;
 use crate::registry::EffectDescriptor;
 
 /// A single tunable input to an effect.
@@ -261,6 +262,20 @@ pub struct Transform {
     pub anchor: Property<Vec2>,
     /// `0.0..=1.0`.
     pub opacity: Property<f64>,
+    /// A curve the clip travels along, added to `position`; or `None` for no
+    /// path. The shape lives here and the timing in `path_progress`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<MotionPath>,
+    /// How far along `path` the clip is, 0 to 1 *by distance*. Animate this to
+    /// move along the path; ease it to ease the move.
+    #[serde(default, skip_serializing_if = "is_unmoved")]
+    pub path_progress: Property<f64>,
+}
+
+/// Whether progress is the untouched default, so a project that never used a
+/// path writes exactly the file it always did.
+fn is_unmoved(p: &Property<f64>) -> bool {
+    *p == Property::constant(0.0)
 }
 
 impl Default for Transform {
@@ -271,6 +286,8 @@ impl Default for Transform {
             rotation: Property::constant(0.0),
             anchor: Property::constant(Vec2::splat(0.5)),
             opacity: Property::constant(1.0),
+            path: None,
+            path_progress: Property::constant(0.0),
         }
     }
 }
@@ -278,8 +295,17 @@ impl Default for Transform {
 impl Transform {
     /// Resolves every property at clip-relative time `t`.
     pub fn evaluate(&self, t: Ticks) -> TransformState {
+        let mut position = self.position.evaluate(t);
+        // The path is folded into `position` here, once, so everything
+        // downstream — the compositor, motion blur's sub-frame samples, the
+        // render cache's key — sees a position and needs to know nothing of
+        // paths.
+        if let Some(path) = &self.path {
+            let at = path.sample(self.path_progress.evaluate(t));
+            position = Vec2::new(position.x + at.x, position.y + at.y);
+        }
         TransformState {
-            position: self.position.evaluate(t),
+            position,
             scale: self.scale.evaluate(t),
             rotation: self.rotation.evaluate(t),
             anchor: self.anchor.evaluate(t),
@@ -293,6 +319,7 @@ impl Transform {
             || self.rotation.is_animated()
             || self.anchor.is_animated()
             || self.opacity.is_animated()
+            || (self.path.is_some() && self.path_progress.is_animated())
     }
 
     /// True when the transform is the identity, letting the renderer take a
@@ -417,5 +444,37 @@ impl AudioProperties {
             || self.pan.is_animated()
             || self.fade_in.is_active()
             || self.fade_out.is_active()
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn a_transform_with_no_path_serialises_as_it_always_did() {
+        let json = serde_json::to_string(&Transform::default()).unwrap();
+        assert!(!json.contains("path"), "{json}");
+        let back: Transform = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Transform::default());
+    }
+
+    #[test]
+    fn a_path_round_trips() {
+        let t = Transform {
+            path: Some(MotionPath::line(Vec2::new(1.0, 2.0), Vec2::new(3.0, 4.0))),
+            ..Transform::default()
+        };
+        let back: Transform =
+            serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn a_path_makes_the_transform_non_identity_once_it_moves_the_clip() {
+        let mut t = Transform::default();
+        assert!(t.is_identity());
+        t.path = Some(MotionPath::line(Vec2::new(5.0, 0.0), Vec2::new(9.0, 0.0)));
+        assert!(!t.is_identity(), "the clip sits at 5, 0 now");
     }
 }

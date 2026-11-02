@@ -67,7 +67,7 @@ pub use multicam_commands::{
 };
 pub use property_commands::{
     ClipProperty, PropertyValue, RemoveClipKeyframe, SetClipKeyframe, SetClipProperty,
-    SetLayerProperty,
+    SetLayerProperty, SetMotionPath,
 };
 pub use proxy_commands::{SetAssetProxy, SetUseProxies};
 pub use structure_commands::{

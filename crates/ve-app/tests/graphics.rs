@@ -434,3 +434,34 @@ fn a_text_animator_is_added_from_the_inspector_and_survives_save_and_reopen() {
     editor.act(Action::Undo);
     assert_eq!(editor.state.project.graphic(id).unwrap().as_text().unwrap().animators.len(), 1);
 }
+
+#[test]
+fn a_clip_gets_a_motion_path_from_the_action_layer_and_a_drag_is_one_undo_step() {
+    use ve_core::MotionPath;
+
+    let mut editor = Editor::new();
+    editor.act(Action::AddShape(ShapeKind::Rectangle));
+    let id = editor.only_graphic();
+    let track = editor.video_track();
+    editor.act(Action::AddGraphicToTimeline { graphic: id, track, at: Ticks::ZERO });
+    let clip = editor.state.active_sequence().unwrap().track(track).unwrap().clips()[0].id;
+    let path_of = |e: &Editor| {
+        e.state.active_sequence().unwrap().find_clip(clip).unwrap().1.transform.path.clone()
+    };
+
+    let line = |x: f64| MotionPath::line(Vec2::ZERO, Vec2::new(x, 0.0));
+    editor.act(Action::SetMotionPath { clip, path: Some(line(100.0)), coalesce: false });
+    assert_eq!(path_of(&editor), Some(line(100.0)), "{}", editor.status());
+
+    // A drag: many coalesced moves, then the gesture ends.
+    for x in [120.0, 150.0, 200.0] {
+        editor.act(Action::SetMotionPath { clip, path: Some(line(x)), coalesce: true });
+    }
+    editor.act(Action::EndGesture);
+    assert_eq!(path_of(&editor), Some(line(200.0)));
+
+    editor.act(Action::Undo);
+    assert_eq!(path_of(&editor), Some(line(100.0)), "the drag undid as one step");
+    editor.act(Action::Undo);
+    assert_eq!(path_of(&editor), None);
+}

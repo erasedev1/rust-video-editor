@@ -25,6 +25,7 @@ pub mod geometry;
 pub mod graphic;
 pub mod id;
 pub mod motion;
+pub mod motion_path;
 pub mod multicam;
 pub mod project;
 pub mod registry;
@@ -54,6 +55,7 @@ pub use id::{
     IdAllocator, LayerId, MarkerId, MulticamId, SequenceId, TrackId,
 };
 pub use motion::MotionBlur;
+pub use motion_path::{MotionPath, PathPoint};
 pub use multicam::{MulticamAngle, MulticamGroup, SyncMethod};
 pub use project::{Project, ProjectSettings};
 pub use registry::{
