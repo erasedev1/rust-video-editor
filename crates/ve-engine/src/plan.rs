@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use ve_core::registry::EffectRegistry;
 use ve_core::{
-    builtin_registry, AssetId, BlendMode, ClipId, ColorSpace, Composition, CompositionId,
+    active_registry, AssetId, BlendMode, ClipId, ColorSpace, Composition, CompositionId,
     Effect, EffectState, GraphicId, GraphicState, LayerId, MotionBlur, Project, Rgba, Sequence,
     Size, Source, TrackId, TrackKind, Transform, TransformState,
 };
@@ -304,7 +304,7 @@ struct Evaluator<'a> {
 
 impl<'a> Evaluator<'a> {
     fn new(project: Option<&'a Project>) -> Self {
-        Evaluator { project, registry: builtin_registry() }
+        Evaluator { project, registry: active_registry() }
     }
 
     /// Every effect that will actually be drawn, resolved at clip-local time.

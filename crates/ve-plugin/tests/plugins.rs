@@ -58,3 +58,21 @@ fn load_dir_skips_broken_plugins() {
     assert!(out[1].1.is_err());
     assert!(reg.contains("acme.glow"));
 }
+
+#[test]
+fn an_installed_registry_is_the_one_the_editor_resolves_against() {
+    use ve_core::{active_registry, install_registry};
+
+    let dir = tempfile::tempdir().unwrap();
+    let plugin = dir.path().join("tint");
+    std::fs::create_dir(&plugin).unwrap();
+    std::fs::write(plugin.join("plugin.json"), GOOD).unwrap();
+
+    let mut reg = builtin_registry().clone();
+    let loaded = ve_plugin::load_dir(dir.path(), &mut reg);
+    assert!(loaded[0].1.is_ok(), "{:?}", loaded[0].1);
+
+    install_registry(reg).expect("first install wins");
+    assert!(active_registry().get("acme.glow").is_some());
+    assert!(builtin_registry().get("acme.glow").is_none());
+}

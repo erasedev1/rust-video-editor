@@ -25,7 +25,7 @@ use std::any::Any;
 
 use ve_core::registry::EffectRegistry;
 use ve_core::{
-    builtin_registry, ClipId, CompositionId, Effect, EffectId, LayerId, ParamValue, Project,
+    active_registry, ClipId, CompositionId, Effect, EffectId, LayerId, ParamValue, Project,
     SequenceId,
 };
 
@@ -121,7 +121,7 @@ pub struct AddEffect {
 
 impl AddEffect {
     pub fn new(host: EffectHost, kind: impl Into<String>) -> Self {
-        AddEffect::from_registry(host, kind, builtin_registry())
+        AddEffect::from_registry(host, kind, active_registry())
     }
 
     /// Appends at a given position rather than at the end.

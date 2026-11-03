@@ -667,7 +667,7 @@ impl Project {
             }
         }
 
-        self.conform_effects(crate::registry::builtin_registry());
+        self.conform_effects(crate::registry::active_registry());
 
         if let Some(active) = self.active_sequence {
             if self.sequence(active).is_none() {

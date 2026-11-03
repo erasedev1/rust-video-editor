@@ -3817,6 +3817,7 @@ dependencies = [
  "ve-interchange",
  "ve-media",
  "ve-metrics",
+ "ve-plugin",
  "ve-project",
  "ve-render",
  "ve-time",

@@ -7,7 +7,7 @@ use ve_command::{
 };
 use ve_core::registry::{EffectCategory, EffectRegistry, ParamKind};
 use ve_core::{
-    builtin_registry, BlendMode, Clip, ColorSpace, Effect, EffectId, Fade, FadeCurve, FadeEdge,
+    active_registry, BlendMode, Clip, ColorSpace, Effect, EffectId, Fade, FadeCurve, FadeEdge,
     Graphic, GraphicContent, GraphicId, MotionBlur, ParamValue, Rgba, ShapeKind, TextAlign,
     Vec2,
 };
@@ -273,7 +273,7 @@ pub fn show(
 /// added later, or by a plugin, arrive here with working controls and no change
 /// to this file.
 fn effects_section(ui: &mut Ui, clip: &Clip, local: Ticks, actions: &mut Vec<Action>) {
-    let registry = builtin_registry();
+    let registry = active_registry();
     let clip_id = clip.id;
     section(ui, "Effects", |ui| {
         let count = clip.effects.len();

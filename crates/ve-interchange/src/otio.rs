@@ -180,7 +180,7 @@ pub fn read(
             let schema = child.get("OTIO_SCHEMA").and_then(Value::as_str).unwrap_or("");
             let span = child.get("source_range").and_then(tr);
             if schema.starts_with("Gap") {
-                cursor = cursor + span.map_or(Ticks::ZERO, |s| s.1);
+                cursor += span.map_or(Ticks::ZERO, |s| s.1);
             } else if schema.starts_with("Clip") {
                 index += 1;
                 let name = child.get("name").and_then(Value::as_str).unwrap_or("").to_string();
@@ -235,7 +235,7 @@ pub fn read(
                     }),
                     _ => out.unresolved.push(index),
                 }
-                cursor = cursor + timeline_duration;
+                cursor += timeline_duration;
             } else if schema.starts_with("Transition") {
                 out.warnings.push("a transition was ignored".to_string());
             } else {

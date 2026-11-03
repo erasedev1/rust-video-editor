@@ -59,8 +59,8 @@ pub use motion_path::{MotionPath, PathPoint};
 pub use multicam::{MulticamAngle, MulticamGroup, SyncMethod};
 pub use project::{Project, ProjectSettings};
 pub use registry::{
-    builtin_registry, EffectCategory, EffectDescriptor, EffectRegistry, ParamDescriptor,
-    ParamKind,
+    active_registry, builtin_registry, install_registry, EffectCategory, EffectDescriptor,
+    EffectRegistry, ParamDescriptor, ParamKind,
 };
 pub use sequence::{Marker, Sequence, SequenceSettings};
 pub use source::Source;

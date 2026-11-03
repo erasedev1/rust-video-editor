@@ -1191,6 +1191,12 @@ whole. `load_dir` loads a directory of plugins, skipping and reporting broken
 ones. No plugin code runs yet: a declared effect has no render program, so it
 is skipped at render time exactly as an effect from an uninstalled plugin is.
 
+The editor loads plugins at startup from `VERGE_PLUGIN_DIR`, else
+`verge/plugins` under the user's data directory. They go into one registry
+installed with `install_registry`; the inspector, the add-effect command, the
+render plan and project conforming all resolve kinds through `active_registry`,
+which is that registry, or the built-ins when none was installed.
+
 ## Standing commitments
 
 These hold across every phase:

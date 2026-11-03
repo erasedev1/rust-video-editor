@@ -402,15 +402,32 @@ impl EffectRegistry {
     }
 }
 
+static ACTIVE: OnceLock<EffectRegistry> = OnceLock::new();
+
 /// The process-wide registry of built-in effects.
 ///
-/// Built once on first use. A host that registers plugin effects will own a
-/// registry of its own and pass it down; this is the convenience every caller
-/// that only needs the built-ins uses, so that the catalogue is not rebuilt per
-/// repaint of an inspector.
+/// Built once on first use, so that the catalogue is not rebuilt per repaint of
+/// an inspector. Code that should see plugin effects too wants
+/// [`active_registry`] instead.
 pub fn builtin_registry() -> &'static EffectRegistry {
     static REGISTRY: OnceLock<EffectRegistry> = OnceLock::new();
     REGISTRY.get_or_init(EffectRegistry::builtin)
+}
+
+/// Makes `registry` the one [`active_registry`] returns.
+///
+/// A host calls this once at startup, after loading its plugins. It must come
+/// before anything asks for the active registry; if one is already in place
+/// (installed earlier, or already handed out as the built-ins) the registry is
+/// given back as the error and nothing changes.
+pub fn install_registry(registry: EffectRegistry) -> Result<(), EffectRegistry> {
+    ACTIVE.set(registry)
+}
+
+/// The registry the editor resolves effect kinds against: the one a host
+/// installed, or the built-ins when none was. The first call fixes the answer.
+pub fn active_registry() -> &'static EffectRegistry {
+    ACTIVE.get_or_init(|| builtin_registry().clone())
 }
 
 /// Kind keys for the built-ins, so that callers naming one — the inspector's
