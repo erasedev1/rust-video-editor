@@ -1150,7 +1150,7 @@ and what the cache is worth against it.
 ## Phase 9 — Ecosystem
 
 - Project interchange — **EDL ✅** (CMX3600), **OTIO ✅**, AAF
-- Plugin API — **manifests ✅** (declared effects), render programs and scripting host to come
+- Plugin API — **manifests ✅** (declared effects), **render programs ✅** (WGSL shaders), scripting host to come
 - Scripting, including property **expressions**, carried over from Phase 8
 - Documentation for people extending the editor rather than building it
 
@@ -1188,14 +1188,28 @@ plugin effect gets menu entry, inspector controls and keyframes with nothing
 downstream changed. Kinds must be namespaced by the plugin id, may not collide
 with a built-in or another plugin, and a plugin that breaks a rule is rejected
 whole. `load_dir` loads a directory of plugins, skipping and reporting broken
-ones. No plugin code runs yet: a declared effect has no render program, so it
-is skipped at render time exactly as an effect from an uninstalled plugin is.
+ones. An effect without a `shader` has no render program, so it is skipped at render
+time exactly as an effect from an uninstalled plugin is.
 
 The editor loads plugins at startup from `VERGE_PLUGIN_DIR`, else
 `verge/plugins` under the user's data directory. They go into one registry
 installed with `install_registry`; the inspector, the add-effect command, the
 render plan and project conforming all resolve kinds through `active_registry`,
 which is that registry, or the built-ins when none was installed.
+
+**Render programs.** An effect entry may name a `shader`: a WGSL file beside
+the manifest that defines
+`fn effect(uv: vec2<f32>, c: vec4<f32>) -> vec4<f32>`, taking and returning
+premultiplied colour. The parameters arrive in `fx.p0`..`fx.p3`, packed in
+declaration order (one float for a scalar, bool or choice, two for a point,
+four for a colour; sixteen at most). The renderer wraps it in the shared
+effect prelude and builds one pipeline per effect kind the first time a pass
+uses it. The host checks the shader with `validate_plugin_shader` (parse and
+validate, via naga) while loading, so a shader the GPU would refuse rejects its
+plugin at startup rather than failing a frame. Shaders are untrusted code that
+runs on the GPU, so the file must sit inside the plugin directory and be under
+256 KiB; there is no sandboxing beyond what WGSL itself allows. Still to come:
+the scripting host and property expressions.
 
 ## Standing commitments
 

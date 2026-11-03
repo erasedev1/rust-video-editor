@@ -40,6 +40,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use ve_core::registry::kinds;
+use ve_core::registry::ParamKind;
 use ve_core::{ColorSpace, EffectState, Rgba, Size, Vec2};
 
 use crate::target::RenderTarget;
@@ -60,6 +61,9 @@ pub enum Program {
     LumaKey,
     Grade,
     Qualify,
+    /// A plugin's own shader. Not in [`Program::ALL`]: its pipelines are built
+    /// on first use, one per plugin effect kind.
+    Plugin,
 }
 
 impl Program {
@@ -84,6 +88,7 @@ impl Program {
             Program::LumaKey => "fs_luma",
             Program::Grade => "fs_grade",
             Program::Qualify => "fs_qualify",
+            Program::Plugin => PLUGIN_ENTRY,
         }
     }
 
@@ -134,11 +139,19 @@ impl EffectUniform {
 pub struct EffectPass {
     program: Program,
     uniform: EffectUniform,
+    /// For [`Program::Plugin`]: the effect kind, and the shader source to build
+    /// its pipeline from.
+    plugin: Option<(String, std::sync::Arc<str>)>,
 }
 
 impl EffectPass {
     pub fn program(&self) -> Program {
         self.program
+    }
+
+    /// The plugin effect kind this pass runs, if it is a plugin's.
+    pub fn plugin_kind(&self) -> Option<&str> {
+        self.plugin.as_ref().map(|(kind, _)| kind.as_str())
     }
 
     /// The bytes that decide what this pass draws, for a cache key.
@@ -169,8 +182,82 @@ pub fn passes_for(effect: &EffectState, size: Size) -> Vec<EffectPass> {
         kinds::TRANSFORM => transform_pass(effect, size).into_iter().collect(),
         kinds::SHAPE_MASK => mask_pass(effect, size).into_iter().collect(),
         kinds::LUMA_KEY => vec![luma_pass(effect, size)],
-        _ => Vec::new(),
+        other => plugin_pass(other, effect, size).into_iter().collect(),
     }
+}
+
+/// The fragment entry point wrapped around a plugin's `effect` function.
+const PLUGIN_ENTRY: &str = "fs_plugin";
+
+/// The full WGSL for a plugin effect: the shared prelude (the uniform block,
+/// `tap`, `straight`, `premultiplied`, the vertex stage), the plugin's code,
+/// and the entry point that calls it.
+///
+/// The plugin defines
+/// `fn effect(uv: vec2<f32>, c: vec4<f32>) -> vec4<f32>`, where `c` is the
+/// premultiplied source at `uv` and the result is premultiplied. Its
+/// parameters arrive in `fx.p0`..`fx.p3`, packed in declaration order: a
+/// scalar, bool or choice takes one float, a point two, a colour four.
+pub fn plugin_shader_source(user: &str) -> String {
+    format!(
+        "{}\n// --- plugin ---\n{}\n@fragment\nfn {}(in: VertexOutput) -> @location(0) vec4<f32> {{\n    return effect(in.uv, tap(in.uv));\n}}\n",
+        include_str!("effects.wgsl"),
+        user,
+        PLUGIN_ENTRY,
+    )
+}
+
+/// Checks that a plugin's shader parses and validates, so a broken one is
+/// refused at load time instead of failing the first frame that uses it.
+pub fn validate_plugin_shader(user: &str) -> Result<(), String> {
+    let source = plugin_shader_source(user);
+    let module =
+        naga::front::wgsl::parse_str(&source).map_err(|e| e.emit_to_string(&source))?;
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .map_err(|e| e.emit_to_string(&source))?;
+    Ok(())
+}
+
+fn plugin_pass(kind: &str, effect: &EffectState, size: Size) -> Option<EffectPass> {
+    let descriptor = ve_core::active_registry().get(kind)?;
+    let shader = descriptor.shader.as_deref()?;
+    let mut params = [0.0f32; 16];
+    let mut at = 0;
+    let mut push = |v: f64| {
+        if at < params.len() {
+            params[at] = v as f32;
+            at += 1;
+        }
+    };
+    for p in &descriptor.params {
+        match &p.kind {
+            ParamKind::Scalar { default, .. } => push(effect.scalar(&p.key, *default)),
+            ParamKind::Point { default, .. } => {
+                let v = effect.point(&p.key, *default);
+                push(v.x);
+                push(v.y);
+            }
+            ParamKind::Color { default } => {
+                let c = effect.color(&p.key, *default);
+                for v in [c.r, c.g, c.b, c.a] {
+                    push(v);
+                }
+            }
+            ParamKind::Bool { default } => {
+                push(if effect.flag(&p.key, *default) { 1.0 } else { 0.0 })
+            }
+            ParamKind::Choice { default, .. } => push(effect.choice(&p.key, *default) as f64),
+        }
+    }
+    Some(EffectPass {
+        program: Program::Plugin,
+        uniform: EffectUniform::new(params, size),
+        plugin: Some((kind.to_string(), std::sync::Arc::from(shader))),
+    })
 }
 
 /// Every pass a whole chain draws, in order.
@@ -206,7 +293,11 @@ fn blur_passes(effect: &EffectState, size: Size) -> Vec<EffectPass> {
             params[1] = d[0];
             params[2] = d[1];
             params[3] = BLUR_TAPS;
-            EffectPass { program: Program::Blur, uniform: EffectUniform::new(params, size) }
+            EffectPass {
+                program: Program::Blur,
+                uniform: EffectUniform::new(params, size),
+                plugin: None,
+            }
         })
         .collect()
 }
@@ -231,7 +322,11 @@ fn color_pass(effect: &EffectState, size: Size) -> EffectPass {
     params[5] = tint.g as f32;
     params[6] = tint.b as f32;
     params[7] = tint.a as f32;
-    EffectPass { program: Program::Color, uniform: EffectUniform::new(params, size) }
+    EffectPass {
+        program: Program::Color,
+        uniform: EffectUniform::new(params, size),
+        plugin: None,
+    }
 }
 
 /// Rec. 709 luma, the same weights `effects.wgsl` uses.
@@ -335,7 +430,11 @@ fn three_way_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
         params[4 + c] = lift[c] as f32;
         params[8 + c] = exponent[c] as f32;
     }
-    Some(EffectPass { program: Program::Grade, uniform: EffectUniform::new(params, size) })
+    Some(EffectPass {
+        program: Program::Grade,
+        uniform: EffectUniform::new(params, size),
+        plugin: None,
+    })
 }
 
 /// The per-channel gains a temperature and a tint come to.
@@ -382,7 +481,11 @@ fn white_balance_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
     params[5] = gains[1] as f32;
     params[6] = gains[2] as f32;
     params[7] = 1.0;
-    Some(EffectPass { program: Program::Color, uniform: EffectUniform::new(params, size) })
+    Some(EffectPass {
+        program: Program::Color,
+        uniform: EffectUniform::new(params, size),
+        plugin: None,
+    })
 }
 
 fn hsl_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
@@ -411,7 +514,11 @@ fn hsl_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
     params[5] = saturation.max(0.0) as f32;
     params[6] = luma.max(0.0) as f32;
     params[7] = if matte { 1.0 } else { 0.0 };
-    Some(EffectPass { program: Program::Qualify, uniform: EffectUniform::new(params, size) })
+    Some(EffectPass {
+        program: Program::Qualify,
+        uniform: EffectUniform::new(params, size),
+        plugin: None,
+    })
 }
 
 fn sharpen_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
@@ -422,7 +529,11 @@ fn sharpen_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
     let mut params = [0.0f32; 16];
     params[0] = amount;
     params[1] = effect.scalar("radius", 1.0).max(0.0) as f32;
-    Some(EffectPass { program: Program::Sharpen, uniform: EffectUniform::new(params, size) })
+    Some(EffectPass {
+        program: Program::Sharpen,
+        uniform: EffectUniform::new(params, size),
+        plugin: None,
+    })
 }
 
 /// The inverse map a transform effect resamples through.
@@ -480,7 +591,11 @@ fn transform_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
     params[4] = offset[0] as f32;
     params[5] = offset[1] as f32;
     params[6] = opacity;
-    Some(EffectPass { program: Program::Transform, uniform: EffectUniform::new(params, size) })
+    Some(EffectPass {
+        program: Program::Transform,
+        uniform: EffectUniform::new(params, size),
+        plugin: None,
+    })
 }
 
 fn mask_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
@@ -506,7 +621,11 @@ fn mask_pass(effect: &EffectState, size: Size) -> Option<EffectPass> {
     params[7] = if effect.choice("shape", 1) == 1 { 1.0 } else { 0.0 };
     params[8] = opacity;
     params[9] = if effect.flag("invert", false) { 1.0 } else { 0.0 };
-    Some(EffectPass { program: Program::Mask, uniform: EffectUniform::new(params, size) })
+    Some(EffectPass {
+        program: Program::Mask,
+        uniform: EffectUniform::new(params, size),
+        plugin: None,
+    })
 }
 
 fn luma_pass(effect: &EffectState, size: Size) -> EffectPass {
@@ -519,7 +638,11 @@ fn luma_pass(effect: &EffectState, size: Size) -> EffectPass {
     params[0] = threshold;
     params[1] = threshold + softness;
     params[2] = if effect.flag("invert", false) { 1.0 } else { 0.0 };
-    EffectPass { program: Program::LumaKey, uniform: EffectUniform::new(params, size) }
+    EffectPass {
+        program: Program::LumaKey,
+        uniform: EffectUniform::new(params, size),
+        plugin: None,
+    }
 }
 
 /// The pipelines and the uniform buffer effect passes are drawn with.
@@ -536,6 +659,12 @@ pub(crate) struct EffectRenderer {
     /// reason it is in the compositor: it decides the attachment's format, and
     /// a pipeline's target format has to match the view the pass attaches.
     pipelines: Vec<wgpu::RenderPipeline>,
+    /// Plugin pipelines, built the first time a pass asks for one.
+    plugin_pipelines: parking_lot::Mutex<
+        std::collections::HashMap<(String, ColorSpace), wgpu::RenderPipeline>,
+    >,
+    pipeline_layout: wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
     buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
@@ -640,7 +769,69 @@ impl EffectRenderer {
             }],
         });
 
-        EffectRenderer { pipelines, buffer, bind_group }
+        EffectRenderer {
+            pipelines,
+            plugin_pipelines: Default::default(),
+            pipeline_layout,
+            format,
+            buffer,
+            bind_group,
+        }
+    }
+
+    /// The pipeline for a plugin effect, built on first use and then kept.
+    /// `RenderPipeline` is a cheap handle, so it is cloned out of the lock
+    /// rather than held across the draw.
+    fn plugin_pipeline(
+        &self,
+        device: &wgpu::Device,
+        kind: &str,
+        shader: &str,
+        space: ColorSpace,
+    ) -> wgpu::RenderPipeline {
+        let mut cache = self.plugin_pipelines.lock();
+        cache
+            .entry((kind.to_string(), space))
+            .or_insert_with(|| {
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("verge-plugin-effect-shader"),
+                    source: wgpu::ShaderSource::Wgsl(plugin_shader_source(shader).into()),
+                });
+                let target_format = if self.format == FRAME_FORMAT {
+                    view_format_for(space)
+                } else {
+                    self.format
+                };
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("verge-plugin-effect-pipeline"),
+                    layout: Some(&self.pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(PLUGIN_ENTRY),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: target_format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            })
+            .clone()
     }
 
     /// Draws `source` through one pass into `target`.
@@ -660,7 +851,15 @@ impl EffectRenderer {
         uniform.premultiply = if source.is_premultiplied() { 0.0 } else { 1.0 };
         queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&uniform));
 
-        let index = pass.program.index() * ColorSpace::ALL.len() + color_space as usize;
+        let plugin_pipeline = pass
+            .plugin
+            .as_ref()
+            .map(|(kind, shader)| self.plugin_pipeline(device, kind, shader, color_space));
+        let index = if pass.program == Program::Plugin {
+            0
+        } else {
+            pass.program.index() * ColorSpace::ALL.len() + color_space as usize
+        };
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("verge-effect-encoder"),
         });
@@ -686,7 +885,8 @@ impl EffectRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            render_pass.set_pipeline(&self.pipelines[index]);
+            render_pass
+                .set_pipeline(plugin_pipeline.as_ref().unwrap_or(&self.pipelines[index]));
             render_pass.set_bind_group(0, &self.bind_group, &[]);
             render_pass.set_bind_group(1, source.bind_group(color_space), &[]);
             render_pass.draw(0..4, 0..1);

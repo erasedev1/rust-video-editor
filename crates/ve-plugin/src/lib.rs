@@ -111,7 +111,18 @@ pub struct EffectEntry {
     pub summary: String,
     #[serde(default)]
     pub params: Vec<ParamEntry>,
+    /// Path, relative to the plugin directory, of a WGSL file that gives the
+    /// effect a render program. Read by [`Manifest::load`].
+    #[serde(default)]
+    pub shader: Option<String>,
+    #[serde(skip)]
+    pub shader_source: Option<String>,
 }
+
+/// The most floats a shader effect's parameters may pack into: the renderer's
+/// uniform block has room for sixteen.
+pub const MAX_SHADER_FLOATS: usize = 16;
+const MAX_SHADER_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -134,7 +145,23 @@ impl Manifest {
         let path = dir.join(MANIFEST_FILE);
         let text =
             fs::read_to_string(&path).map_err(|source| PluginError::Io { path, source })?;
-        Manifest::parse(&text)
+        let mut manifest = Manifest::parse(&text)?;
+        for effect in &mut manifest.effects {
+            let Some(rel) = effect.shader.clone() else { continue };
+            let rel_path = Path::new(&rel);
+            let escapes = rel_path.is_absolute()
+                || rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir));
+            if escapes {
+                return Err(effect.bad("shader must be a path inside the plugin directory"));
+            }
+            let path = dir.join(rel_path);
+            let io = |source| PluginError::Io { path: path.clone(), source };
+            if fs::metadata(&path).map_err(io)?.len() > MAX_SHADER_BYTES {
+                return Err(effect.bad("shader is larger than 256 KiB"));
+            }
+            effect.shader_source = Some(fs::read_to_string(&path).map_err(io)?);
+        }
+        Ok(manifest)
     }
 
     pub fn validate(&self) -> Result<(), PluginError> {
@@ -173,6 +200,11 @@ impl Manifest {
         if let Some(e) = self.effects.iter().find(|e| registry.contains(&e.kind)) {
             return Err(PluginError::Duplicate(e.kind.clone()));
         }
+        if let Some(e) =
+            self.effects.iter().find(|e| e.shader.is_some() && e.shader_source.is_none())
+        {
+            return Err(e.bad("declares a shader that was not loaded; use Manifest::load"));
+        }
         for effect in &self.effects {
             registry.register(effect.descriptor());
         }
@@ -187,6 +219,22 @@ impl EffectEntry {
 
     fn validate(&self) -> Result<(), PluginError> {
         let mut keys: Vec<&str> = Vec::new();
+        if self.shader.is_some() {
+            let floats: usize = self
+                .params
+                .iter()
+                .map(|p| match p.decl {
+                    ParamDecl::Point { .. } => 2,
+                    ParamDecl::Color { .. } => 4,
+                    _ => 1,
+                })
+                .sum();
+            if floats > MAX_SHADER_FLOATS {
+                return Err(self.bad(format!(
+                    "a shader effect packs its parameters into {MAX_SHADER_FLOATS} floats, this needs {floats}"
+                )));
+            }
+        }
         for p in &self.params {
             if p.key.is_empty() || keys.contains(&p.key.as_str()) {
                 return Err(self.bad(format!("parameter key {:?} is empty or repeated", p.key)));
@@ -232,6 +280,9 @@ impl EffectEntry {
             };
             d = d.with_param(ParamDescriptor::new(&p.key, &p.label, kind, &p.hint));
         }
+        if let Some(source) = &self.shader_source {
+            d = d.with_shader(source.clone());
+        }
         d
     }
 }
@@ -258,6 +309,17 @@ pub fn load_dir(
     root: &Path,
     registry: &mut EffectRegistry,
 ) -> Vec<(PathBuf, Result<String, PluginError>)> {
+    load_dir_checked(root, registry, &|_| Ok(()))
+}
+
+/// [`load_dir`], with `check` run over every effect shader before anything is
+/// registered. The host passes the renderer's validator, so a shader the GPU
+/// would refuse rejects its plugin here rather than failing at the first frame.
+pub fn load_dir_checked(
+    root: &Path,
+    registry: &mut EffectRegistry,
+    check: &dyn Fn(&str) -> Result<(), String>,
+) -> Vec<(PathBuf, Result<String, PluginError>)> {
     let Ok(read) = fs::read_dir(root) else { return Vec::new() };
     let mut dirs: Vec<PathBuf> =
         read.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect();
@@ -265,6 +327,11 @@ pub fn load_dir(
     dirs.into_iter()
         .map(|dir| {
             let outcome = Manifest::load(&dir).and_then(|m| {
+                for e in &m.effects {
+                    if let Some(src) = &e.shader_source {
+                        check(src).map_err(|problem| e.bad(format!("shader: {problem}")))?;
+                    }
+                }
                 m.register(registry)?;
                 Ok(m.id)
             });

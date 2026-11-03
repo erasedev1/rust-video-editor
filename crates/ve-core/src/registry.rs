@@ -217,6 +217,10 @@ pub struct EffectDescriptor {
     pub summary: String,
     /// In the order the inspector shows them.
     pub params: Vec<ParamDescriptor>,
+    /// WGSL source of a plugin effect's render program, if it has one. The
+    /// renderer decides what the source must define; the registry only carries
+    /// it from the plugin that supplied it to the renderer that runs it.
+    pub shader: Option<String>,
 }
 
 impl EffectDescriptor {
@@ -227,7 +231,13 @@ impl EffectDescriptor {
             category,
             summary: summary.to_string(),
             params: Vec::new(),
+            shader: None,
         }
+    }
+
+    pub fn with_shader(mut self, source: impl Into<String>) -> Self {
+        self.shader = Some(source.into());
+        self
     }
 
     pub fn with_param(mut self, param: ParamDescriptor) -> Self {

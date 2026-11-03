@@ -43,7 +43,8 @@ pub mod transform;
 
 pub use cache::{CompositeCache, CompositeCacheStats, CompositeKey};
 pub use effects::{
-    chain_passes, passes_for, three_way_response, white_balance_gains, EffectPass, Program,
+    chain_passes, passes_for, plugin_shader_source, three_way_response, validate_plugin_shader,
+    white_balance_gains, EffectPass, Program,
 };
 pub use gpu::GpuContext;
 pub use renderer::{Layer, Renderer};

@@ -61,7 +61,9 @@ fn plugin_dir() -> Option<PathBuf> {
 fn load_plugins() {
     let mut registry = ve_core::builtin_registry().clone();
     if let Some(dir) = plugin_dir() {
-        for (path, outcome) in ve_plugin::load_dir(&dir, &mut registry) {
+        for (path, outcome) in
+            ve_plugin::load_dir_checked(&dir, &mut registry, &ve_render::validate_plugin_shader)
+        {
             match outcome {
                 Ok(id) => log::info!("plugin {id} loaded from {}", path.display()),
                 Err(e) => log::warn!("plugin at {} skipped: {e}", path.display()),

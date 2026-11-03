@@ -76,3 +76,39 @@ fn an_installed_registry_is_the_one_the_editor_resolves_against() {
     assert!(active_registry().get("acme.glow").is_some());
     assert!(builtin_registry().get("acme.glow").is_none());
 }
+
+#[test]
+fn a_shader_is_read_from_beside_the_manifest_and_must_stay_inside() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("p");
+    std::fs::create_dir(&dir).unwrap();
+    let with =
+        |path: &str| GOOD.replace("\"summary\"", &format!("\"shader\": {path:?}, \"summary\""));
+
+    std::fs::write(dir.join("plugin.json"), with("glow.wgsl")).unwrap();
+    assert!(Manifest::load(&dir).is_err(), "a missing shader file is an error");
+
+    std::fs::write(
+        dir.join("glow.wgsl"),
+        "fn effect(uv: vec2<f32>, c: vec4<f32>) -> vec4<f32> { return c; }",
+    )
+    .unwrap();
+    let m = Manifest::load(&dir).unwrap();
+    let mut reg = builtin_registry().clone();
+    m.register(&mut reg).unwrap();
+    assert!(reg.get("acme.glow").unwrap().shader.is_some());
+
+    std::fs::write(dir.join("plugin.json"), with("../outside.wgsl")).unwrap();
+    assert!(Manifest::load(&dir).is_err());
+
+    // Parsed without a directory, a shader cannot have been read, so it will not register.
+    let parsed = Manifest::parse(&with("glow.wgsl")).unwrap();
+    assert!(parsed.register(&mut builtin_registry().clone()).is_err());
+
+    // A host's check can refuse the plugin.
+    std::fs::write(dir.join("plugin.json"), with("glow.wgsl")).unwrap();
+    let mut reg = builtin_registry().clone();
+    let out = ve_plugin::load_dir_checked(root.path(), &mut reg, &|_| Err("no".into()));
+    assert!(out[0].1.is_err());
+    assert!(!reg.contains("acme.glow"));
+}

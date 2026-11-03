@@ -17,6 +17,8 @@ bytemuck = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 pollster = { workspace = true }
+naga = { version = "30", features = ["wgsl-in"] }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

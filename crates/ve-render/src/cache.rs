@@ -109,6 +109,7 @@ impl CompositeKey {
         size.hash(&mut hasher);
         color_space.hash(&mut hasher);
         pass.program().hash(&mut hasher);
+        pass.plugin_kind().hash(&mut hasher);
         pass.uniform_bytes().hash(&mut hasher);
         CompositeKey(hasher.finish())
     }
